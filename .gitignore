@@ -1,7 +1,7 @@
-*.env
-!*.env.example
+.env
+*.key
+secrets/
 __pycache__/
 *.pyc
-logs/
-data/
-venv/
+*.log
+node_modules/
