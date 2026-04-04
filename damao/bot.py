@@ -208,7 +208,7 @@ async def subscription_gen(prompt: str):
 
         # 用stream-json+verbose获取工具步骤
         proc = await asyncio.create_subprocess_exec(
-            "claude", "-p", prompt,
+            "claude", "-p", prompt, "--add-dir", "/root",
             "--append-system-prompt", SYSTEM_PROMPT,
             "--output-format", "stream-json",
             "--verbose",
@@ -258,7 +258,7 @@ async def subscription_gen(prompt: str):
         else:
             # 回退：重新用text格式跑一次
             proc2 = await asyncio.create_subprocess_exec(
-                "claude", "-p", prompt,
+                "claude", "-p", prompt, "--add-dir", "/root",
                 "--append-system-prompt", SYSTEM_PROMPT,
                 "--output-format", "text",
                 stdout=asyncio.subprocess.PIPE,
