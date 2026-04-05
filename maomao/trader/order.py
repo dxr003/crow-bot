@@ -230,7 +230,7 @@ def set_take_profit(symbol: str, tp_price: float) -> str:
             quantity=qty,
             reduce_only=True,
         )
-        order_id = resp.get("orderId") or resp.get("newClientStrategyId", "?")
+        order_id = resp.get("algoId") or resp.get("orderId") or resp.get("newClientStrategyId", "?")
         results.append(f"  ✅ {direction}仓止盈 @ {price} (订单 {order_id})")
 
     return f"🎯 止盈已设 {symbol}\n" + "\n".join(results)
@@ -260,7 +260,7 @@ def set_stop_loss(symbol: str, sl_price: float) -> str:
             quantity=qty,
             reduce_only=True,
         )
-        order_id = resp.get("orderId") or resp.get("newClientStrategyId", "?")
+        order_id = resp.get("algoId") or resp.get("orderId") or resp.get("newClientStrategyId", "?")
         results.append(f"  🛡️ {direction}仓止损 @ {price} (订单 {order_id})")
 
     return f"🛡️ 止损已设 {symbol}\n" + "\n".join(results)

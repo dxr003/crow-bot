@@ -107,7 +107,7 @@ def get_positions(symbol: str | None = None) -> list[dict]:
 
 
 # ============================================================
-# 条件单 — 走 /fapi/v1/conditional/order 端点
+# 条件单 — 走 /fapi/v1/algoOrder 端点（ALGO条件单）
 # ============================================================
 
 def place_conditional_order(
@@ -119,20 +119,21 @@ def place_conditional_order(
     reduce_only: bool = True,
 ) -> dict:
     """
-    下条件单(止盈/止损)，使用 Binance conditional order 端点
+    下条件单(止盈/止损)，使用 Binance Algo Order 端点
     order_type: STOP_MARKET / TAKE_PROFIT_MARKET
     """
     import requests
 
     get_client()  # 确保 _api_key/_secret_key 已初始化
     base_url = "https://fapi.binance.com"
-    endpoint = "/fapi/v1/conditional/order"
+    endpoint = "/fapi/v1/algoOrder"
 
     params = {
         "symbol": symbol,
         "side": side,
         "type": order_type,
-        "stopPrice": str(stop_price),
+        "algoType": "CONDITIONAL",
+        "triggerPrice": str(stop_price),
         "quantity": str(quantity),
         "reduceOnly": "true" if reduce_only else "false",
         "timestamp": str(int(time.time() * 1000)),
