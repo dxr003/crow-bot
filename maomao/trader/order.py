@@ -1,4 +1,5 @@
-# 下单执行引擎 — 基础交易动作（市价/限价/止盈/止损/强平价/平仓）
+# 下单执行引擎 — 基础交易动作
+# v1.1 修复: execute()补tp/sl路由 + _close()支持方向过滤(平多/平空)
 from trader.exchange import (
     get_client, get_mark_price, get_positions,
     fix_qty, fix_price, check_min_notional,
@@ -7,11 +8,6 @@ from trader.exchange import (
 
 
 def execute(order: dict) -> str:
-    """
-    执行交易指令。
-    order 是 parser.parse() 返回的标准 JSON。
-    返回人类可读的执行结果字符串。
-    """
     action = order.get("action")
 
     if action == "open_long":
@@ -22,6 +18,14 @@ def execute(order: dict) -> str:
         return _add(order)
     elif action == "close":
         return _close(order)
+    elif action == "close_long":
+        return _close(order, direction="long")
+    elif action == "close_short":
+        return _close(order, direction="short")
+    elif action == "tp":
+        return _set_tp(order)
+    elif action == "sl":
+        return _set_sl(order)
     elif action == "buy":
         return "⚠️ 现货买入暂未开放"
     elif action == "sell":
@@ -34,12 +38,37 @@ def execute(order: dict) -> str:
         return f"❌ 未知动作: {action}"
 
 
-# ── 市价开仓 ──────────────────────────────────────────
+# ============================================================
+# 止盈止损 (新增路由)
+# ============================================================
+
+def _set_tp(order: dict) -> str:
+    """止盈 — 从 order["price"] 取目标价"""
+    symbol = order.get("symbol")
+    tp_price = order.get("price")
+    if not symbol:
+        return "❌ 缺少交易标的（如 止盈 BTC 90000）"
+    if not tp_price:
+        return "❌ 缺少止盈价格（如 止盈 BTC 90000）"
+    return set_take_profit(symbol, tp_price)
+
+
+def _set_sl(order: dict) -> str:
+    """止损 — 从 order["price"] 取目标价"""
+    symbol = order.get("symbol")
+    sl_price = order.get("price")
+    if not symbol:
+        return "❌ 缺少交易标的（如 止损 ETH 2800）"
+    if not sl_price:
+        return "❌ 缺少止损价格（如 止损 ETH 2800）"
+    return set_stop_loss(symbol, sl_price)
+
+
+# ============================================================
+# 开仓
+# ============================================================
+
 def _open(order: dict, side: str) -> str:
-    """
-    市价开多/开空。
-    支持：市价 / 限价 / 强平价挂单。
-    """
     symbol = order.get("symbol")
     usdt = order.get("usdt")
     leverage = order.get("leverage", 10)
@@ -53,8 +82,6 @@ def _open(order: dict, side: str) -> str:
         return "❌ 缺少投入金额（如 100）"
 
     client = get_client()
-
-    # 设置杠杆和仓位模式
     set_margin_mode(symbol, margin_mode)
     set_leverage(symbol, leverage)
 
@@ -62,14 +89,12 @@ def _open(order: dict, side: str) -> str:
     order_side = "BUY" if side == "long" else "SELL"
     direction = "多" if side == "long" else "空"
 
-    # ── 强平价挂单 ────────────────────────────────────
+    # ---- 强平价开单 ----
     if price_type == "liq":
-        # 取对方持仓的强平价作为限价
         positions = get_positions(symbol)
         liq_price = None
         for pos in positions:
             amt = float(pos["positionAmt"])
-            # 做多找空仓强平价，做空找多仓强平价
             pos_side = "long" if amt > 0 else "short"
             if pos_side != side:
                 liq_price = float(pos.get("liquidationPrice", 0))
@@ -84,13 +109,9 @@ def _open(order: dict, side: str) -> str:
         qty = fix_qty(symbol, raw_qty)
         check_min_notional(symbol, qty, liq_price)
 
-        result = client.futures_create_order(
-            symbol=symbol,
-            side=order_side,
-            type="LIMIT",
-            price=liq_price,
-            quantity=qty,
-            timeInForce="GTC",
+        result = client.new_order(
+            symbol=symbol, side=order_side, type="LIMIT",
+            price=liq_price, quantity=qty, timeInForce="GTC",
         )
         return (
             f"📌 强平价限价单 开{direction} {symbol}\n"
@@ -101,7 +122,7 @@ def _open(order: dict, side: str) -> str:
             f"   订单号: {result.get('orderId', '?')}"
         )
 
-    # ── 限价挂单 ──────────────────────────────────────
+    # ---- 限价开单 ----
     if price_type == "limit":
         if not limit_price:
             return "❌ 限价开单需要指定价格（如 限价 85000）"
@@ -111,13 +132,9 @@ def _open(order: dict, side: str) -> str:
         qty = fix_qty(symbol, raw_qty)
         check_min_notional(symbol, qty, limit_price)
 
-        result = client.futures_create_order(
-            symbol=symbol,
-            side=order_side,
-            type="LIMIT",
-            price=limit_price,
-            quantity=qty,
-            timeInForce="GTC",
+        result = client.new_order(
+            symbol=symbol, side=order_side, type="LIMIT",
+            price=limit_price, quantity=qty, timeInForce="GTC",
         )
         return (
             f"📌 限价单 开{direction} {symbol}\n"
@@ -127,17 +144,14 @@ def _open(order: dict, side: str) -> str:
             f"   订单号: {result.get('orderId', '?')}"
         )
 
-    # ── 市价开仓（默认）──────────────────────────────
+    # ---- 市价开单 ----
     mark = get_mark_price(symbol)
     raw_qty = (usdt * leverage) / mark
     qty = fix_qty(symbol, raw_qty)
     check_min_notional(symbol, qty, mark)
 
-    result = client.futures_create_order(
-        symbol=symbol,
-        side=order_side,
-        type="MARKET",
-        quantity=qty,
+    result = client.new_order(
+        symbol=symbol, side=order_side, type="MARKET", quantity=qty,
     )
     return (
         f"✅ 市价开{direction} {symbol}\n"
@@ -148,12 +162,11 @@ def _open(order: dict, side: str) -> str:
     )
 
 
-# ── 止盈单 ────────────────────────────────────────────
+# ============================================================
+# 止盈 / 止损
+# ============================================================
+
 def set_take_profit(symbol: str, tp_price: float) -> str:
-    """
-    设置止盈单。根据现有持仓方向自动判断。
-    指令示例：止盈 BTC 90000
-    """
     client = get_client()
     positions = get_positions(symbol)
     if not positions:
@@ -170,28 +183,16 @@ def set_take_profit(symbol: str, tp_price: float) -> str:
         qty = fix_qty(symbol, abs(amt))
         price = fix_price(symbol, tp_price)
 
-        order = client.futures_create_order(
-            symbol=symbol,
-            side=close_side,
-            type="TAKE_PROFIT_MARKET",
-            stopPrice=price,
-            quantity=qty,
-            reduceOnly=True,
-            timeInForce="GTE_GTC",
+        order = client.new_order(
+            symbol=symbol, side=close_side, type="TAKE_PROFIT_MARKET",
+            stopPrice=price, quantity=qty, reduceOnly=True, timeInForce="GTE_GTC",
         )
-        results.append(
-            f"  ✅ {direction}仓止盈 @ {price} (订单 {order.get('orderId', '?')})"
-        )
+        results.append(f"  ✅ {direction}仓止盈 @ {price} (订单 {order.get('orderId', '?')})")
 
     return f"🎯 止盈已设 {symbol}\n" + "\n".join(results)
 
 
-# ── 止损单 ────────────────────────────────────────────
 def set_stop_loss(symbol: str, sl_price: float) -> str:
-    """
-    设置止损单。根据现有持仓方向自动判断。
-    指令示例：止损 BTC 80000
-    """
     client = get_client()
     positions = get_positions(symbol)
     if not positions:
@@ -208,25 +209,20 @@ def set_stop_loss(symbol: str, sl_price: float) -> str:
         qty = fix_qty(symbol, abs(amt))
         price = fix_price(symbol, sl_price)
 
-        order = client.futures_create_order(
-            symbol=symbol,
-            side=close_side,
-            type="STOP_MARKET",
-            stopPrice=price,
-            quantity=qty,
-            reduceOnly=True,
-            timeInForce="GTE_GTC",
+        order = client.new_order(
+            symbol=symbol, side=close_side, type="STOP_MARKET",
+            stopPrice=price, quantity=qty, reduceOnly=True, timeInForce="GTE_GTC",
         )
-        results.append(
-            f"  🛡️ {direction}仓止损 @ {price} (订单 {order.get('orderId', '?')})"
-        )
+        results.append(f"  🛡️ {direction}仓止损 @ {price} (订单 {order.get('orderId', '?')})")
 
     return f"🛡️ 止损已设 {symbol}\n" + "\n".join(results)
 
 
-# ── 加仓 ──────────────────────────────────────────────
+# ============================================================
+# 加仓
+# ============================================================
+
 def _add(order: dict) -> str:
-    """加仓：沿用现有持仓方向和杠杆"""
     symbol = order.get("symbol")
     usdt = order.get("usdt")
 
@@ -247,9 +243,16 @@ def _add(order: dict) -> str:
     return _open(order, side=side)
 
 
-# ── 平仓 ──────────────────────────────────────────────
-def _close(order: dict) -> str:
-    """市价全平当前持仓"""
+# ============================================================
+# 平仓 (支持方向过滤)
+# ============================================================
+
+def _close(order: dict, direction: str | None = None) -> str:
+    """
+    direction=None  → 全平(原逻辑)
+    direction="long" → 只平多仓
+    direction="short" → 只平空仓
+    """
     symbol = order.get("symbol")
     if not symbol:
         return "❌ 缺少交易标的"
@@ -263,19 +266,24 @@ def _close(order: dict) -> str:
     results = []
     for pos in positions:
         amt = float(pos["positionAmt"])
+        pos_dir = "long" if amt > 0 else "short"
+
+        # 方向过滤: 指定了方向就只平对应方向
+        if direction and pos_dir != direction:
+            continue
+
         close_side = "SELL" if amt > 0 else "BUY"
         qty = fix_qty(symbol, abs(amt))
-        direction = "多" if amt > 0 else "空"
+        dir_text = "多" if amt > 0 else "空"
 
-        result = client.futures_create_order(
-            symbol=symbol,
-            side=close_side,
-            type="MARKET",
-            quantity=qty,
-            reduceOnly=True,
+        result = client.new_order(
+            symbol=symbol, side=close_side, type="MARKET",
+            quantity=qty, reduceOnly=True,
         )
-        results.append(
-            f"  ✅ 平{direction} {qty} (订单 {result.get('orderId', '?')})"
-        )
+        results.append(f"  ✅ 平{dir_text} {qty} (订单 {result.get('orderId', '?')})")
+
+    if not results:
+        dir_text = "多" if direction == "long" else "空"
+        return f"⚠️ {symbol} 无{dir_text}仓可平"
 
     return f"✅ 已平仓 {symbol}\n" + "\n".join(results)
