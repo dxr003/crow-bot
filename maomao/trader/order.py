@@ -226,14 +226,17 @@ def set_take_profit(symbol: str, tp_price: float) -> str:
             symbol=symbol,
             side=close_side,
             order_type="TAKE_PROFIT_MARKET",
-            stop_price=price,
+            trigger_price=price,
             quantity=qty,
             reduce_only=True,
         )
-        order_id = resp.get("algoId") or resp.get("orderId") or resp.get("newClientStrategyId", "?")
-        results.append(f"  ✅ {direction}仓止盈 @ {price} (订单 {order_id})")
+        algo_id = resp.get("algoId", "?")
+        results.append(f"  ✅ {direction}仓止盈 @ {price} (algoId {algo_id})")
 
-    return f"🎯 止盈已设 {symbol}\n" + "\n".join(results)
+    return f"🎯 止盈已设 {symbol}
+" + "
+".join(results)
+
 
 
 def set_stop_loss(symbol: str, sl_price: float) -> str:
@@ -256,19 +259,18 @@ def set_stop_loss(symbol: str, sl_price: float) -> str:
             symbol=symbol,
             side=close_side,
             order_type="STOP_MARKET",
-            stop_price=price,
+            trigger_price=price,
             quantity=qty,
             reduce_only=True,
         )
-        order_id = resp.get("algoId") or resp.get("orderId") or resp.get("newClientStrategyId", "?")
-        results.append(f"  🛡️ {direction}仓止损 @ {price} (订单 {order_id})")
+        algo_id = resp.get("algoId", "?")
+        results.append(f"  🛡️ {direction}仓止损 @ {price} (algoId {algo_id})")
 
-    return f"🛡️ 止损已设 {symbol}\n" + "\n".join(results)
+    return f"🛡️ 止损已设 {symbol}
+" + "
+".join(results)
 
 
-# ============================================================
-# 加仓
-# ============================================================
 
 def _add(order: dict) -> str:
     symbol = order.get("symbol")

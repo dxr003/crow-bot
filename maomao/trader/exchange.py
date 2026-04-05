@@ -1,12 +1,13 @@
 """
-exchange.py — 币安合约连接器 v1.2.2
-单例客户端 + 精度修正 + 持仓查询 + 条件单(止盈止损)
+exchange.py — 币安合约连接器 v1.2.3
+单例客户端 + 精度修正 + 持仓查询 + 条件单(algoOrder)
 """
 
 import os
 import time
 import hmac
 import hashlib
+import requests
 from urllib.parse import urlencode
 from functools import lru_cache
 from decimal import Decimal, ROUND_DOWN
@@ -31,7 +32,6 @@ def get_client() -> UMFutures:
 
 @lru_cache(maxsize=128)
 def get_filters(symbol: str) -> dict:
-    """返回 stepSize / tickSize / minNotional"""
     client = get_client()
     info = client.exchange_info()
     for s in info["symbols"]:
@@ -56,15 +56,13 @@ def _step_precision(step: str) -> int:
 def fix_qty(symbol: str, qty: float) -> float:
     filters = get_filters(symbol)
     step = filters["stepSize"]
-    result = float(Decimal(str(qty)).quantize(Decimal(step), rounding=ROUND_DOWN))
-    return result
+    return float(Decimal(str(qty)).quantize(Decimal(step), rounding=ROUND_DOWN))
 
 
 def fix_price(symbol: str, price: float) -> float:
     filters = get_filters(symbol)
     tick = filters["tickSize"]
-    result = float(Decimal(str(price)).quantize(Decimal(tick), rounding=ROUND_DOWN))
-    return result
+    return float(Decimal(str(price)).quantize(Decimal(tick), rounding=ROUND_DOWN))
 
 
 def check_min_notional(symbol: str, qty: float, price: float) -> None:
@@ -72,9 +70,7 @@ def check_min_notional(symbol: str, qty: float, price: float) -> None:
     min_notional = filters.get("minNotional", 5.0)
     notional = qty * price
     if notional < min_notional:
-        raise ValueError(
-            f"{symbol} 名义价值 {notional:.2f}U 低于最小要求 {min_notional}U"
-        )
+        raise ValueError(f"{symbol} 名义价值 {notional:.2f}U < 最小 {min_notional}U")
 
 
 def get_mark_price(symbol: str) -> float:
@@ -107,55 +103,67 @@ def get_positions(symbol: str | None = None) -> list[dict]:
 
 
 # ============================================================
-# 条件单 — 走 /fapi/v1/algoOrder 端点（ALGO条件单）
+# 条件单 — POST /fapi/v1/algoOrder
+# 2025-12-09起 STOP_MARKET/TAKE_PROFIT_MARKET 必须走此端点
 # ============================================================
+
+def _sign(params: dict) -> str:
+    """HMAC SHA256 签名"""
+    query = urlencode(params)
+    return hmac.new(
+        _secret_key.encode("utf-8"),
+        query.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
 
 def place_conditional_order(
     symbol: str,
     side: str,
     order_type: str,
-    stop_price: float,
-    quantity: float,
+    trigger_price: float,
+    quantity: float = 0,
     reduce_only: bool = True,
+    close_position: bool = False,
 ) -> dict:
     """
-    下条件单(止盈/止损)，使用 Binance Algo Order 端点
-    order_type: STOP_MARKET / TAKE_PROFIT_MARKET
+    下条件单(止盈/止损)
+    order_type: STOP_MARKET / TAKE_PROFIT_MARKET / TRAILING_STOP_MARKET
+    trigger_price: 触发价格
+    close_position: True=触发时平掉该方向全部仓位(此时不传quantity)
     """
-    import requests
-
-    get_client()  # 确保 _api_key/_secret_key 已初始化
-    base_url = "https://fapi.binance.com"
-    endpoint = "/fapi/v1/algoOrder"
+    get_client()  # 确保 credentials 已初始化
 
     params = {
+        "algoType": "CONDITIONAL",
         "symbol": symbol,
         "side": side,
         "type": order_type,
-        "algoType": "CONDITIONAL",
-        "triggerPrice": str(stop_price),
-        "quantity": str(quantity),
-        "reduceOnly": "true" if reduce_only else "false",
+        "triggerPrice": str(trigger_price),
         "timestamp": str(int(time.time() * 1000)),
     }
 
-    # HMAC SHA256 签名
-    query_string = urlencode(params)
-    signature = hmac.new(
-        _secret_key.encode("utf-8"),
-        query_string.encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
-    params["signature"] = signature
+    if close_position:
+        params["closePosition"] = "true"
+    else:
+        params["quantity"] = str(quantity)
+        if reduce_only:
+            params["reduceOnly"] = "true"
+
+    params["signature"] = _sign(params)
 
     headers = {"X-MBX-APIKEY": _api_key}
-    resp = requests.post(f"{base_url}{endpoint}", params=params, headers=headers)
+    resp = requests.post(
+        "https://fapi.binance.com/fapi/v1/algoOrder",
+        params=params,
+        headers=headers,
+    )
     data = resp.json()
 
     if resp.status_code != 200:
         code = data.get("code", "?")
         msg = data.get("msg", str(data))
-        raise Exception(f"({resp.status_code}, {code}, '{msg}')")
+        raise Exception(f"Algo Order 失败: ({code}) {msg}")
 
     return data
 
