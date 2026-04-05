@@ -1,9 +1,13 @@
 """
-exchange.py — 币安合约连接器
-单例客户端 + 精度修正 + 持仓查询
+exchange.py — 币安合约连接器 v1.2.2
+单例客户端 + 精度修正 + 持仓查询 + 条件单(止盈止损)
 """
 
 import os
+import time
+import hmac
+import hashlib
+from urllib.parse import urlencode
 from functools import lru_cache
 from decimal import Decimal, ROUND_DOWN
 from dotenv import load_dotenv
@@ -12,14 +16,16 @@ from binance.um_futures import UMFutures
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
 
 _client: UMFutures | None = None
+_api_key: str = ""
+_secret_key: str = ""
 
 
 def get_client() -> UMFutures:
-    global _client
+    global _client, _api_key, _secret_key
     if _client is None:
-        api_key = os.getenv("BINANCE_API_KEY", "")
-        secret_key = os.getenv("BINANCE_SECRET_KEY", "")
-        _client = UMFutures(key=api_key, secret=secret_key)
+        _api_key = os.getenv("BINANCE_API_KEY", "")
+        _secret_key = os.getenv("BINANCE_SECRET_KEY", "")
+        _client = UMFutures(key=_api_key, secret=_secret_key)
     return _client
 
 
@@ -43,7 +49,6 @@ def get_filters(symbol: str) -> dict:
 
 
 def _step_precision(step: str) -> int:
-    """从 stepSize/tickSize 字符串推算小数位数"""
     d = Decimal(step)
     return max(0, -d.as_tuple().exponent)
 
@@ -51,7 +56,6 @@ def _step_precision(step: str) -> int:
 def fix_qty(symbol: str, qty: float) -> float:
     filters = get_filters(symbol)
     step = filters["stepSize"]
-    precision = _step_precision(step)
     result = float(Decimal(str(qty)).quantize(Decimal(step), rounding=ROUND_DOWN))
     return result
 
@@ -64,7 +68,6 @@ def fix_price(symbol: str, price: float) -> float:
 
 
 def check_min_notional(symbol: str, qty: float, price: float) -> None:
-    """名义价值不足时抛出 ValueError"""
     filters = get_filters(symbol)
     min_notional = filters.get("minNotional", 5.0)
     notional = qty * price
@@ -86,7 +89,6 @@ def set_leverage(symbol: str, leverage: int) -> dict:
 
 
 def set_margin_mode(symbol: str, mode: str) -> dict | None:
-    """mode: 'CROSSED'/'cross' 或 'ISOLATED'/'isolated'，-4046(已是该模式)静默忽略"""
     mode_map = {"cross": "CROSSED", "isolated": "ISOLATED"}
     mode = mode_map.get(mode.lower(), mode.upper())
     client = get_client()
@@ -99,10 +101,62 @@ def set_margin_mode(symbol: str, mode: str) -> dict | None:
 
 
 def get_positions(symbol: str | None = None) -> list[dict]:
-    """返回 positionAmt != 0 的持仓列表"""
     client = get_client()
     data = client.get_position_risk(symbol=symbol) if symbol else client.get_position_risk()
     return [p for p in data if float(p.get("positionAmt", 0)) != 0]
+
+
+# ============================================================
+# 条件单 — 走 /fapi/v1/conditional/order 端点
+# ============================================================
+
+def place_conditional_order(
+    symbol: str,
+    side: str,
+    order_type: str,
+    stop_price: float,
+    quantity: float,
+    reduce_only: bool = True,
+) -> dict:
+    """
+    下条件单(止盈/止损)，使用 Binance conditional order 端点
+    order_type: STOP_MARKET / TAKE_PROFIT_MARKET
+    """
+    import requests
+
+    get_client()  # 确保 _api_key/_secret_key 已初始化
+    base_url = "https://fapi.binance.com"
+    endpoint = "/fapi/v1/conditional/order"
+
+    params = {
+        "symbol": symbol,
+        "side": side,
+        "type": order_type,
+        "stopPrice": str(stop_price),
+        "quantity": str(quantity),
+        "reduceOnly": "true" if reduce_only else "false",
+        "timestamp": str(int(time.time() * 1000)),
+    }
+
+    # HMAC SHA256 签名
+    query_string = urlencode(params)
+    signature = hmac.new(
+        _secret_key.encode("utf-8"),
+        query_string.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    params["signature"] = signature
+
+    headers = {"X-MBX-APIKEY": _api_key}
+    resp = requests.post(f"{base_url}{endpoint}", params=params, headers=headers)
+    data = resp.json()
+
+    if resp.status_code != 200:
+        code = data.get("code", "?")
+        msg = data.get("msg", str(data))
+        raise Exception(f"({resp.status_code}, {code}, '{msg}')")
+
+    return data
 
 
 def ping() -> str:

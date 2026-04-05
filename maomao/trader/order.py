@@ -1,15 +1,16 @@
 """
-下单执行引擎 v1.2
-基础交易动作 + 复合指令(开仓+止盈止损一条搞定)
+下单执行引擎 v1.2.2
+止盈止损走 conditional order 端点
 
-v1.2 变更:
-  - execute()自动处理 tp_price/sl_price 附加条件
-  - 开仓成功后自动挂止盈止损单
+v1.2.2 变更:
+  - set_take_profit / set_stop_loss 改用 place_conditional_order()
+  - 修复 leverage 默认值 (or 10)
 """
 from trader.exchange import (
     get_client, get_mark_price, get_positions,
     fix_qty, fix_price, check_min_notional,
     set_leverage, set_margin_mode,
+    place_conditional_order,
 )
 
 
@@ -49,17 +50,14 @@ def execute(order: dict) -> str:
 # ============================================================
 
 def _open_with_extras(order: dict, side: str) -> str:
-    """开仓主逻辑 + 检查附加止盈止损"""
     result = _open(order, side=side)
 
-    # 开仓失败就不挂止盈止损
     if result.startswith("❌"):
         return result
 
     symbol = order.get("symbol")
     extras = []
 
-    # 附加止盈
     tp = order.get("tp_price")
     if tp and symbol:
         try:
@@ -68,7 +66,6 @@ def _open_with_extras(order: dict, side: str) -> str:
         except Exception as e:
             extras.append(f"⚠️ 止盈挂单失败: {e}")
 
-    # 附加止损
     sl = order.get("sl_price")
     if sl and symbol:
         try:
@@ -84,7 +81,7 @@ def _open_with_extras(order: dict, side: str) -> str:
 
 
 # ============================================================
-# 止盈止损路由 (独立指令: "止盈 BTC 90000")
+# 止盈止损路由
 # ============================================================
 
 def _set_tp(order: dict) -> str:
@@ -206,11 +203,10 @@ def _open(order: dict, side: str) -> str:
 
 
 # ============================================================
-# 止盈 / 止损
+# 止盈 / 止损 — 走 conditional order 端点
 # ============================================================
 
 def set_take_profit(symbol: str, tp_price: float) -> str:
-    client = get_client()
     positions = get_positions(symbol)
     if not positions:
         return f"❌ {symbol} 无持仓，无法设止盈"
@@ -226,17 +222,21 @@ def set_take_profit(symbol: str, tp_price: float) -> str:
         qty = fix_qty(symbol, abs(amt))
         price = fix_price(symbol, tp_price)
 
-        order = client.new_order(
-            symbol=symbol, side=close_side, type="TAKE_PROFIT_MARKET",
-            stopPrice=price, quantity=qty, reduceOnly=True, timeInForce="GTE_GTC",
+        resp = place_conditional_order(
+            symbol=symbol,
+            side=close_side,
+            order_type="TAKE_PROFIT_MARKET",
+            stop_price=price,
+            quantity=qty,
+            reduce_only=True,
         )
-        results.append(f"  ✅ {direction}仓止盈 @ {price} (订单 {order.get('orderId', '?')})")
+        order_id = resp.get("orderId") or resp.get("newClientStrategyId", "?")
+        results.append(f"  ✅ {direction}仓止盈 @ {price} (订单 {order_id})")
 
     return f"🎯 止盈已设 {symbol}\n" + "\n".join(results)
 
 
 def set_stop_loss(symbol: str, sl_price: float) -> str:
-    client = get_client()
     positions = get_positions(symbol)
     if not positions:
         return f"❌ {symbol} 无持仓，无法设止损"
@@ -252,11 +252,16 @@ def set_stop_loss(symbol: str, sl_price: float) -> str:
         qty = fix_qty(symbol, abs(amt))
         price = fix_price(symbol, sl_price)
 
-        order = client.new_order(
-            symbol=symbol, side=close_side, type="STOP_MARKET",
-            stopPrice=price, quantity=qty, reduceOnly=True, timeInForce="GTE_GTC",
+        resp = place_conditional_order(
+            symbol=symbol,
+            side=close_side,
+            order_type="STOP_MARKET",
+            stop_price=price,
+            quantity=qty,
+            reduce_only=True,
         )
-        results.append(f"  🛡️ {direction}仓止损 @ {price} (订单 {order.get('orderId', '?')})")
+        order_id = resp.get("orderId") or resp.get("newClientStrategyId", "?")
+        results.append(f"  🛡️ {direction}仓止损 @ {price} (订单 {order_id})")
 
     return f"🛡️ 止损已设 {symbol}\n" + "\n".join(results)
 
