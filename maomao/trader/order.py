@@ -1,5 +1,11 @@
-# 下单执行引擎 — 基础交易动作
-# v1.1 修复: execute()补tp/sl路由 + _close()支持方向过滤(平多/平空)
+"""
+下单执行引擎 v1.2
+基础交易动作 + 复合指令(开仓+止盈止损一条搞定)
+
+v1.2 变更:
+  - execute()自动处理 tp_price/sl_price 附加条件
+  - 开仓成功后自动挂止盈止损单
+"""
 from trader.exchange import (
     get_client, get_mark_price, get_positions,
     fix_qty, fix_price, check_min_notional,
@@ -11,9 +17,9 @@ def execute(order: dict) -> str:
     action = order.get("action")
 
     if action == "open_long":
-        return _open(order, side="long")
+        return _open_with_extras(order, side="long")
     elif action == "open_short":
-        return _open(order, side="short")
+        return _open_with_extras(order, side="short")
     elif action == "add":
         return _add(order)
     elif action == "close":
@@ -39,13 +45,51 @@ def execute(order: dict) -> str:
 
 
 # ============================================================
-# 止盈止损 (新增路由)
+# 开仓 + 自动挂止盈止损
+# ============================================================
+
+def _open_with_extras(order: dict, side: str) -> str:
+    """开仓主逻辑 + 检查附加止盈止损"""
+    result = _open(order, side=side)
+
+    # 开仓失败就不挂止盈止损
+    if result.startswith("❌"):
+        return result
+
+    symbol = order.get("symbol")
+    extras = []
+
+    # 附加止盈
+    tp = order.get("tp_price")
+    if tp and symbol:
+        try:
+            tp_result = set_take_profit(symbol, tp)
+            extras.append(tp_result)
+        except Exception as e:
+            extras.append(f"⚠️ 止盈挂单失败: {e}")
+
+    # 附加止损
+    sl = order.get("sl_price")
+    if sl and symbol:
+        try:
+            sl_result = set_stop_loss(symbol, sl)
+            extras.append(sl_result)
+        except Exception as e:
+            extras.append(f"⚠️ 止损挂单失败: {e}")
+
+    if extras:
+        result += "\n---\n" + "\n".join(extras)
+
+    return result
+
+
+# ============================================================
+# 止盈止损路由 (独立指令: "止盈 BTC 90000")
 # ============================================================
 
 def _set_tp(order: dict) -> str:
-    """止盈 — 从 order["price"] 取目标价"""
     symbol = order.get("symbol")
-    tp_price = order.get("price")
+    tp_price = order.get("price") or order.get("tp_price")
     if not symbol:
         return "❌ 缺少交易标的（如 止盈 BTC 90000）"
     if not tp_price:
@@ -54,9 +98,8 @@ def _set_tp(order: dict) -> str:
 
 
 def _set_sl(order: dict) -> str:
-    """止损 — 从 order["price"] 取目标价"""
     symbol = order.get("symbol")
-    sl_price = order.get("price")
+    sl_price = order.get("price") or order.get("sl_price")
     if not symbol:
         return "❌ 缺少交易标的（如 止损 ETH 2800）"
     if not sl_price:
@@ -65,13 +108,13 @@ def _set_sl(order: dict) -> str:
 
 
 # ============================================================
-# 开仓
+# 开仓 (核心)
 # ============================================================
 
 def _open(order: dict, side: str) -> str:
     symbol = order.get("symbol")
     usdt = order.get("usdt")
-    leverage = order.get("leverage", 10)
+    leverage = order.get("leverage") or 10
     margin_mode = order.get("margin_mode", "cross")
     price_type = order.get("price_type", "market")
     limit_price = order.get("price")
@@ -79,7 +122,7 @@ def _open(order: dict, side: str) -> str:
     if not symbol:
         return "❌ 缺少交易标的（如 BTC）"
     if not usdt:
-        return "❌ 缺少投入金额（如 100）"
+        return "❌ 缺少投入金额（如 100 或 100u）"
 
     client = get_client()
     set_margin_mode(symbol, margin_mode)
@@ -248,11 +291,6 @@ def _add(order: dict) -> str:
 # ============================================================
 
 def _close(order: dict, direction: str | None = None) -> str:
-    """
-    direction=None  → 全平(原逻辑)
-    direction="long" → 只平多仓
-    direction="short" → 只平空仓
-    """
     symbol = order.get("symbol")
     if not symbol:
         return "❌ 缺少交易标的"
@@ -268,7 +306,6 @@ def _close(order: dict, direction: str | None = None) -> str:
         amt = float(pos["positionAmt"])
         pos_dir = "long" if amt > 0 else "short"
 
-        # 方向过滤: 指定了方向就只平对应方向
         if direction and pos_dir != direction:
             continue
 
