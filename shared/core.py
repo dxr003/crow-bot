@@ -181,6 +181,8 @@ def create_and_run_bot(env_path, claude_add_dir=None):
         else:
             if bot_dir == "damao":
                 gen = await claudecode_gen(prompt, add_dir=claude_add_dir or "/root", bot_dir=bot_dir)
+            elif bot_dir == "maomao":
+                gen = await claudecode_gen(prompt, add_dir="/root/maomao", bot_dir=bot_dir)
             else:
                 gen = await subscription_gen(prompt, system_prompt, claude_add_dir)
         await ask_with_timer(update, gen, mode, model)
