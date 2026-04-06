@@ -208,6 +208,17 @@ def cancel_all_orders(symbol: str) -> int:
     return cancelled
 
 
+def get_balance() -> dict:
+    """获取合约账户余额"""
+    client = get_client()
+    info = client.futures_account()
+    return {
+        "total":     float(info["totalWalletBalance"]),
+        "available": float(info["availableBalance"]),
+        "upnl":      float(info["totalUnrealizedProfit"]),
+    }
+
+
 def ping() -> str:
     try:
         client = get_client()

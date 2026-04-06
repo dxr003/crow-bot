@@ -53,7 +53,45 @@ def build_preview(order: dict) -> str:
     lines.append(f"<b>{symbol}</b>  {direction}  {leverage}x {margin_text}")
     lines.append("──────────────")
 
-    if action in ("open_long", "open_short", "add") and usdt:
+    liq_target = order.get("liq_target")
+
+    if action in ("open_long", "open_short", "add") and liq_target:
+        # ── 强平价反推模式 ──
+        lines.append(f"强平目标：{liq_target}")
+        try:
+            from trader.exchange import get_balance
+            entry = get_mark_price(symbol)
+            lines.append(f"标记价：{entry}")
+            mmr = 0.005
+            if usdt:
+                margin = usdt
+                margin_label = f"{usdt} USDT"
+            else:
+                bal = get_balance()
+                margin = bal["total"] * 0.95
+                margin_label = f"{margin:.1f} USDT（余额×95%）"
+            lines.append(f"保证金：{margin_label}")
+
+            if action in ("open_long", "add"):
+                denom = entry - liq_target * (1 - mmr)
+            else:
+                denom = liq_target * (1 + mmr) - entry
+
+            if denom > 0:
+                qty_raw = margin / denom
+                qty = fix_qty(symbol, qty_raw)
+                nominal = qty * entry
+                lev = max(1, min(125, round(nominal / margin)))
+                lines.append(f"名义价值：~{nominal:.1f} USDT")
+                lines.append(f"预估数量：{qty} {coin}")
+                lines.append(f"自动杠杆：~{lev}x")
+            else:
+                lines.append("⚠️ 强平价设置无效（方向与价格矛盾）")
+        except Exception as e:
+            lines.append(f"⚠️ 预估失败: {e}")
+
+    elif action in ("open_long", "open_short", "add") and usdt:
+        # ── 普通模式（金额+杠杆）──
         nominal = usdt * leverage
         lines.append(f"投入保证金：{usdt} USDT")
         lines.append(f"名义价值：~{nominal:.1f} USDT")
@@ -62,9 +100,6 @@ def build_preview(order: dict) -> str:
             if price_type == "limit" and limit_price:
                 ref_price = float(limit_price)
                 lines.append(f"挂单价：{ref_price}")
-            elif price_type == "liq":
-                lines.append(f"价格：对手强平价")
-                ref_price = None
             else:
                 ref_price = get_mark_price(symbol)
                 lines.append(f"标记价：{ref_price}")

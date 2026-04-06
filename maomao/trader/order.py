@@ -7,7 +7,7 @@ v1.2.2 变更:
   - 修复 leverage 默认值 (or 10)
 """
 from trader.exchange import (
-    get_client, get_mark_price, get_positions,
+    get_client, get_mark_price, get_positions, get_balance,
     fix_qty, fix_price, check_min_notional,
     set_leverage, set_margin_mode,
     place_conditional_order, cancel_all_orders,
@@ -18,8 +18,12 @@ def execute(order: dict) -> str:
     action = order.get("action")
 
     if action == "open_long":
+        if order.get("liq_target"):
+            return _open_liq(order, side="long")
         return _open_with_extras(order, side="long")
     elif action == "open_short":
+        if order.get("liq_target"):
+            return _open_liq(order, side="short")
         return _open_with_extras(order, side="short")
     elif action == "add":
         return _add(order)
@@ -347,3 +351,103 @@ def _close(order: dict, direction: str | None = None) -> str:
         results.append(f"  ⚠️ 撤单失败: {e}")
 
     return f"✅ 已平仓 {symbol}\n" + "\n".join(results)
+
+
+# ============================================================
+# 强平价反推开单
+# ============================================================
+
+def _open_liq(order: dict, side: str) -> str:
+    """
+    强平价反推开单：
+    - 不指定杠杆，由公式反推数量和实际杠杆
+    - 默认保证金 = 总余额 × 95%，也可通过 usdt 字段指定
+    - 公式（MMR=0.005）:
+        做多: qty = margin / (entry - liq_target × (1 - MMR))
+        做空: qty = margin / (liq_target × (1 + MMR) - entry)
+    """
+    symbol     = order.get("symbol")
+    liq_target = order.get("liq_target")
+    usdt_spec  = order.get("usdt")
+    MMR        = 0.005
+
+    if not symbol:
+        return "❌ 请指定币种"
+    if not liq_target:
+        return "❌ 请指定强平目标价（如：做多 SOL 强平 65）"
+
+    try:
+        entry = get_mark_price(symbol)
+    except Exception as e:
+        return f"❌ 获取价格失败: {e}"
+
+    # 保证金
+    if usdt_spec:
+        margin = float(usdt_spec)
+    else:
+        bal    = get_balance()
+        margin = bal["total"] * 0.95
+
+    if margin <= 0:
+        return "❌ 账户余额不足"
+
+    # 反推数量
+    if side == "long":
+        denom = entry - liq_target * (1 - MMR)
+        if denom <= 0:
+            return f"❌ 强平价 {liq_target} 须低于当前价 {entry}（做多）"
+    else:
+        denom = liq_target * (1 + MMR) - entry
+        if denom <= 0:
+            return f"❌ 强平价 {liq_target} 须高于当前价 {entry}（做空）"
+
+    qty_raw  = margin / denom
+    qty      = fix_qty(symbol, qty_raw)
+    nominal  = float(qty) * entry
+    leverage = max(1, min(125, round(nominal / margin)))
+
+    # 设置全仓 + 杠杆
+    client = get_client()
+    set_margin_mode(symbol, "cross")
+    set_leverage(symbol, leverage)
+
+    # 市价开单
+    open_side = "BUY" if side == "long" else "SELL"
+    try:
+        resp = client.new_order(
+            symbol=symbol, side=open_side,
+            type="MARKET", quantity=qty,
+        )
+    except Exception as e:
+        return f"❌ 开单失败: {e}"
+
+    order_id   = resp.get("orderId", "?")
+    direction  = "多" if side == "long" else "空"
+
+    result = (
+        f"✅ 强平价开{direction} {symbol}\n"
+        f"   保证金: {margin:.1f}U | 数量: {qty}\n"
+        f"   入场价: ~{entry} | 强平目标: {liq_target}\n"
+        f"   自动杠杆: {leverage}x\n"
+        f"   订单号: {order_id}"
+    )
+
+    # 附加止盈止损
+    extras = []
+    if order.get("tp_price"):
+        try:
+            r = set_take_profit(symbol, order["tp_price"])
+            extras.append(r)
+        except Exception as e:
+            extras.append(f"  ⚠️ 止盈失败: {e}")
+    if order.get("sl_price"):
+        try:
+            r = set_stop_loss(symbol, order["sl_price"])
+            extras.append(r)
+        except Exception as e:
+            extras.append(f"  ⚠️ 止损失败: {e}")
+
+    if extras:
+        result += "\n---\n" + "\n".join(extras)
+
+    return result

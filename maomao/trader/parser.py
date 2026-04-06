@@ -85,6 +85,7 @@ def parse(text: str) -> dict | None:
         "leverage": None,
         "usdt": None,
         "price": None,
+        "liq_target": None,    # 强平价目标（用于反推数量）
         "tp_price": None,      # 附加止盈价
         "sl_price": None,      # 附加止损价
         "trailing_tier": "moderate",
@@ -112,10 +113,13 @@ def parse(text: str) -> dict | None:
             result["margin_mode"] = MARGIN_MAP[t]
             continue
 
-        # ---- 价格类型(限价/强平) → 后面数字归 price ----
+        # ---- 价格类型(限价/强平) ----
         if t in PRICE_TYPE_MAP:
-            result["price_type"] = PRICE_TYPE_MAP[t]
-            next_num_target = "price"
+            ptype = PRICE_TYPE_MAP[t]
+            result["price_type"] = ptype
+            # 强平价模式：后面数字是强平目标价
+            # 限价模式：后面数字是入场价
+            next_num_target = "liq_target" if ptype == "liq" else "price"
             continue
 
         # ---- 动作 ----
@@ -163,7 +167,10 @@ def parse(text: str) -> dict | None:
         # ---- 纯数字: 根据上下文分配 ----
         if re.match(r"^\d+(\.\d+)?$", token):
             num = float(token)
-            if next_num_target == "price":
+            if next_num_target == "liq_target":
+                result["liq_target"] = num
+                next_num_target = None
+            elif next_num_target == "price":
                 result["price"] = num
                 next_num_target = None
             elif next_num_target == "tp":
