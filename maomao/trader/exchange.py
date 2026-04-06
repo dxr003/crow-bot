@@ -169,30 +169,42 @@ def place_conditional_order(
 
 
 def cancel_all_orders(symbol: str) -> int:
-    """撤销某币种所有普通挂单+条件单，返回撤销数量"""
-    client = get_client()
+    """撤销某币种所有普通挂单 + algoOrder 条件单（止盈/止损），返回撤销数量"""
+    get_client()  # 确保 credentials 已初始化
+    headers = {"X-MBX-APIKEY": _api_key}
     cancelled = 0
-    # 普通挂单
+
+    # 1. 普通挂单（旧版 LIMIT/STOP_MARKET 等）
     try:
-        client.cancel_open_orders(symbol=symbol)
+        params = {"symbol": symbol, "timestamp": str(int(time.time() * 1000))}
+        params["signature"] = _sign(params)
+        requests.delete("https://fapi.binance.com/fapi/v1/allOpenOrders",
+                        params=params, headers=headers)
         cancelled += 1
     except Exception:
         pass
-    # algoOrder 条件单
+
+    # 2. algoOrder 条件单（TP/SL — GET /fapi/v1/openAlgoOrders 再逐个 DELETE）
     try:
-        params = {
-            "symbol": symbol,
-            "timestamp": str(int(time.time() * 1000)),
-        }
-        params["signature"] = _sign(params)
-        headers = {"X-MBX-APIKEY": _api_key}
-        resp = requests.delete(
-            "https://fapi.binance.com/fapi/v1/allOpenOrders",
-            params=params,
-            headers=headers,
-        )
+        p = {"timestamp": str(int(time.time() * 1000))}
+        p["signature"] = _sign(p)
+        resp = requests.get("https://fapi.binance.com/fapi/v1/openAlgoOrders",
+                            params=p, headers=headers)
+        all_algo = resp.json() if resp.status_code == 200 else []
+        for o in (all_algo if isinstance(all_algo, list) else []):
+            if o.get("symbol") != symbol:
+                continue
+            algo_id = o.get("algoId")
+            if not algo_id:
+                continue
+            dp = {"algoId": str(algo_id), "timestamp": str(int(time.time() * 1000))}
+            dp["signature"] = _sign(dp)
+            requests.delete("https://fapi.binance.com/fapi/v1/algoOrder",
+                            params=dp, headers=headers)
+            cancelled += 1
     except Exception:
         pass
+
     return cancelled
 
 
