@@ -76,10 +76,13 @@ def build_preview(order: dict) -> str:
                 margin_label = "未指定"
             lines.append(f"保证金：{margin_label}")
 
+            slippage = 0.005  # 0.5% 容错，与执行层一致
             if action in ("open_long", "add"):
-                denom = entry - liq_target * (1 - mmr)
+                liq_eff = liq_target * (1 - slippage)
+                denom   = entry - liq_eff * (1 - mmr)
             else:
-                denom = liq_target * (1 + mmr) - entry
+                liq_eff = liq_target * (1 + slippage)
+                denom   = liq_eff * (1 + mmr) - entry
 
             if denom > 0 and margin_usdt > 0:
                 qty_raw = margin_usdt / denom

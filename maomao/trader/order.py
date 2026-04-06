@@ -371,6 +371,7 @@ def _open_liq(order: dict, side: str) -> str:
     usdt_spec   = order.get("usdt")
     margin_mode = order.get("margin_mode", "cross")
     MMR         = 0.005
+    SLIPPAGE    = 0.005   # 0.5% 容错缓冲，抵消市价波动导致的实际强平偏差
 
     if not symbol:
         return "❌ 请指定币种"
@@ -395,13 +396,17 @@ def _open_liq(order: dict, side: str) -> str:
     if margin <= 0:
         return "❌ 账户余额不足"
 
-    # 反推数量
+    # 反推数量（对 liq_target 加容错缓冲，保守方向偏移 0.5%）
+    # 做多：把目标强平价压低一点 → 实际强平价 ≤ 用户设定值，留波动余量
+    # 做空：把目标强平价抬高一点 → 实际强平价 ≥ 用户设定值，留波动余量
     if side == "long":
-        denom = entry - liq_target * (1 - MMR)
+        liq_eff = liq_target * (1 - SLIPPAGE)
+        denom   = entry - liq_eff * (1 - MMR)
         if denom <= 0:
             return f"❌ 强平价 {liq_target} 须低于当前价 {entry}（做多）"
     else:
-        denom = liq_target * (1 + MMR) - entry
+        liq_eff = liq_target * (1 + SLIPPAGE)
+        denom   = liq_eff * (1 + MMR) - entry
         if denom <= 0:
             return f"❌ 强平价 {liq_target} 须高于当前价 {entry}（做空）"
 
