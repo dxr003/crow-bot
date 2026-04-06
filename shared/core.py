@@ -348,6 +348,7 @@ def create_and_run_bot(env_path, claude_add_dir=None):
 
     async def error_handler(update, ctx):
         logger.error("Exception:", exc_info=ctx.error)
+        _bot_log("error", str(ctx.error)[:200])
 
     # ── 玄玄专属快捷指令 /1-/6（仅 maomao 注册）──
     @admin_only
@@ -448,6 +449,37 @@ def create_and_run_bot(env_path, claude_add_dir=None):
         text = format_for_tg(entries)
         await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
+    @admin_only
+    async def cmd_bot_log(update, ctx):
+        import sys; sys.path.insert(0, '/root/maomao')
+        from trader.bot_log import get_recent_bot_events, format_bot_events_tg
+        n = 20
+        if ctx.args:
+            try: n = min(50, int(ctx.args[0]))
+            except: pass
+        entries = get_recent_bot_events(n)
+        await update.message.reply_text(format_bot_events_tg(entries), parse_mode=ParseMode.HTML)
+
+    @admin_only
+    async def cmd_sys_log(update, ctx):
+        import sys; sys.path.insert(0, '/root/maomao')
+        from trader.bot_log import get_recent_sys_snapshots, format_sys_snapshot_tg
+        n = 6
+        if ctx.args:
+            try: n = min(24, int(ctx.args[0]))
+            except: pass
+        entries = get_recent_sys_snapshots(n)
+        await update.message.reply_text(format_sys_snapshot_tg(entries), parse_mode=ParseMode.HTML)
+
+    def _bot_log(event, detail=""):
+        if bot_dir == "maomao":
+            try:
+                import sys; sys.path.insert(0, '/root/maomao')
+                from trader.bot_log import log_bot_event
+                log_bot_event(event, detail)
+            except Exception:
+                pass
+
     async def post_init(app):
         base_cmds = [
             BotCommand("start","状态"), BotCommand("help","帮助"),
@@ -465,10 +497,13 @@ def create_and_run_bot(env_path, claude_add_dir=None):
                 BotCommand("5","现货→资金 /5 <金额>"),
                 BotCommand("6","资金→现货 /6 <金额>"),
                 BotCommand("7","交易日志 /7 [条数]"),
+                BotCommand("8","Bot运行事件 /8 [条数]"),
+                BotCommand("9","系统快照 /9 [条数]"),
             ]
         await app.bot.set_my_commands(base_cmds)
         state = load_state(bot_dir)
         logger.info(f"{bot_name} v4.2 | {mode_label(state['mode'])} | {state['model']}")
+        _bot_log("online", f"{mode_label(state['mode'])} | {model_short(state['model'])}")
         try:
             await app.bot.send_message(chat_id=admin_id,
                 text=f"✅ <b>{bot_name} 上线</b>\n\n模式: {mode_label(state['mode'])}\n模型: <code>{state['model']}</code>",
@@ -496,6 +531,8 @@ def create_and_run_bot(env_path, claude_add_dir=None):
         app.add_handler(CommandHandler("5", cmd_transfer_5))
         app.add_handler(CommandHandler("6", cmd_transfer_6))
         app.add_handler(CommandHandler("7", cmd_trade_log))
+        app.add_handler(CommandHandler("8", cmd_bot_log))
+        app.add_handler(CommandHandler("9", cmd_sys_log))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, handle_photo))
     from telegram.ext import CallbackQueryHandler
@@ -503,11 +540,19 @@ def create_and_run_bot(env_path, claude_add_dir=None):
     app.add_error_handler(error_handler)
     async def _heartbeat(ctx):
         logger.info(f"[heartbeat] {bot_name} alive")
+        if bot_dir == "maomao":
+            try:
+                import sys; sys.path.insert(0, '/root/maomao')
+                from trader.bot_log import log_sys_snapshot
+                log_sys_snapshot()
+            except Exception:
+                pass
     app.job_queue.run_repeating(_heartbeat, interval=300, first=10)
 
     try:
         app.run_polling(drop_pending_updates=True)
     finally:
+        _bot_log("offline", "正常退出")
         import httpx
         try:
             httpx.post(f"https://api.telegram.org/bot{bot_token}/sendMessage",
