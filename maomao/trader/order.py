@@ -52,14 +52,21 @@ def execute(order: dict) -> str:
 
 
 def _dark_split(symbol: str, side: str, total_qty: float,
-                reduce_only: bool = False) -> list[str]:
+                reduce_only: bool = False,
+                nominal_usdt: float = 0) -> list[str]:
     """
-    暗单：把 total_qty 随机拆成 3~5 份顺序执行，每份间随机延迟 1~3 秒。
-    返回每笔子单的简短回执列表。
+    暗单：智能拆单，根据名义价值决定份数（min=2, max=10）。
+    每份间随机延迟 1~3 秒，减少滑点和大单暴露。
+
+    份数规则：min(10, max(2, round(nominal_usdt / 1000)))
+      500U  → 2份 | 2000U → 2份 | 5000U → 5份 | 10000U+ → 10份
     """
     import random, time
     client  = get_client()
-    n       = random.randint(3, 5)
+    if nominal_usdt > 0:
+        n = min(10, max(2, round(nominal_usdt / 1000)))
+    else:
+        n = 3   # fallback（无名义价值信息时默认3份）
     # 生成 n 个随机权重，归一化后得到各份比例
     weights = [random.random() for _ in range(n)]
     total_w = sum(weights)
@@ -245,12 +252,13 @@ def _open(order: dict, side: str) -> str:
 
     dark = order.get("dark_order", False)
     if dark:
-        sub = _dark_split(symbol, order_side, qty)
+        nominal = float(qty) * mark
+        sub = _dark_split(symbol, order_side, qty, nominal_usdt=nominal)
         sub_text = "\n".join(f"    {r}" for r in sub)
         return (
             f"🌑 暗单市价开{direction} {symbol}\n"
             f"   杠杆: {leverage}x | {mode_text}\n"
-            f"   投入: {usdt}U | 总量: {qty}\n"
+            f"   投入: {usdt}U | 总量: {qty}（{len(sub)}份）\n"
             f"   标记价: {mark}\n"
             f"{sub_text}"
         )
@@ -390,8 +398,10 @@ def _close(order: dict, direction: str | None = None) -> str:
         pct_text = f" {pct}%" if pct and pct < 100 else ""
 
         if dark:
-            # 暗单：随机拆 3~5 份顺序执行
-            sub = _dark_split(symbol, close_side, qty, reduce_only=True)
+            # 暗单：智能拆单
+            mark_p = get_mark_price(symbol)
+            nominal = float(qty) * mark_p
+            sub = _dark_split(symbol, close_side, qty, reduce_only=True, nominal_usdt=nominal)
             results.append(f"  🌑 暗单平{dir_text}{pct_text} {qty}（{len(sub)}份）")
             for r in sub:
                 results.append(f"    {r}")
@@ -486,24 +496,35 @@ def _open_liq(order: dict, side: str) -> str:
 
     # 市价开单
     open_side = "BUY" if side == "long" else "SELL"
-    try:
-        resp = client.new_order(
-            symbol=symbol, side=open_side,
-            type="MARKET", quantity=qty,
+    direction = "多" if side == "long" else "空"
+    dark      = order.get("dark_order", False)
+    nominal   = float(qty) * entry
+
+    if dark:
+        sub = _dark_split(symbol, open_side, qty, nominal_usdt=nominal)
+        sub_text = "\n".join(f"    {r}" for r in sub)
+        result = (
+            f"🌑 暗单强平价开{direction} {symbol}\n"
+            f"   保证金: {margin:.1f}U | 总量: {qty}（{len(sub)}份）\n"
+            f"   入场价: ~{entry} | 强平目标: {liq_target}\n"
+            f"   自动杠杆: {leverage}x\n"
+            f"{sub_text}"
         )
-    except Exception as e:
-        return f"❌ 开单失败: {e}"
-
-    order_id   = resp.get("orderId", "?")
-    direction  = "多" if side == "long" else "空"
-
-    result = (
-        f"✅ 强平价开{direction} {symbol}\n"
-        f"   保证金: {margin:.1f}U | 数量: {qty}\n"
-        f"   入场价: ~{entry} | 强平目标: {liq_target}\n"
-        f"   自动杠杆: {leverage}x\n"
-        f"   订单号: {order_id}"
-    )
+    else:
+        try:
+            resp = client.new_order(
+                symbol=symbol, side=open_side,
+                type="MARKET", quantity=qty,
+            )
+        except Exception as e:
+            return f"❌ 开单失败: {e}"
+        result = (
+            f"✅ 强平价开{direction} {symbol}\n"
+            f"   保证金: {margin:.1f}U | 数量: {qty}\n"
+            f"   入场价: ~{entry} | 强平目标: {liq_target}\n"
+            f"   自动杠杆: {leverage}x\n"
+            f"   订单号: {resp.get('orderId', '?')}"
+        )
 
     # 附加止盈止损
     extras = []
