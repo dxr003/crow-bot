@@ -29,7 +29,7 @@ def build_preview(order: dict) -> str:
     symbol      = order.get("symbol", "?")
     usdt        = order.get("usdt") or 0
     leverage    = order.get("leverage") or 10
-    margin      = order.get("margin_mode", "cross")
+    margin_mode = order.get("margin_mode", "cross")
     price_type  = order.get("price_type", "market")
     limit_price = order.get("price")
     tp          = order.get("tp_price")
@@ -46,7 +46,7 @@ def build_preview(order: dict) -> str:
         "sl":         "设止损",
     }
     direction   = direction_map.get(action, action)
-    margin_text = "全仓" if margin == "cross" else "逐仓"
+    margin_text = "全仓" if margin_mode == "cross" else "逐仓"
     coin        = symbol.replace("USDT", "")
 
     lines = [f"📋 <b>开单预览</b>", ""]
@@ -64,12 +64,16 @@ def build_preview(order: dict) -> str:
             lines.append(f"标记价：{entry}")
             mmr = 0.005
             if usdt:
-                margin = usdt
+                margin_usdt = usdt
                 margin_label = f"{usdt} USDT"
-            else:
+            elif margin_mode == "cross":
                 bal = get_balance()
-                margin = bal["total"] * 0.95
-                margin_label = f"{margin:.1f} USDT（余额×95%）"
+                margin_usdt = bal["total"] * 0.95
+                margin_label = f"{margin_usdt:.1f} USDT（余额×95%）"
+            else:
+                lines.append("⚠️ 逐仓模式请指定保证金金额（如加 100u）")
+                margin_usdt = 0
+                margin_label = "未指定"
             lines.append(f"保证金：{margin_label}")
 
             if action in ("open_long", "add"):
@@ -77,11 +81,11 @@ def build_preview(order: dict) -> str:
             else:
                 denom = liq_target * (1 + mmr) - entry
 
-            if denom > 0:
-                qty_raw = margin / denom
+            if denom > 0 and margin_usdt > 0:
+                qty_raw = margin_usdt / denom
                 qty = fix_qty(symbol, qty_raw)
                 nominal = qty * entry
-                lev = max(1, min(125, round(nominal / margin)))
+                lev = max(1, min(125, round(nominal / margin_usdt)))
                 lines.append(f"名义价值：~{nominal:.1f} USDT")
                 lines.append(f"预估数量：{qty} {coin}")
                 lines.append(f"自动杠杆：~{lev}x")

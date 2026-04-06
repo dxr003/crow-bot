@@ -366,10 +366,11 @@ def _open_liq(order: dict, side: str) -> str:
         做多: qty = margin / (entry - liq_target × (1 - MMR))
         做空: qty = margin / (liq_target × (1 + MMR) - entry)
     """
-    symbol     = order.get("symbol")
-    liq_target = order.get("liq_target")
-    usdt_spec  = order.get("usdt")
-    MMR        = 0.005
+    symbol      = order.get("symbol")
+    liq_target  = order.get("liq_target")
+    usdt_spec   = order.get("usdt")
+    margin_mode = order.get("margin_mode", "cross")
+    MMR         = 0.005
 
     if not symbol:
         return "❌ 请指定币种"
@@ -384,9 +385,12 @@ def _open_liq(order: dict, side: str) -> str:
     # 保证金
     if usdt_spec:
         margin = float(usdt_spec)
-    else:
+    elif margin_mode == "cross":
         bal    = get_balance()
         margin = bal["total"] * 0.95
+    else:
+        # 逐仓必须指定金额
+        return "❌ 逐仓模式请指定保证金金额（如：逐仓 做多 SOL 强平 65 100u）"
 
     if margin <= 0:
         return "❌ 账户余额不足"
@@ -406,9 +410,9 @@ def _open_liq(order: dict, side: str) -> str:
     nominal  = float(qty) * entry
     leverage = max(1, min(125, round(nominal / margin)))
 
-    # 设置全仓 + 杠杆
+    # 设置仓位模式 + 杠杆
     client = get_client()
-    set_margin_mode(symbol, "cross")
+    set_margin_mode(symbol, margin_mode)
     set_leverage(symbol, leverage)
 
     # 市价开单
