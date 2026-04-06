@@ -30,7 +30,7 @@ ACTION_MAP = {
     "止盈": "tp", "tp": "tp",
     "止损": "sl", "sl": "sl",
     "撤": "cancel_orders", "撤单": "cancel_orders", "撤销": "cancel_orders",
-    "取消挂单": "cancel_orders", "撤挂单": "cancel_orders",
+    "取消": "cancel_orders", "取消挂单": "cancel_orders", "撤挂单": "cancel_orders",
 }
 
 # 这些动作是"开仓类"，后面跟止盈止损算附加条件
@@ -66,8 +66,12 @@ SYMBOL_ALIAS = {
 
 
 def parse(text: str) -> dict | None:
-    # 预处理：清理反引号、全角字符等干扰字符
+    # 预处理：清理干扰字符
     text = text.strip().replace("`", "").replace("　", " ")
+    # 中文紧跟英文时插入空格（如"取消sol" → "取消 sol"）
+    text = re.sub(r'([\u4e00-\u9fff]+)([A-Za-z][A-Za-z0-9]*)', r'\1 \2', text)
+    # 英文紧跟中文时插入空格（如"btc止盈" → "btc 止盈"）
+    text = re.sub(r'([A-Za-z0-9]+)([\u4e00-\u9fff])', r'\1 \2', text)
     tokens = text.split()
     if not tokens:
         return None
