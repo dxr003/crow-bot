@@ -171,7 +171,7 @@ def create_and_run_bot(env_path, claude_add_dir=None):
 
     async def ask_claude(update, prompt, image_b64=None):
         state = load_state(bot_dir)
-        mode = state.get("mode", "api")
+        mode = state.get("mode", "subscription")
         model = state.get("model", MODELS[0])
         if mode == "api":
             if not anthropic_key:
@@ -191,7 +191,7 @@ def create_and_run_bot(env_path, claude_add_dir=None):
     async def cmd_start(update, ctx):
         state = load_state(bot_dir)
         await update.message.reply_text(
-            f"{'🐱' if bot_name=='大猫' else '🐾'} <b>{bot_name} v4.1</b>\n\n"
+            f"{'🐱' if bot_name=='大猫' else '🐦' if bot_name=='玄玄' else '🐾'} <b>{bot_name} v4.2</b>\n\n"
             f"模式: {mode_label(state['mode'])}\n模型: <code>{state['model']}</code>\n\n"
             f"/cc — 切换模式\n/model — 切换模型\n/help — 全部命令",
             parse_mode=ParseMode.HTML)
@@ -319,7 +319,7 @@ def create_and_run_bot(env_path, claude_add_dir=None):
             BotCommand("restart","重启本Bot"), BotCommand("stop","关闭本Bot"),
         ])
         state = load_state(bot_dir)
-        logger.info(f"{bot_name} v4.1 | {mode_label(state['mode'])} | {state['model']}")
+        logger.info(f"{bot_name} v4.2 | {mode_label(state['mode'])} | {state['model']}")
         try:
             await app.bot.send_message(chat_id=admin_id,
                 text=f"✅ <b>{bot_name} 上线</b>\n\n模式: {mode_label(state['mode'])}\n模型: <code>{state['model']}</code>",
@@ -356,7 +356,7 @@ def create_and_run_bot(env_path, claude_add_dir=None):
         except Exception: pass
 
 
-# ── Claude Code完整Agent模式（大猫+毛毛共用，有记忆/有工具/有会话）──
+# ── Claude Code完整Agent模式（大猫+玄玄共用，有记忆/有工具/有会话）──
 async def claudecode_gen(prompt, add_dir="/root", bot_dir="damao"):
     async def _gen(step_info):
         import json as _json
