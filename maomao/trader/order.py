@@ -371,7 +371,7 @@ def _open_liq(order: dict, side: str) -> str:
     usdt_spec   = order.get("usdt")
     margin_mode = order.get("margin_mode", "cross")
     MMR         = 0.005
-    SLIPPAGE    = 0.005   # 0.5% 容错缓冲，抵消市价波动导致的实际强平偏差
+    SLIPPAGE    = 0.01    # 1% 容错缓冲，抵消市价波动导致的实际强平偏差
 
     if not symbol:
         return "❌ 请指定币种"
