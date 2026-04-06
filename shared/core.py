@@ -279,10 +279,13 @@ def create_and_run_bot(env_path, claude_add_dir=None):
                 order = pop_latest_pending()
                 if order is not None:
                     from trader.order import execute
+                    from trader.trade_log import log_trade
                     try:
                         result = execute(order)
+                        log_trade(order=order, result=result)
                     except Exception as e:
                         result = f"❌ 执行失败: {e}"
+                        log_trade(order=order, error=str(e))
                     await update.message.reply_text(result, parse_mode=ParseMode.HTML)
                     return
             elif stripped in _CANCEL_WORDS:
@@ -298,6 +301,10 @@ def create_and_run_bot(env_path, claude_add_dir=None):
             if trade_result is not None:
                 result_text, uid = trade_result
                 await update.message.reply_text(result_text, parse_mode=ParseMode.HTML)
+                if uid is None:
+                    # 直接动作（撤单等）已执行，记录日志
+                    from trader.trade_log import log_trade
+                    log_trade(raw_text=user_text, result=result_text)
                 if uid is not None:
                     # 需要确认：启动60s超时
                     async def _auto_cancel():
@@ -429,6 +436,18 @@ def create_and_run_bot(env_path, claude_add_dir=None):
     async def cmd_transfer_6(update, ctx):
         await _do_transfer(update, ctx, "FUNDING_MAIN", "资金→现货")
 
+    @admin_only
+    async def cmd_trade_log(update, ctx):
+        import sys; sys.path.insert(0, '/root/maomao')
+        from trader.trade_log import get_recent, format_for_tg
+        n = 20
+        if ctx.args:
+            try: n = min(50, int(ctx.args[0]))
+            except: pass
+        entries = get_recent(n)
+        text = format_for_tg(entries)
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
     async def post_init(app):
         base_cmds = [
             BotCommand("start","状态"), BotCommand("help","帮助"),
@@ -445,6 +464,7 @@ def create_and_run_bot(env_path, claude_add_dir=None):
                 BotCommand("4","合约→现货 /4 <金额>"),
                 BotCommand("5","现货→资金 /5 <金额>"),
                 BotCommand("6","资金→现货 /6 <金额>"),
+                BotCommand("7","交易日志 /7 [条数]"),
             ]
         await app.bot.set_my_commands(base_cmds)
         state = load_state(bot_dir)
@@ -475,6 +495,7 @@ def create_and_run_bot(env_path, claude_add_dir=None):
         app.add_handler(CommandHandler("4", cmd_transfer_4))
         app.add_handler(CommandHandler("5", cmd_transfer_5))
         app.add_handler(CommandHandler("6", cmd_transfer_6))
+        app.add_handler(CommandHandler("7", cmd_trade_log))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, handle_photo))
     from telegram.ext import CallbackQueryHandler
