@@ -184,6 +184,14 @@ def parse(text: str) -> dict | None:
     if result["action"] is None:
         return None
 
+    # 验证 symbol 合法性：不能包含中文、不能超过10字符
+    # 防止 "加止损 79 止盈 85" 这类被误识别为 symbol="加止损USDT"
+    if result["action"] in ("open_long", "open_short", "add", "close", "close_long", "close_short", "tp", "sl"):
+        sym = result.get("symbol") or ""
+        base = sym.replace("USDT", "").replace("BUSD", "")
+        if not base or len(base) > 10 or re.search(r'[\u4e00-\u9fff]', base):
+            return None
+
     return result
 
 
