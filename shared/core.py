@@ -268,22 +268,61 @@ def create_and_run_bot(env_path, claude_add_dir=None):
         if bot_dir == "maomao":
             import sys
             sys.path.insert(0, '/root/maomao')
-            from trader.parser import parse
-            from trader.order import execute, set_take_profit, set_stop_loss
-            parsed = parse(user_text)
-            if parsed:
-                action = parsed.get("action")
-                symbol = parsed.get("symbol")
-                price = parsed.get("price") or parsed.get("usdt")
-                if action == "tp" and symbol and price:
-                    result = set_take_profit(symbol, price)
-                elif action == "sl" and symbol and price:
-                    result = set_stop_loss(symbol, price)
-                else:
-                    result = execute(parsed)
-                await update.message.reply_text(result)
+            from trader.router import try_trade_command
+            trade_result = try_trade_command(user_text)
+            if trade_result is not None:
+                from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+                preview_text, uid = trade_result
+                keyboard = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅ 确认执行", callback_data=f"trade_confirm:{uid}"),
+                    InlineKeyboardButton("❌ 取消", callback_data=f"trade_cancel:{uid}"),
+                ]])
+                msg = await update.message.reply_text(
+                    preview_text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+                # 60秒后自动取消
+                async def _auto_cancel():
+                    import asyncio as _asyncio
+                    await _asyncio.sleep(60)
+                    from trader.preview import pop_pending
+                    if pop_pending(uid) is not None:
+                        try:
+                            await msg.edit_text(preview_text + "\n\n⏱ <i>已超时自动取消</i>",
+                                parse_mode=ParseMode.HTML)
+                        except Exception:
+                            pass
+                asyncio.create_task(_auto_cancel())
                 return
         await ask_claude(update, user_text)
+
+    async def handle_callback(update, ctx):
+        query = update.callback_query
+        if query.from_user.id != admin_id:
+            await query.answer()
+            return
+        data = query.data or ""
+        if data.startswith("trade_confirm:") or data.startswith("trade_cancel:"):
+            import sys
+            sys.path.insert(0, '/root/maomao')
+            from trader.preview import pop_pending
+            uid = data.split(":", 1)[1]
+            order = pop_pending(uid)
+            if order is None:
+                await query.answer("已过期或已处理", show_alert=True)
+                return
+            if data.startswith("trade_cancel:"):
+                await query.edit_message_text("❌ 已取消")
+                await query.answer()
+                return
+            # 确认执行
+            await query.answer("执行中...")
+            from trader.order import execute
+            try:
+                result = execute(order)
+            except Exception as e:
+                result = f"❌ 执行失败: {e}"
+            await query.edit_message_text(result)
+        else:
+            await query.answer()
 
     @admin_only
     async def handle_photo(update, ctx):
@@ -341,6 +380,8 @@ def create_and_run_bot(env_path, claude_add_dir=None):
     app.add_handler(CommandHandler("stop", cmd_stop_bot))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, handle_photo))
+    from telegram.ext import CallbackQueryHandler
+    app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_error_handler(error_handler)
     async def _heartbeat(ctx):
         logger.info(f"[heartbeat] {bot_name} alive")

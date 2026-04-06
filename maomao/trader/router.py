@@ -12,32 +12,16 @@
 """
 from trader.parser import parse, is_trade_command
 from trader.order import execute
+from trader.preview import parse_for_preview
 
 
-def try_trade_command(text: str) -> str | None:
+def try_trade_command(text: str):
     """
-    尝试解析为交易指令并执行。
-    返回 str = 执行结果(直接回复用户)
-    返回 None = 不是交易指令，交给AI处理
+    尝试解析为交易指令。
+    返回 (preview_text, uid) → 需要发预览卡片+等待确认
+    返回 None → 不是交易指令，交给AI处理
     """
-    # 第一关: 快速关键词检测
-    if not is_trade_command(text):
-        return None
-
-    # 第二关: 正式解析
-    order = parse(text)
-    if order is None:
-        return None
-
-    # 生成预览（不执行）
-    preview = _format_preview(order)
-
-    # 直接执行（如需确认流程，在此处插入确认逻辑）
-    try:
-        result = execute(order)
-        return result
-    except Exception as e:
-        return f"❌ 执行失败: {e}"
+    return parse_for_preview(text)
 
 
 def preview_only(text: str) -> str | None:
