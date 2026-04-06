@@ -327,7 +327,7 @@ def create_and_run_bot(env_path, claude_add_dir=None):
         except Exception as e:
             logger.warning(f"上线通知失败: {e}")
 
-    logger.info(f"=== {bot_name} v4.1 启动 ===")
+    logger.info(f"=== {bot_name} v4.2 启动 ===")
     app = Application.builder().token(bot_token).post_init(post_init).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
