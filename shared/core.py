@@ -292,23 +292,24 @@ def create_and_run_bot(env_path, claude_add_dir=None):
                     await update.message.reply_text("❌ 已取消")
                     return
 
-            # ── 硬解析交易指令 → 预览 ──
+            # ── 硬解析交易指令 ──
             from trader.router import try_trade_command
             trade_result = try_trade_command(user_text)
             if trade_result is not None:
-                preview_text, uid = trade_result
-                await update.message.reply_text(preview_text, parse_mode=ParseMode.HTML)
-                # 60秒超时自动取消
-                async def _auto_cancel():
-                    import asyncio as _asyncio
-                    await _asyncio.sleep(60)
-                    from trader.preview import pop_pending
-                    if pop_pending(uid) is not None:
-                        try:
-                            await update.message.reply_text("⏱ 已超时取消")
-                        except Exception:
-                            pass
-                asyncio.create_task(_auto_cancel())
+                result_text, uid = trade_result
+                await update.message.reply_text(result_text, parse_mode=ParseMode.HTML)
+                if uid is not None:
+                    # 需要确认：启动60s超时
+                    async def _auto_cancel():
+                        import asyncio as _asyncio
+                        await _asyncio.sleep(60)
+                        from trader.preview import pop_pending
+                        if pop_pending(uid) is not None:
+                            try:
+                                await update.message.reply_text("⏱ 已超时取消")
+                            except Exception:
+                                pass
+                    asyncio.create_task(_auto_cancel())
                 return
 
         await ask_claude(update, user_text)

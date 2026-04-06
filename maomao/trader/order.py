@@ -33,6 +33,8 @@ def execute(order: dict) -> str:
         return _set_tp(order)
     elif action == "sl":
         return _set_sl(order)
+    elif action == "cancel_orders":
+        return _cancel_orders(order)
     elif action == "buy":
         return "⚠️ 现货买入暂未开放"
     elif action == "sell":
@@ -43,6 +45,17 @@ def execute(order: dict) -> str:
         return "⚠️ 移动止盈/滚仓功能开发中"
     else:
         return f"❌ 未知动作: {action}"
+
+
+def _cancel_orders(order: dict) -> str:
+    symbol = order.get("symbol")
+    if not symbol:
+        return "❌ 请指定币种，例如：撤单 SOL"
+    try:
+        cancel_all_orders(symbol)
+        return f"✅ {symbol} 所有挂单已撤销"
+    except Exception as e:
+        return f"❌ 撤单失败: {e}"
 
 
 # ============================================================

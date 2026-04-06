@@ -14,13 +14,25 @@ from trader.parser import parse, is_trade_command
 from trader.order import execute
 from trader.preview import parse_for_preview
 
+# 这些动作直接执行，不走预览确认流程
+_DIRECT_ACTIONS = {"cancel_orders"}
+
 
 def try_trade_command(text: str):
     """
     尝试解析为交易指令。
-    返回 (preview_text, uid) → 需要发预览卡片+等待确认
+    返回 (result_text, None)  → 已直接执行，result_text 是回执
+    返回 (preview_text, uid) → 需要预览+等待确认
     返回 None → 不是交易指令，交给AI处理
     """
+    if not is_trade_command(text):
+        return None
+    order = parse(text)
+    if order is None:
+        return None
+    if order.get("action") in _DIRECT_ACTIONS:
+        result = execute(order)
+        return (result, None)   # uid=None 表示已执行
     return parse_for_preview(text)
 
 

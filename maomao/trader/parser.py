@@ -29,6 +29,8 @@ ACTION_MAP = {
     "划转": "transfer", "transfer": "transfer",
     "止盈": "tp", "tp": "tp",
     "止损": "sl", "sl": "sl",
+    "撤": "cancel_orders", "撤单": "cancel_orders", "撤销": "cancel_orders",
+    "取消挂单": "cancel_orders", "撤挂单": "cancel_orders",
 }
 
 # 这些动作是"开仓类"，后面跟止盈止损算附加条件
