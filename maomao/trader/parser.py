@@ -220,7 +220,10 @@ TRIGGER_WORDS.update(TRIGGER_SYMBOLS)
 
 def is_trade_command(text: str) -> bool:
     """快速判断: 文本是否像交易指令(供路由层零token拦截)"""
-    tokens = text.strip().lower().split()
+    text = text.strip().replace("`", "").replace("　", " ")
+    text = re.sub(r'([\u4e00-\u9fff]+)([A-Za-z][A-Za-z0-9]*)', r'\1 \2', text)
+    text = re.sub(r'([A-Za-z0-9]+)([\u4e00-\u9fff])', r'\1 \2', text)
+    tokens = text.lower().split()
     if not tokens:
         return False
     # 前3个token内有交易关键词就判定为交易指令
