@@ -50,8 +50,14 @@ async def ask_with_timer(update, gen_coro, mode, model):
         while True:
             await asyncio.sleep(1)
             elapsed = int(time.time() - start_time)
+            actions = step_info.get("actions")
+            if actions:
+                lines = "\n".join(f"  {a}" for a in actions[-10:])
+                txt = f"⚡ {elapsed}s\n{lines}"
+            else:
+                txt = f"{icon} {model_short(model)} · {step_info['text']}... {elapsed}s"
             try:
-                await thinking_msg.edit_text(f"{icon} {model_short(model)} · {step_info['text']}... {elapsed}s")
+                await thinking_msg.edit_text(txt)
             except Exception: pass
 
     ticker_task = asyncio.create_task(ticker())
@@ -173,7 +179,10 @@ def create_and_run_bot(env_path, claude_add_dir=None):
                 return
             gen = await api_gen(prompt, anthropic_key, model, system_prompt, image_b64)
         else:
-            gen = await subscription_gen(prompt, system_prompt, claude_add_dir)
+            if bot_dir == "damao":
+                gen = await claudecode_gen(prompt, add_dir=claude_add_dir or "/root", bot_dir=bot_dir)
+            else:
+                gen = await subscription_gen(prompt, system_prompt, claude_add_dir)
         await ask_with_timer(update, gen, mode, model)
 
     @admin_only
@@ -253,7 +262,26 @@ def create_and_run_bot(env_path, claude_add_dir=None):
 
     @admin_only
     async def handle_text(update, ctx):
-        await ask_claude(update, update.message.text)
+        user_text = update.message.text
+        if bot_dir == "maomao":
+            import sys
+            sys.path.insert(0, '/root/maomao')
+            from trader.parser import parse
+            from trader.order import execute, set_take_profit, set_stop_loss
+            parsed = parse(user_text)
+            if parsed:
+                action = parsed.get("action")
+                symbol = parsed.get("symbol")
+                price = parsed.get("price") or parsed.get("usdt")
+                if action == "tp" and symbol and price:
+                    result = set_take_profit(symbol, price)
+                elif action == "sl" and symbol and price:
+                    result = set_stop_loss(symbol, price)
+                else:
+                    result = execute(parsed)
+                await update.message.reply_text(result)
+                return
+        await ask_claude(update, user_text)
 
     @admin_only
     async def handle_photo(update, ctx):
@@ -312,7 +340,9 @@ def create_and_run_bot(env_path, claude_add_dir=None):
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, handle_photo))
     app.add_error_handler(error_handler)
-    app.job_queue.run_repeating(lambda ctx: logger.info(f"[heartbeat] {bot_name} alive"), interval=300, first=10)
+    async def _heartbeat(ctx):
+        logger.info(f"[heartbeat] {bot_name} alive")
+    app.job_queue.run_repeating(_heartbeat, interval=300, first=10)
 
     try:
         app.run_polling(drop_pending_updates=True)
@@ -322,3 +352,63 @@ def create_and_run_bot(env_path, claude_add_dir=None):
             httpx.post(f"https://api.telegram.org/bot{bot_token}/sendMessage",
                 json={"chat_id": admin_id, "text": f"🔴 <b>{bot_name} 下线</b>", "parse_mode": "HTML"}, timeout=5)
         except Exception: pass
+
+
+# ── 大猫专用：Claude Code完整Agent模式（有记忆/有工具/有会话）──
+async def claudecode_gen(prompt, add_dir="/root", bot_dir="damao"):
+    async def _gen(step_info):
+        import json as _json
+        TOOL_ICONS = {
+            "Bash": "🖥️", "Read": "📖", "Write": "✍️", "Edit": "✏️",
+            "Grep": "🔍", "Glob": "📂", "WebSearch": "🌐", "WebFetch": "🌐",
+            "Task": "🤖", "TodoWrite": "📋", "Skill": "⚡",
+        }
+        step_info["text"] = "启动中"
+        step_info["actions"] = []
+        session_file = Path(f"/root/{bot_dir}/data/session.json")
+        session_id = None
+        try:
+            session_id = _json.loads(session_file.read_text()).get("session_id")
+        except Exception:
+            pass
+        cmd = ["claude", "--print", "--verbose",
+               "--output-format", "stream-json",
+               "--permission-mode", "acceptEdits",
+               "--add-dir", add_dir]
+        if session_id:
+            cmd.extend(["--resume", session_id])
+        cmd.extend(["-p", prompt])
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE, cwd=add_dir)
+        final_result = ""
+        async for raw_line in proc.stdout:
+            line = raw_line.decode("utf-8").strip()
+            if not line:
+                continue
+            try:
+                obj = _json.loads(line)
+            except Exception:
+                continue
+            typ = obj.get("type")
+            if typ == "assistant":
+                for item in obj.get("message", {}).get("content", []):
+                    if item.get("type") == "tool_use":
+                        tool_name = item.get("name", "")
+                        icon = TOOL_ICONS.get(tool_name, "⚙️")
+                        inp = item.get("input", {})
+                        brief = str(inp.get("command") or inp.get("file_path") or
+                                    inp.get("pattern") or inp.get("query") or
+                                    inp.get("prompt") or "")[:50]
+                        step_info["actions"].append(f"{icon} {brief or tool_name}")
+                        step_info["text"] = f"{icon} {tool_name}"
+            elif typ == "result":
+                new_sid = obj.get("session_id")
+                if new_sid:
+                    session_file.parent.mkdir(parents=True, exist_ok=True)
+                    session_file.write_text(_json.dumps({"session_id": new_sid}))
+                final_result = obj.get("result", "").strip()
+        _, stderr_bytes = await proc.communicate()
+        step_info["text"] = "完成"
+        yield final_result or stderr_bytes.decode("utf-8")[:300] or "（无输出）"
+    return _gen
