@@ -112,11 +112,15 @@
 
 | 模块 | 状态 | 功能 |
 |------|------|------|
-| exchange.py | ✅ | Binance对接，algoOrder条件单 |
-| order.py | ✅ | 开/平/加/止盈/止损 |
-| parser.py | ✅ | 自然语言→JSON |
-| router.py | ✅ | 交易关键词路由 |
+| exchange.py | 🔒封板 | Binance对接，algoOrder条件单，多账户余额，划转 |
+| order.py | 🔒封板 | 开/平/加/止盈/止损/强平价/暗单/百分比平 |
+| parser.py | 🔒封板 | 自然语言→JSON，中文ASCII预处理 |
+| preview.py | 🔒封板 | 预览卡+确认流（文字确认/取消/60s超时） |
+| router.py | 🔒封板 | 交易关键词路由，直接动作vs预览动作 |
 | risk.py | ⏳ | 风控拦截（待开发） |
+
+> 封板文件已 `chattr +i`，不得直接修改。需改必须先报乌鸦，解锁后再动。
+> /root/shared/core.py 同步封板。
 
 ### 移动止盈三档
 | 档位 | 激活条件 |

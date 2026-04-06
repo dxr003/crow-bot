@@ -107,6 +107,8 @@
 
 **锁定状态**：`bn_trailing_stop.py` + `hype.py` 已 `chattr +i`；`trailing_safe.py` 未锁
 
+**玄玄交易底座封板（2026-04-06）**：`/root/maomao/trader/`（exchange/order/parser/preview/router）+ `/root/shared/core.py` 已 `chattr +i`
+
 ---
 
 ## 六、风控参数（risk_manager.py）
