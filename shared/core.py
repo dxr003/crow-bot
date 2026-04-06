@@ -29,7 +29,7 @@ def load_state(bot_dir):
         if "model" not in s: s["model"] = MODELS[0]
         return s
     except Exception:
-        return {"mode": "api", "model": MODELS[0]}
+        return {"mode": "subscription", "model": MODELS[0]}
 
 def save_state(bot_dir, state):
     _state_file(bot_dir).write_text(json.dumps(state, ensure_ascii=False))
@@ -356,7 +356,7 @@ def create_and_run_bot(env_path, claude_add_dir=None):
         except Exception: pass
 
 
-# ── 大猫专用：Claude Code完整Agent模式（有记忆/有工具/有会话）──
+# ── Claude Code完整Agent模式（大猫+毛毛共用，有记忆/有工具/有会话）──
 async def claudecode_gen(prompt, add_dir="/root", bot_dir="damao"):
     async def _gen(step_info):
         import json as _json
