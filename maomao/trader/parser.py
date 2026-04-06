@@ -64,7 +64,9 @@ SYMBOL_ALIAS = {
 
 
 def parse(text: str) -> dict | None:
-    tokens = text.strip().split()
+    # 预处理：清理反引号、全角字符等干扰字符
+    text = text.strip().replace("`", "").replace("　", " ")
+    tokens = text.split()
     if not tokens:
         return None
 

@@ -168,6 +168,34 @@ def place_conditional_order(
     return data
 
 
+def cancel_all_orders(symbol: str) -> int:
+    """撤销某币种所有普通挂单+条件单，返回撤销数量"""
+    client = get_client()
+    cancelled = 0
+    # 普通挂单
+    try:
+        client.cancel_open_orders(symbol=symbol)
+        cancelled += 1
+    except Exception:
+        pass
+    # algoOrder 条件单
+    try:
+        params = {
+            "symbol": symbol,
+            "timestamp": str(int(time.time() * 1000)),
+        }
+        params["signature"] = _sign(params)
+        headers = {"X-MBX-APIKEY": _api_key}
+        resp = requests.delete(
+            "https://fapi.binance.com/fapi/v1/allOpenOrders",
+            params=params,
+            headers=headers,
+        )
+    except Exception:
+        pass
+    return cancelled
+
+
 def ping() -> str:
     try:
         client = get_client()

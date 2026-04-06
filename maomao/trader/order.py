@@ -10,7 +10,7 @@ from trader.exchange import (
     get_client, get_mark_price, get_positions,
     fix_qty, fix_price, check_min_notional,
     set_leverage, set_margin_mode,
-    place_conditional_order,
+    place_conditional_order, cancel_all_orders,
 )
 
 
@@ -233,9 +233,7 @@ def set_take_profit(symbol: str, tp_price: float) -> str:
         algo_id = resp.get("algoId", "?")
         results.append(f"  ✅ {direction}仓止盈 @ {price} (algoId {algo_id})")
 
-    return f"🎯 止盈已设 {symbol}
-" + "
-".join(results)
+    return f"🎯 止盈已设 {symbol}\n" + "\n".join(results)
 
 
 
@@ -266,9 +264,7 @@ def set_stop_loss(symbol: str, sl_price: float) -> str:
         algo_id = resp.get("algoId", "?")
         results.append(f"  🛡️ {direction}仓止损 @ {price} (algoId {algo_id})")
 
-    return f"🛡️ 止损已设 {symbol}
-" + "
-".join(results)
+    return f"🛡️ 止损已设 {symbol}\n" + "\n".join(results)
 
 
 
@@ -329,5 +325,12 @@ def _close(order: dict, direction: str | None = None) -> str:
     if not results:
         dir_text = "多" if direction == "long" else "空"
         return f"⚠️ {symbol} 无{dir_text}仓可平"
+
+    # 平仓后自动撤销关联挂单
+    try:
+        cancel_all_orders(symbol)
+        results.append(f"  🗑️ 关联挂单已全部撤销")
+    except Exception as e:
+        results.append(f"  ⚠️ 撤单失败: {e}")
 
     return f"✅ 已平仓 {symbol}\n" + "\n".join(results)
