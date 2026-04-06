@@ -262,67 +262,59 @@ def create_and_run_bot(env_path, claude_add_dir=None):
         except Exception as e:
             await update.message.reply_text(f"读取日志失败: {e}")
 
+    _CONFIRM_WORDS = {"确认", "ok", "OK", "好", "是", "确定", "yes", "y", "Y"}
+    _CANCEL_WORDS  = {"取消", "cancel", "不", "算了", "不要", "no", "n", "N"}
+
     @admin_only
     async def handle_text(update, ctx):
         user_text = update.message.text
         if bot_dir == "maomao":
             import sys
             sys.path.insert(0, '/root/maomao')
+
+            # ── 文本确认/取消拦截（优先于 AI 和硬解析）──
+            stripped = user_text.strip()
+            if stripped in _CONFIRM_WORDS:
+                from trader.preview import pop_latest_pending
+                order = pop_latest_pending()
+                if order is not None:
+                    from trader.order import execute
+                    try:
+                        result = execute(order)
+                    except Exception as e:
+                        result = f"❌ 执行失败: {e}"
+                    await update.message.reply_text(result, parse_mode=ParseMode.HTML)
+                    return
+            elif stripped in _CANCEL_WORDS:
+                from trader.preview import pop_latest_pending
+                order = pop_latest_pending()
+                if order is not None:
+                    await update.message.reply_text("❌ 已取消")
+                    return
+
+            # ── 硬解析交易指令 → 预览 ──
             from trader.router import try_trade_command
             trade_result = try_trade_command(user_text)
             if trade_result is not None:
-                from telegram import InlineKeyboardButton, InlineKeyboardMarkup
                 preview_text, uid = trade_result
-                keyboard = InlineKeyboardMarkup([[
-                    InlineKeyboardButton("✅ 确认执行", callback_data=f"trade_confirm:{uid}"),
-                    InlineKeyboardButton("❌ 取消", callback_data=f"trade_cancel:{uid}"),
-                ]])
-                msg = await update.message.reply_text(
-                    preview_text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
-                # 60秒后自动取消
+                await update.message.reply_text(preview_text, parse_mode=ParseMode.HTML)
+                # 60秒超时自动取消
                 async def _auto_cancel():
                     import asyncio as _asyncio
                     await _asyncio.sleep(60)
                     from trader.preview import pop_pending
                     if pop_pending(uid) is not None:
                         try:
-                            await msg.edit_text(preview_text + "\n\n⏱ <i>已超时自动取消</i>",
-                                parse_mode=ParseMode.HTML)
+                            await update.message.reply_text("⏱ 已超时取消")
                         except Exception:
                             pass
                 asyncio.create_task(_auto_cancel())
                 return
+
         await ask_claude(update, user_text)
 
     async def handle_callback(update, ctx):
-        query = update.callback_query
-        if query.from_user.id != admin_id:
-            await query.answer()
-            return
-        data = query.data or ""
-        if data.startswith("trade_confirm:") or data.startswith("trade_cancel:"):
-            import sys
-            sys.path.insert(0, '/root/maomao')
-            from trader.preview import pop_pending
-            uid = data.split(":", 1)[1]
-            order = pop_pending(uid)
-            if order is None:
-                await query.answer("已过期或已处理", show_alert=True)
-                return
-            if data.startswith("trade_cancel:"):
-                await query.edit_message_text("❌ 已取消")
-                await query.answer()
-                return
-            # 确认执行
-            await query.answer("执行中...")
-            from trader.order import execute
-            try:
-                result = execute(order)
-            except Exception as e:
-                result = f"❌ 执行失败: {e}"
-            await query.edit_message_text(result)
-        else:
-            await query.answer()
+        await update.callback_query.answer()
 
     @admin_only
     async def handle_photo(update, ctx):

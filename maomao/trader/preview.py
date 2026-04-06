@@ -1,16 +1,13 @@
 """
-开仓预览+确认流程 v1.0
+开仓预览+确认流程 v2.0
 
 流程：
-  解析 → preview_order() → 发预览卡片(InlineKeyboard) → 等60s确认
-  ✅确认 → execute() → 回执
-  ❌取消/超时 → 编辑消息为"已取消"
+  解析 → build_preview() → 发预览卡片 → 等待文本「确认」/「取消」
+  确认 → execute() → 回执
+  取消/超时60s → 取消
 
 使用方式（在 core.py maomao 路由段调用）：
-  from trader.preview import preview_order
-  result = preview_order(text)
-  if result is not None:
-      # result = (preview_text, order_dict) 或 None
+  from trader.preview import parse_for_preview, pop_pending, pop_latest_pending
 """
 
 import uuid
@@ -18,26 +15,26 @@ from trader.parser import parse, is_trade_command
 from trader.exchange import get_mark_price, fix_qty
 
 
-# ── 存储待确认订单 {uuid: order_dict} ──
+# ── 待确认订单 {uid: order_dict} ──
 _pending: dict[str, dict] = {}
+_latest_uid: str | None = None   # 最近一笔待确认的 uid
 
 
 def build_preview(order: dict) -> str:
     """
-    生成预览卡片文本（不执行任何交易所操作）
-    包含实时标记价格和预估数量
+    生成预览卡片文本，包含：
+    - 投入保证金 / 名义价值 / 标记价 / 预估数量 / 预估强平价 / 止盈止损
     """
-    action  = order.get("action", "?")
-    symbol  = order.get("symbol", "?")
-    usdt    = order.get("usdt", 0)
-    leverage = order.get("leverage", 10)
-    margin  = order.get("margin_mode", "cross")
-    price_type = order.get("price_type", "market")
+    action      = order.get("action", "?")
+    symbol      = order.get("symbol", "?")
+    usdt        = order.get("usdt") or 0
+    leverage    = order.get("leverage") or 10
+    margin      = order.get("margin_mode", "cross")
+    price_type  = order.get("price_type", "market")
     limit_price = order.get("price")
-    tp = order.get("tp_price")
-    sl = order.get("sl_price")
+    tp          = order.get("tp_price")
+    sl          = order.get("sl_price")
 
-    # 方向文字
     direction_map = {
         "open_long":  "做多 📈",
         "open_short": "做空 📉",
@@ -48,18 +45,19 @@ def build_preview(order: dict) -> str:
         "tp":         "设止盈",
         "sl":         "设止损",
     }
-    direction = direction_map.get(action, action)
+    direction   = direction_map.get(action, action)
     margin_text = "全仓" if margin == "cross" else "逐仓"
+    coin        = symbol.replace("USDT", "")
 
-    lines = [f"📋 <b>开单预览</b>"]
-    lines.append(f"")
-    lines.append(f"币对：<code>{symbol}</code>")
-    lines.append(f"方向：{direction}")
-    lines.append(f"杠杆：{leverage}x  |  {margin_text}")
-    lines.append(f"金额：{usdt} USDT")
+    lines = [f"📋 <b>开单预览</b>", ""]
+    lines.append(f"<b>{symbol}</b>  {direction}  {leverage}x {margin_text}")
+    lines.append("──────────────")
 
-    # 实时标记价格 + 预估数量
-    if action in ("open_long", "open_short", "add") and symbol and usdt:
+    if action in ("open_long", "open_short", "add") and usdt:
+        nominal = usdt * leverage
+        lines.append(f"投入保证金：{usdt} USDT")
+        lines.append(f"名义价值：~{nominal:.1f} USDT")
+
         try:
             if price_type == "limit" and limit_price:
                 ref_price = float(limit_price)
@@ -74,11 +72,10 @@ def build_preview(order: dict) -> str:
             if ref_price:
                 raw_qty = (usdt * leverage) / ref_price
                 qty = fix_qty(symbol, raw_qty)
-                lines.append(f"预估数量：{qty} {symbol.replace('USDT','')}")
+                lines.append(f"预估数量：{qty} {coin}")
 
-                # 简单预估强平价（全仓逐仓公式近似）
                 mmr = 0.005
-                if action == "open_long":
+                if action in ("open_long", "add"):
                     liq_est = ref_price * (1 - 1/leverage + mmr)
                     lines.append(f"预估强平：≈ {round(liq_est, 4)}")
                 elif action == "open_short":
@@ -87,29 +84,50 @@ def build_preview(order: dict) -> str:
         except Exception as e:
             lines.append(f"⚠️ 行情获取失败: {e}")
 
-    if limit_price and price_type == "limit":
-        pass  # 已在上面处理
-    if tp:
-        lines.append(f"止盈：{tp}")
-    if sl:
-        lines.append(f"止损：{sl}")
+    elif action in ("close", "close_long", "close_short"):
+        pct = order.get("pct")
+        if pct:
+            lines.append(f"平仓比例：{pct}%")
+        else:
+            lines.append(f"平仓：全部")
 
-    lines.append(f"")
-    lines.append(f"<i>60秒内未确认自动取消</i>")
+    if tp or sl:
+        lines.append("──────────────")
+        if tp:
+            lines.append(f"止盈：{tp}")
+        if sl:
+            lines.append(f"止损：{sl}")
+
+    lines.append("──────────────")
+    lines.append("<i>回复「确认」执行，「取消」放弃，60s 超时自动取消</i>")
 
     return "\n".join(lines)
 
 
 def register_pending(order: dict) -> str:
-    """注册待确认订单，返回 uid"""
+    """注册待确认订单，返回 uid，并记录为最新"""
+    global _latest_uid
     uid = str(uuid.uuid4())[:8]
     _pending[uid] = order
+    _latest_uid = uid
     return uid
 
 
 def pop_pending(uid: str) -> dict | None:
-    """取出并删除待确认订单"""
-    return _pending.pop(uid, None)
+    """取出并删除指定 uid 的订单"""
+    global _latest_uid
+    order = _pending.pop(uid, None)
+    if order is not None and _latest_uid == uid:
+        _latest_uid = None
+    return order
+
+
+def pop_latest_pending() -> dict | None:
+    """取出并删除最新一笔待确认订单（文本确认用）"""
+    global _latest_uid
+    if _latest_uid is None:
+        return None
+    return pop_pending(_latest_uid)
 
 
 def parse_for_preview(text: str):
@@ -123,8 +141,6 @@ def parse_for_preview(text: str):
     if order is None:
         return None
 
-    # 仅开仓/加仓类才走预览确认流程
-    # 止盈/止损/平仓 也走预览，保持一致安全
     preview_text = build_preview(order)
     uid = register_pending(order)
     return preview_text, uid
