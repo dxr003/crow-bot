@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-共享底盘 v4.1 — 双管道核心引擎
-大猫和毛毛共用，通过参数区分行为。
-此文件冻结后不再修改，新功能通过模块挂载。
+共享底盘 v4.2 — 双管道核心引擎
+大猫和玄玄共用，通过参数区分行为。
+# 底座已固定 v4.2 — 新功能只通过 trader/ 模块挂载，禁止修改此文件
 """
 import os, json, logging, asyncio, time, base64, io
 from pathlib import Path
