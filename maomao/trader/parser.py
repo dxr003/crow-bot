@@ -42,7 +42,7 @@ MARGIN_MAP = {
 }
 
 PRICE_TYPE_MAP = {
-    "强": "liq", "强平": "liq", "爆": "liq", "liq": "liq",
+    "强": "liq", "强平": "liq", "强平价": "liq", "爆仓价": "liq", "爆仓": "liq", "爆": "liq", "liq": "liq",
     "限价": "limit", "挂单": "limit", "limit": "limit",
 }
 
