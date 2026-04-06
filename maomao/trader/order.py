@@ -51,6 +51,42 @@ def execute(order: dict) -> str:
         return f"❌ 未知动作: {action}"
 
 
+def _dark_split(symbol: str, side: str, total_qty: float,
+                reduce_only: bool = False) -> list[str]:
+    """
+    暗单：把 total_qty 随机拆成 3~5 份顺序执行，每份间随机延迟 1~3 秒。
+    返回每笔子单的简短回执列表。
+    """
+    import random, time
+    client  = get_client()
+    n       = random.randint(3, 5)
+    # 生成 n 个随机权重，归一化后得到各份比例
+    weights = [random.random() for _ in range(n)]
+    total_w = sum(weights)
+    results = []
+    remaining = total_qty
+    for i, w in enumerate(weights):
+        if i == n - 1:
+            chunk = remaining          # 最后一份用剩余量，避免精度误差
+        else:
+            chunk = total_qty * w / total_w
+        chunk = fix_qty(symbol, chunk)
+        if float(chunk) <= 0:
+            continue
+        try:
+            kwargs = dict(symbol=symbol, side=side, type="MARKET", quantity=chunk)
+            if reduce_only:
+                kwargs["reduceOnly"] = True
+            resp = client.new_order(**kwargs)
+            results.append(f"✅ 第{i+1}份 {chunk} (订单 {resp.get('orderId','?')})")
+        except Exception as e:
+            results.append(f"❌ 第{i+1}份失败: {e}")
+        remaining = fix_qty(symbol, remaining - float(chunk))
+        if i < n - 1:
+            time.sleep(random.uniform(1, 3))
+    return results
+
+
 def _cancel_orders(order: dict) -> str:
     symbol = order.get("symbol")
     if not symbol:
@@ -207,6 +243,18 @@ def _open(order: dict, side: str) -> str:
     qty = fix_qty(symbol, raw_qty)
     check_min_notional(symbol, qty, mark)
 
+    dark = order.get("dark_order", False)
+    if dark:
+        sub = _dark_split(symbol, order_side, qty)
+        sub_text = "\n".join(f"    {r}" for r in sub)
+        return (
+            f"🌑 暗单市价开{direction} {symbol}\n"
+            f"   杠杆: {leverage}x | {mode_text}\n"
+            f"   投入: {usdt}U | 总量: {qty}\n"
+            f"   标记价: {mark}\n"
+            f"{sub_text}"
+        )
+
     result = client.new_order(
         symbol=symbol, side=order_side, type="MARKET", quantity=qty,
     )
@@ -312,6 +360,8 @@ def _add(order: dict) -> str:
 
 def _close(order: dict, direction: str | None = None) -> str:
     symbol = order.get("symbol")
+    pct    = order.get("pct")        # 平仓百分比，如 50 表示平50%
+    dark   = order.get("dark_order", False)
     if not symbol:
         return "❌ 缺少交易标的"
 
@@ -330,25 +380,39 @@ def _close(order: dict, direction: str | None = None) -> str:
             continue
 
         close_side = "SELL" if amt > 0 else "BUY"
-        qty = fix_qty(symbol, abs(amt))
-        dir_text = "多" if amt > 0 else "空"
+        total_qty  = abs(amt)
 
-        result = client.new_order(
-            symbol=symbol, side=close_side, type="MARKET",
-            quantity=qty, reduceOnly=True,
-        )
-        results.append(f"  ✅ 平{dir_text} {qty} (订单 {result.get('orderId', '?')})")
+        # 百分比平仓
+        if pct and 0 < pct <= 100:
+            total_qty = total_qty * pct / 100
+        qty = fix_qty(symbol, total_qty)
+        dir_text = "多" if amt > 0 else "空"
+        pct_text = f" {pct}%" if pct and pct < 100 else ""
+
+        if dark:
+            # 暗单：随机拆 3~5 份顺序执行
+            sub = _dark_split(symbol, close_side, qty, reduce_only=True)
+            results.append(f"  🌑 暗单平{dir_text}{pct_text} {qty}（{len(sub)}份）")
+            for r in sub:
+                results.append(f"    {r}")
+        else:
+            resp = client.new_order(
+                symbol=symbol, side=close_side, type="MARKET",
+                quantity=qty, reduceOnly=True,
+            )
+            results.append(f"  ✅ 平{dir_text}{pct_text} {qty} (订单 {resp.get('orderId','?')})")
 
     if not results:
         dir_text = "多" if direction == "long" else "空"
         return f"⚠️ {symbol} 无{dir_text}仓可平"
 
-    # 平仓后自动撤销关联挂单
-    try:
-        cancel_all_orders(symbol)
-        results.append(f"  🗑️ 关联挂单已全部撤销")
-    except Exception as e:
-        results.append(f"  ⚠️ 撤单失败: {e}")
+    # 全平时撤关联挂单（百分比平仓不撤）
+    if not pct or pct >= 100:
+        try:
+            cancel_all_orders(symbol)
+            results.append(f"  🗑️ 关联挂单已全部撤销")
+        except Exception as e:
+            results.append(f"  ⚠️ 撤单失败: {e}")
 
     return f"✅ 已平仓 {symbol}\n" + "\n".join(results)
 

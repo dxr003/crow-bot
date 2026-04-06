@@ -86,6 +86,8 @@ def parse(text: str) -> dict | None:
         "usdt": None,
         "price": None,
         "liq_target": None,    # 强平价目标（用于反推数量）
+        "pct": None,           # 平仓百分比（0~100）
+        "dark_order": False,   # 暗单拆分执行
         "tp_price": None,      # 附加止盈价
         "sl_price": None,      # 附加止损价
         "trailing_tier": "moderate",
@@ -150,6 +152,17 @@ def parse(text: str) -> dict | None:
         # ---- 滚仓档位 ----
         if t in ROLL_MAP and result["action"] == "roll":
             result["roll_tier"] = ROLL_MAP[t]
+            continue
+
+        # ---- 暗单 ----
+        if t in ("暗单", "dark", "iceberg", "冰山"):
+            result["dark_order"] = True
+            continue
+
+        # ---- 平仓百分比 (50%) ----
+        pct_match = re.match(r"^(\d+(?:\.\d+)?)%$", token)
+        if pct_match:
+            result["pct"] = float(pct_match.group(1))
             continue
 
         # ---- 杠杆 (10x / 20倍) ----
