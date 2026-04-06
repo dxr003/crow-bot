@@ -342,14 +342,111 @@ def create_and_run_bot(env_path, claude_add_dir=None):
     async def error_handler(update, ctx):
         logger.error("Exception:", exc_info=ctx.error)
 
+    # ── 玄玄专属快捷指令 /1-/6（仅 maomao 注册）──
+    @admin_only
+    async def cmd_q_positions(update, ctx):
+        import sys; sys.path.insert(0, '/root/maomao')
+        from trader.exchange import get_positions
+        try:
+            positions = get_positions()
+            if not positions:
+                await update.message.reply_text("📭 当前无持仓")
+                return
+            lines = []
+            for p in positions:
+                amt  = float(p['positionAmt'])
+                side = "多" if amt > 0 else "空"
+                entry = float(p['entryPrice'])
+                liq   = float(p.get('liquidationPrice', 0))
+                upnl  = float(p.get('unRealizedProfit', 0))
+                pct   = float(p.get('percentage', 0))
+                lev   = p.get('leverage', '?')
+                mark  = float(p.get('markPrice', 0))
+                lines.append(
+                    f"<b>{p['symbol']}</b> {side} {abs(amt)} @{lev}x\n"
+                    f"  入场:{entry:.4f}  标记:{mark:.4f}\n"
+                    f"  强平:{liq:.4f}  浮盈:{upnl:+.2f}U ({pct:+.1f}%)"
+                )
+            await update.message.reply_text("\n\n".join(lines), parse_mode=ParseMode.HTML)
+        except Exception as e:
+            await update.message.reply_text(f"❌ 查询失败: {e}")
+
+    @admin_only
+    async def cmd_q_balances(update, ctx):
+        import sys; sys.path.insert(0, '/root/maomao')
+        from trader.exchange import get_all_balances
+        try:
+            b = get_all_balances()
+            lines = ["<b>账户余额</b>\n"]
+            lines.append(f"<b>合约</b>")
+            lines.append(f"  余额: {b['futures']:.2f} U")
+            lines.append(f"  可用: {b['futures_avail']:.2f} U")
+            lines.append(f"  浮盈: {b['futures_upnl']:+.2f} U")
+            spot = {k: v for k, v in b.get('spot', {}).items() if v >= 1}
+            if spot:
+                lines.append(f"\n<b>现货</b>")
+                for asset, amt in sorted(spot.items(), key=lambda x: -x[1]):
+                    lines.append(f"  {asset}: {amt:.4f}")
+            funding = {k: v for k, v in b.get('funding', {}).items() if v >= 1}
+            if funding:
+                lines.append(f"\n<b>资金</b>")
+                for asset, amt in sorted(funding.items(), key=lambda x: -x[1]):
+                    lines.append(f"  {asset}: {amt:.4f}")
+            await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+        except Exception as e:
+            await update.message.reply_text(f"❌ 查询失败: {e}")
+
+    async def _do_transfer(update, ctx, transfer_type, desc):
+        import sys; sys.path.insert(0, '/root/maomao')
+        from trader.exchange import transfer_funds
+        if not ctx.args:
+            await update.message.reply_text(f"用法: 发送 {desc} 后跟金额，例如：/3 100")
+            return
+        try:
+            amount = float(ctx.args[0])
+        except ValueError:
+            await update.message.reply_text("❌ 金额格式错误，请输入数字")
+            return
+        try:
+            tran_id = transfer_funds(amount, transfer_type)
+            await update.message.reply_text(f"✅ {desc} {amount} USDT\ntranId: {tran_id}")
+        except Exception as e:
+            await update.message.reply_text(f"❌ 划转失败: {e}")
+
+    @admin_only
+    async def cmd_transfer_3(update, ctx):
+        await _do_transfer(update, ctx, "MAIN_UMFUTURE", "现货→合约")
+
+    @admin_only
+    async def cmd_transfer_4(update, ctx):
+        await _do_transfer(update, ctx, "UMFUTURE_MAIN", "合约→现货")
+
+    @admin_only
+    async def cmd_transfer_5(update, ctx):
+        await _do_transfer(update, ctx, "MAIN_FUNDING", "现货→资金")
+
+    @admin_only
+    async def cmd_transfer_6(update, ctx):
+        await _do_transfer(update, ctx, "FUNDING_MAIN", "资金→现货")
+
     async def post_init(app):
-        await app.bot.set_my_commands([
+        base_cmds = [
             BotCommand("start","状态"), BotCommand("help","帮助"),
             BotCommand("cc","切换API/订阅"), BotCommand("model","切换模型"),
             BotCommand("mode","查看状态"), BotCommand("status","三Bot服务状态"),
             BotCommand("ping","心跳"), BotCommand("log","查看日志"),
             BotCommand("restart","重启本Bot"), BotCommand("stop","关闭本Bot"),
-        ])
+        ]
+        if bot_dir == "maomao":
+            base_cmds += [
+                BotCommand("1","查询所有持仓"),
+                BotCommand("2","查询各账户余额"),
+                BotCommand("3","现货→合约 /3 <金额>"),
+                BotCommand("4","合约→现货 /4 <金额>"),
+                BotCommand("5","现货→资金 /5 <金额>"),
+                BotCommand("6","资金→现货 /6 <金额>"),
+            ]
+        await app.bot.set_my_commands(base_cmds)
         state = load_state(bot_dir)
         logger.info(f"{bot_name} v4.2 | {mode_label(state['mode'])} | {state['model']}")
         try:
@@ -371,6 +468,13 @@ def create_and_run_bot(env_path, claude_add_dir=None):
     app.add_handler(CommandHandler("log", cmd_log))
     app.add_handler(CommandHandler("restart", cmd_restart))
     app.add_handler(CommandHandler("stop", cmd_stop_bot))
+    if bot_dir == "maomao":
+        app.add_handler(CommandHandler("1", cmd_q_positions))
+        app.add_handler(CommandHandler("2", cmd_q_balances))
+        app.add_handler(CommandHandler("3", cmd_transfer_3))
+        app.add_handler(CommandHandler("4", cmd_transfer_4))
+        app.add_handler(CommandHandler("5", cmd_transfer_5))
+        app.add_handler(CommandHandler("6", cmd_transfer_6))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, handle_photo))
     from telegram.ext import CallbackQueryHandler

@@ -219,6 +219,78 @@ def get_balance() -> dict:
     }
 
 
+def get_all_balances() -> dict:
+    """查询合约/现货/资金账户余额，统一返回"""
+    get_client()
+    headers = {"X-MBX-APIKEY": _api_key}
+    result  = {}
+
+    # 合约账户
+    try:
+        p = {"timestamp": str(int(time.time() * 1000))}
+        p["signature"] = _sign(p)
+        r = requests.get("https://fapi.binance.com/fapi/v2/account", params=p, headers=headers)
+        d = r.json()
+        result["futures"]       = float(d.get("totalWalletBalance", 0))
+        result["futures_avail"] = float(d.get("availableBalance", 0))
+        result["futures_upnl"]  = float(d.get("totalUnrealizedProfit", 0))
+    except Exception:
+        result.update({"futures": 0, "futures_avail": 0, "futures_upnl": 0})
+
+    # 现货账户（过滤 < 1U 的资产由调用方处理）
+    try:
+        p = {"timestamp": str(int(time.time() * 1000))}
+        p["signature"] = _sign(p)
+        r = requests.get("https://api.binance.com/api/v3/account", params=p, headers=headers)
+        balances = r.json().get("balances", [])
+        result["spot"] = {
+            b["asset"]: float(b["free"]) + float(b["locked"])
+            for b in balances
+            if float(b["free"]) + float(b["locked"]) > 0
+        }
+    except Exception:
+        result["spot"] = {}
+
+    # 资金账户
+    try:
+        p = {"timestamp": str(int(time.time() * 1000))}
+        p["signature"] = _sign(p)
+        r = requests.post("https://api.binance.com/sapi/v1/asset/get-funding-asset",
+                          params=p, headers=headers)
+        items = r.json() if isinstance(r.json(), list) else []
+        result["funding"] = {
+            i["asset"]: float(i.get("free", 0)) + float(i.get("locked", 0))
+            for i in items
+            if float(i.get("free", 0)) + float(i.get("locked", 0)) > 0
+        }
+    except Exception:
+        result["funding"] = {}
+
+    return result
+
+
+def transfer_funds(amount: float, transfer_type: str) -> str:
+    """
+    账户间划转 USDT。
+    transfer_type: MAIN_UMFUTURE / UMFUTURE_MAIN / MAIN_FUNDING / FUNDING_MAIN
+    返回 tranId 字符串，失败抛异常。
+    """
+    get_client()
+    params = {
+        "type":      transfer_type,
+        "asset":     "USDT",
+        "amount":    str(amount),
+        "timestamp": str(int(time.time() * 1000)),
+    }
+    params["signature"] = _sign(params)
+    r = requests.post("https://api.binance.com/sapi/v1/asset/transfer",
+                      params=params, headers={"X-MBX-APIKEY": _api_key})
+    data = r.json()
+    if r.status_code != 200:
+        raise Exception(data.get("msg", str(data)))
+    return str(data.get("tranId", "?"))
+
+
 def ping() -> str:
     try:
         client = get_client()
