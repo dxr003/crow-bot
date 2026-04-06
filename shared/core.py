@@ -116,7 +116,7 @@ async def subscription_gen(prompt, system_prompt, claude_add_dir=None):
         cmd = ["claude", "-p", prompt]
         if claude_add_dir: cmd.extend(["--add-dir", claude_add_dir])
         cmd.extend(["--append-system-prompt", system_prompt, "--output-format", "stream-json", "--verbose"])
-        proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env={k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"})
         result_text = []
         async for line in proc.stdout:
             raw = line.decode("utf-8").strip()
@@ -382,7 +382,8 @@ async def claudecode_gen(prompt, add_dir="/root", bot_dir="damao"):
         cmd.extend(["-p", prompt])
         proc = await asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE, cwd=add_dir)
+            stderr=asyncio.subprocess.PIPE, cwd=add_dir,
+            env={k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"})
         final_result = ""
         async for raw_line in proc.stdout:
             line = raw_line.decode("utf-8").strip()
