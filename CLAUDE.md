@@ -31,11 +31,13 @@
 
 | 服务名 | 入口文件 | 说明 |
 |--------|---------|------|
-| `claude-telegram-bot` | `/root/.local/bin/claude-telegram-bot` | 大猫，env: `/root/.claude-telegram.env` |
-| `trader_bot` | `/root/trader_bot.py` | 玄玄（交易+陪伴） |
-| `redis-server` | — | 工作记忆（localhost:6379） |
+| `damao` | `/root/damao/bot.py` | 大猫，开发运维 |
+| `maomao` | `/root/maomao/bot.py` | 玄玄，交易执行+陪伴 |
+| `baobao` | `/root/baobao/bot.py` | 播报Bot，待开发对接 |
 
-> 查看服务状态：`systemctl is-active claude-telegram-bot trader_bot redis-server`
+> 查看服务状态：`systemctl is-active damao maomao baobao`
+
+> Redis 已移除，两个Bot状态均通过 JSON 文件持久化，无需共享内存层。
 
 ---
 
