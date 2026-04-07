@@ -12,7 +12,8 @@ STATE_FILE = Path("/root/short_attack/data/state.json")
 # 配置参数（从env读取，有默认值）
 MONITOR_THRESHOLD  = float(os.getenv("MONITOR_THRESHOLD", 80))
 SIGNAL_RISE        = float(os.getenv("SIGNAL_RISE", 150))
-SIGNAL_PULLBACK    = float(os.getenv("SIGNAL_PULLBACK", 20))
+SIGNAL_PULLBACK_MIN = float(os.getenv("SIGNAL_PULLBACK_MIN", 15))
+SIGNAL_PULLBACK_MAX = float(os.getenv("SIGNAL_PULLBACK_MAX", 30))
 EXIT_THRESHOLD     = float(os.getenv("EXIT_THRESHOLD", 60))
 SUCCESS_DROP       = float(os.getenv("SUCCESS_DROP", 50))
 LIQ_MULTIPLIER     = float(os.getenv("LIQ_MULTIPLIER", 1.20))
@@ -86,7 +87,7 @@ def process_tick(tickers: list[dict]) -> dict:
         )
         pullback_from_max = (max_price - cur_price) / max_price * 100
 
-        if total_rise >= SIGNAL_RISE and pullback_from_max >= SIGNAL_PULLBACK:
+        if total_rise >= SIGNAL_RISE and SIGNAL_PULLBACK_MIN <= pullback_from_max <= SIGNAL_PULLBACK_MAX:
             # 升级为持仓信号
             liq_price = round(cur_price * LIQ_MULTIPLIER, 8)
             signal_data = {
