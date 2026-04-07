@@ -173,6 +173,17 @@ status = format_status()
 ```
 直接把 result 回复给爸爸。浮盈不足50%会自动提示还差多少。
 
+**取消滚仓监控**：爸爸说"取消滚仓 BTC"，玄玄执行：
+```python
+import json
+from pathlib import Path
+f = Path("/root/short_attack/data/roll_watch.json")
+watch = json.loads(f.read_text()) if f.exists() else []
+watch = [s for s in watch if "BTC" not in s]
+f.write_text(json.dumps(watch, ensure_ascii=False))
+# 回复：✅ BTC 滚仓监控已取消
+```
+
 **支持双方向**：多单/空单都能滚，系统自动识别方向。
 
 ### 强平价反推公式
