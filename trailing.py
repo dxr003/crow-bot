@@ -221,9 +221,8 @@ def check_all() -> list:
 
             # ── 计算回撤，判断是否触发 ──
             drawdown = _drawdown(side, peak, cur_price)
-            actual_trigger = PULLBACK_TRIGGER + TOLERANCE   # 25+3=28%，防抖
 
-            if drawdown >= actual_trigger:
+            if drawdown >= PULLBACK_TRIGGER:
                 # 先撤掉该币种所有挂单（止盈/止损），避免孤单
                 from trader.exchange import cancel_all_orders
                 cancel_all_orders(symbol)
