@@ -224,6 +224,10 @@ def check_all() -> list:
             actual_trigger = PULLBACK_TRIGGER + TOLERANCE   # 25+3=28%，防抖
 
             if drawdown >= actual_trigger:
+                # 先撤掉该币种所有挂单（止盈/止损），避免孤单
+                from trader.exchange import cancel_all_orders
+                cancel_all_orders(symbol)
+
                 action = "close_long" if side == "long" else "close_short"
                 result = execute({"action": action, "symbol": symbol})
 
