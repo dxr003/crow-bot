@@ -57,6 +57,7 @@ def main():
         try:
             if not get_positions(symbol):
                 logger.info(f"{symbol} 持仓消失，移出滚仓名单")
+                _notify(f"ℹ️ {symbol.replace('USDT','')} 持仓已消失，滚仓监控自动解除")
                 to_remove.append(symbol)
                 continue
 
