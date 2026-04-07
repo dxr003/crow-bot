@@ -116,26 +116,55 @@ def main():
 def _auto_trade(sig: dict):
     """
     自动下单入口（AUTO_TRADE=true 时调用）
-    调用玄玄交易底盘的 execute() 函数
+    开空 → 绑定移动止盈 → 登记滚仓
     """
     symbol    = sig["symbol"]
     liq_price = sig["liq_price"]
-    logger.info(f"[AUTO_TRADE] 准备做空 {symbol} 强平价:{liq_price}")
+    usdt      = float(os.getenv("AUTO_TRADE_USDT",    100))
+    leverage  = int(os.getenv("AUTO_TRADE_LEVERAGE",  10))
+    logger.info(f"[AUTO_TRADE] 准备做空 {symbol} 强平价:{liq_price} {usdt}U {leverage}x")
 
     sys.path.insert(0, "/root/maomao")
     from trader.order import execute
+    from trader.trailing import activate as trailing_activate
+    from trader.rolling import ROLL_FILE
+    import json, pathlib
 
+    # 1. 开空（逐仓，强平价反推，暗单）
     order = {
-        "action":      "open",
+        "action":      "open_short",
         "symbol":      symbol,
-        "side":        "short",
         "price_type":  "liq",
         "liq_target":  liq_price,
-        "margin_mode": "cross",
-        "usdt":        None,   # 由风控决定仓位大小，后续完善
+        "margin_mode": "isolated",
+        "usdt":        usdt,
+        "leverage":    leverage,
+        "dark_order":  True,
     }
     result = execute(order)
-    logger.info(f"[AUTO_TRADE] 下单结果: {result}")
+    logger.info(f"[AUTO_TRADE] 开仓结果: {result}")
+
+    if "❌" in result:
+        logger.error(f"[AUTO_TRADE] 开仓失败，跳过技能绑定")
+        return
+
+    # 2. 绑定移动止盈（默认40%激活）
+    try:
+        msg = trailing_activate(symbol)
+        logger.info(f"[AUTO_TRADE] 移动止盈: {msg}")
+    except Exception as e:
+        logger.warning(f"[AUTO_TRADE] 移动止盈绑定失败: {e}")
+
+    # 3. 登记滚仓（写入滚仓监控名单）
+    try:
+        roll_list_file = pathlib.Path("/root/short_attack/data/roll_watch.json")
+        roll_list = json.loads(roll_list_file.read_text()) if roll_list_file.exists() else []
+        if symbol not in roll_list:
+            roll_list.append(symbol)
+        roll_list_file.write_text(json.dumps(roll_list, ensure_ascii=False))
+        logger.info(f"[AUTO_TRADE] 滚仓登记: {symbol}")
+    except Exception as e:
+        logger.warning(f"[AUTO_TRADE] 滚仓登记失败: {e}")
 
 
 if __name__ == "__main__":
