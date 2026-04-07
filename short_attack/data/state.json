@@ -1,0 +1,21 @@
+{
+  "monitoring": {
+    "BULLAUSDT": {
+      "price_at_entry": 0.017936,
+      "max_price": 0.018289,
+      "entry_gain_pct": 94.2,
+      "started_at": 1775535385.660077,
+      "volume_usdt": 228206877.113263,
+      "funding_rate": 0.0667,
+      "oi_change_pct": -6.08
+    }
+  },
+  "signals": {},
+  "exits": [],
+  "cooldowns": {},
+  "stats": {
+    "success": 0,
+    "failed": 0
+  },
+  "last_card_at": 1775535385.660077
+}
