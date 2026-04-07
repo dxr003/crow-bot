@@ -58,12 +58,13 @@ def send_new_monitor(mon: dict):
     """新目标进入监控——立即推"""
     symbol = mon["symbol"]
     text = (
+        f"🎯 <b>刃哥做空阻击</b>\n"
         f"🚨 <b>新目标入场 — {_coin(symbol)}</b>\n\n"
         f"📈 发现涨幅：+{mon['change_pct']}%\n"
         f"💰 发现价：{mon['price']}\n"
         f"💹 24h成交量：{_fmt_vol(mon['volume_usdt'])}\n"
         f"⏱ 监控开始：{time.strftime('%m-%d %H:%M')}\n\n"
-        f"⚠️ 仅供参考，开空由爸爸决定"
+        f"开空可以由玄玄自动执行，或由老大和社区兄弟们自行决定"
     )
     _send(text)
 
@@ -78,6 +79,7 @@ def send_signal(sig: dict):
     oi_str      = f"{oi_chg:+.1f}%" if oi_chg else "获取中"
 
     text = (
+        f"🎯 <b>刃哥做空阻击</b>\n"
         f"🔥 <b>做空信号触发 — {_coin(symbol)}</b>\n\n"
         f"📈 24h总涨幅：+{sig['total_rise']}%\n"
         f"📉 从最高价回撤：-{sig['pullback_pct']}%\n"
@@ -86,7 +88,7 @@ def send_signal(sig: dict):
         f"📊 资金费率：{funding_str}\n"
         f"📌 OI变化：{oi_str}\n"
         f"💹 24h成交量：{_fmt_vol(vol)}\n\n"
-        f"⚠️ 仅供参考，开空由爸爸决定"
+        f"开空可以由玄玄自动执行，或由老大和社区兄弟们自行决定"
     )
     _send(text)
 
@@ -99,7 +101,7 @@ def send_card(state: dict):
     exits      = state.get("exits", [])[:3]
     stats      = state.get("stats", {"success": 0, "failed": 0})
 
-    lines = [f"🎯 <b>做空阻击 · {time.strftime('%m-%d %H:%M')}</b>"]
+    lines = [f"🎯 <b>刃哥做空阻击 · {time.strftime('%m-%d %H:%M')}</b>"]
     lines.append("━━━━━━━━━━━━━━━━━━━━")
 
     # 监控中
@@ -143,6 +145,6 @@ def send_card(state: dict):
     # 战绩 + 底部
     lines.append(f"\n🏆 <b>战绩</b>  ✅击中 {stats['success']}  ❌失败 {stats['failed']}")
     lines.append("━━━━━━━━━━━━━━━━━━━━")
-    lines.append("⚠️ 仅供参考，开空由爸爸决定")
+    lines.append("开空可以由玄玄自动执行，或由老大和社区兄弟们自行决定")
 
     _send("\n".join(lines))
