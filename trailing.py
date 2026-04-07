@@ -229,7 +229,7 @@ def check_all() -> list:
                 cancel_all_orders(symbol)
 
                 action = "close_long" if side == "long" else "close_short"
-                result = execute({"action": action, "symbol": symbol})
+                result = execute({"action": action, "symbol": symbol, "dark_order": True})
 
                 del state[symbol]
                 changed = True
