@@ -80,10 +80,13 @@ def process_tick(tickers: list[dict]) -> dict:
         max_price = mon["max_price"]
 
         # 判断是否触发持仓信号
-        rise_from_entry = (max_price - entry_price) / entry_price * 100
+        # total_rise：从24h开盘价算总涨幅（买入价基准）
+        total_rise = round(
+            (1 + mon["entry_gain_pct"] / 100) * (max_price / entry_price) * 100 - 100, 1
+        )
         pullback_from_max = (max_price - cur_price) / max_price * 100
 
-        if rise_from_entry >= SIGNAL_RISE and pullback_from_max >= SIGNAL_PULLBACK:
+        if total_rise >= SIGNAL_RISE and pullback_from_max >= SIGNAL_PULLBACK:
             # 升级为持仓信号
             liq_price = round(cur_price * LIQ_MULTIPLIER, 8)
             signal_data = {
@@ -92,7 +95,7 @@ def process_tick(tickers: list[dict]) -> dict:
                 "liq_price":       liq_price,
                 "max_price":       max_price,
                 "entry_gain_pct":  mon.get("entry_gain_pct", 0),
-                "rise_from_entry": round(rise_from_entry, 1),
+                "total_rise":      total_rise,
                 "pullback_pct":    round(pullback_from_max, 1),
                 "triggered_at":    now,
                 "volume_usdt":     mon.get("volume_usdt", 0),

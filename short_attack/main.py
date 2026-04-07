@@ -71,7 +71,7 @@ def main():
     # 4. 触发持仓信号的币 — 补充辅助数据 + 立即推醒目通知
     for sig in events["new_signals"]:
         symbol = sig["symbol"]
-        logger.info(f"持仓信号: {symbol} 入场+{sig['rise_from_entry']}% 回撤-{sig['pullback_pct']}%")
+        logger.info(f"持仓信号: {symbol} 总涨+{sig['total_rise']}% 回撤-{sig['pullback_pct']}%")
         try:
             extra = scanner.get_signal_data(symbol)
             # 获取当前成交量

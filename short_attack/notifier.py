@@ -42,11 +42,10 @@ def _fmt_vol(vol: float) -> str:
     return f"${vol:.0f}"
 
 def _fmt_elapsed(ts: float) -> str:
-    """格式化经过时间"""
-    h = int((time.time() - ts) / 3600)
-    if h < 1:
-        return "0h"
-    return f"{h}h"
+    elapsed = int(time.time() - ts)
+    if elapsed < 3600:
+        return f"{elapsed // 60}m"
+    return f"{elapsed // 3600}h"
 
 def _coin(symbol: str) -> str:
     """去掉USDT后缀"""
@@ -80,7 +79,7 @@ def send_signal(sig: dict):
 
     text = (
         f"🔥 <b>做空信号触发 — {_coin(symbol)}</b>\n\n"
-        f"📈 从发现价上涨：+{sig['rise_from_entry']}%\n"
+        f"📈 24h总涨幅：+{sig['total_rise']}%\n"
         f"📉 从最高价回撤：-{sig['pullback_pct']}%\n"
         f"💰 建议入场价：{sig['position_price']}\n"
         f"⚡ 建议强平价：{sig['liq_price']}（市价×120%）\n\n"
@@ -114,7 +113,7 @@ def send_card(state: dict):
                 (1 + mon["entry_gain_pct"] / 100) * (mon["max_price"] / mon["price_at_entry"]) * 100 - 100, 1
             )
             vol_str = _fmt_vol(mon.get("volume_usdt", 0))
-            rows.append(f"{_coin(symbol):<8} 发现+{mon['entry_gain_pct']}% 峰+{total_max}%  量{vol_str}  {elapsed}")
+            rows.append(f"{_coin(symbol):<8} 监控+{mon['entry_gain_pct']}% 峰+{total_max}%  量{vol_str}  已监控{elapsed}")
         lines.append("<pre>" + "\n".join(rows) + "</pre>")
 
     # 持仓信号
@@ -124,7 +123,7 @@ def send_card(state: dict):
         for symbol, sig in signals.items():
             elapsed  = _fmt_elapsed(sig["triggered_at"])
             rows.append(
-                f"{_coin(symbol)}  入场+{sig['rise_from_entry']}% · 回撤-{sig['pullback_pct']}%\n"
+                f"{_coin(symbol)}  入场+{sig['total_rise']}% · 回撤-{sig['pullback_pct']}%\n"
                 f"  入场价:{sig['position_price']}  强平价:{sig['liq_price']}  {elapsed}"
             )
         lines.append("<pre>" + "\n\n".join(rows) + "</pre>")
