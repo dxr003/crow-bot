@@ -113,6 +113,23 @@ def main():
     logger.info(f"=== 扫描完成 {elapsed}s ===")
 
 
+def _notify_private(text: str):
+    """推私信给乌鸦"""
+    token   = os.getenv("BOT_TOKEN", "")
+    chat_id = os.getenv("OWNER_CHAT_ID", "509640925")
+    if not token:
+        return
+    try:
+        import requests
+        requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": text},
+            timeout=10,
+        )
+    except Exception:
+        pass
+
+
 def _auto_trade(sig: dict):
     """
     自动下单入口（AUTO_TRADE=true 时调用）
@@ -148,14 +165,23 @@ def _auto_trade(sig: dict):
         logger.error(f"[AUTO_TRADE] 开仓失败，跳过技能绑定")
         return
 
-    # 2. 绑定移动止盈（默认40%激活）
+    # 2. 推私信回执
+    _notify_private(
+        f"🤖 自动开空执行 — {symbol.replace('USDT','')}\n"
+        f"金额: {usdt}U  杠杆: {leverage}x  逐仓\n"
+        f"强平价: {liq_price}\n"
+        f"{result}"
+    )
+
+    # 3. 绑定移动止盈（默认40%激活）
     try:
         msg = trailing_activate(symbol)
         logger.info(f"[AUTO_TRADE] 移动止盈: {msg}")
+        _notify_private(f"📌 移动止盈已绑定\n{msg}")
     except Exception as e:
         logger.warning(f"[AUTO_TRADE] 移动止盈绑定失败: {e}")
 
-    # 3. 登记滚仓（写入滚仓监控名单）
+    # 4. 登记滚仓（写入滚仓监控名单）
     try:
         roll_list_file = pathlib.Path("/root/short_attack/data/roll_watch.json")
         roll_list = json.loads(roll_list_file.read_text()) if roll_list_file.exists() else []
