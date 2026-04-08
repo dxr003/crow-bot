@@ -16,7 +16,7 @@ SIGNAL_PULLBACK_MIN = float(os.getenv("SIGNAL_PULLBACK_MIN", 10))
 SIGNAL_PULLBACK_MAX = float(os.getenv("SIGNAL_PULLBACK_MAX", 25))
 EXIT_THRESHOLD     = float(os.getenv("EXIT_THRESHOLD", 60))
 SUCCESS_DROP       = float(os.getenv("SUCCESS_DROP", 50))
-LIQ_MULTIPLIER     = float(os.getenv("LIQ_MULTIPLIER", 1.20))
+LIQ_MULTIPLIER     = float(os.getenv("LIQ_MULTIPLIER", 2.20))
 REENTRY_COOLDOWN_H = float(os.getenv("REENTRY_COOLDOWN_H", 24))
 MONITOR_EXPIRE_H   = float(os.getenv("MONITOR_EXPIRE_H", 72))
 CARD_INTERVAL_MIN  = float(os.getenv("CARD_INTERVAL_MIN", 60))
@@ -73,10 +73,11 @@ def process_tick(tickers: list[dict]) -> dict:
 
         entry_price = mon["price_at_entry"]
 
-        # 更新最高价
+        # 更新最高价 + 实时价格
         if cur_price > mon.get("max_price", entry_price):
             mon["max_price"] = cur_price
-            state["monitoring"][symbol] = mon
+        mon["cur_price"] = cur_price
+        state["monitoring"][symbol] = mon
 
         max_price = mon["max_price"]
 
@@ -108,15 +109,16 @@ def process_tick(tickers: list[dict]) -> dict:
             events["new_signals"].append({"symbol": symbol, **signal_data})
             continue
 
-        # 判断自然退出：跌回发现价的(1 - EXIT_THRESHOLD/100)以下
-        exit_price_line = entry_price * (1 - EXIT_THRESHOLD / 100)
+        # 判断自然退出：24h总涨幅跌到<60%才退出，给回弹空间
+        base_price = entry_price / (1 + mon["entry_gain_pct"] / 100)
+        exit_price_line = base_price * (1 + EXIT_THRESHOLD / 100)
         elapsed_h = (now - mon["started_at"]) / 3600
 
         exit_reason = None
         if cur_price <= exit_price_line:
-            exit_reason = "涨幅回落"
+            exit_reason = "未达标做空退出"
         elif elapsed_h >= MONITOR_EXPIRE_H:
-            exit_reason = "监控超时"
+            exit_reason = "未达标做空退出"
 
         if exit_reason:
             exit_pct = round((cur_price - entry_price) / entry_price * 100, 1)
@@ -138,10 +140,11 @@ def process_tick(tickers: list[dict]) -> dict:
 
         position_price = sig["position_price"]
 
-        # 更新最高价（持仓后可能继续涨）
+        # 更新最高价 + 实时价格（持仓后可能继续涨）
         if cur_price > sig.get("max_price", position_price):
             sig["max_price"] = cur_price
-            state["signals"][symbol] = sig
+        sig["cur_price"] = cur_price
+        state["signals"][symbol] = sig
 
         # 击中：从持仓价跌超 SUCCESS_DROP%
         drop_pct = (position_price - cur_price) / position_price * 100

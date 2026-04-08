@@ -168,7 +168,7 @@ def send_card(state: dict):
             icon = "✅" if ex["reason"] == "阻击成功" else ("❌" if ex["reason"] == "阻击失败" else "↩️")
             ago  = _fmt_elapsed(ex["exited_at"])
             rows.append(
-                f"{icon} {_coin(ex['symbol']):<6} 最高+{ex['max_pct']}% · 出场+{ex['exit_pct']}% · {ex['reason']}  {ago}前"
+                f"{icon} {_coin(ex['symbol']):<6} {ex['reason']}  {ago}前"
             )
         lines.append("<pre>" + "\n".join(rows) + "</pre>")
 
