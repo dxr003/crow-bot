@@ -138,9 +138,11 @@ def send_card(state: dict):
         for symbol, sig in pending.items():
             elapsed = _fmt_elapsed(sig["triggered_at"])
             cur_price = sig.get("cur_price", sig["position_price"])
+            pnl_pct = round((sig["position_price"] - cur_price) / sig["position_price"] * 100, 1)
+            pnl_str = f"+{pnl_pct}%" if pnl_pct > 0 else f"{pnl_pct}%"
             rows.append(
-                f"{_coin(symbol)}  涨+{sig['total_rise']}% · 回撤-{sig['pullback_pct']}%\n"
-                f"  建议入场:{sig['position_price']}  现价:{cur_price}  {elapsed}"
+                f"{_coin(symbol)}  24h涨幅+{sig['total_rise']}%\n"
+                f"  建议入场:{sig['position_price']}  现价:{cur_price}（做空{pnl_str}）  {elapsed}"
             )
         lines.append("<pre>" + "\n\n".join(rows) + "</pre>")
     else:
