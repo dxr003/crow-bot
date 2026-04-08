@@ -71,7 +71,7 @@ def main():
     # 4. 触发持仓信号的币 — 补充辅助数据 + 立即推醒目通知
     for sig in events["new_signals"]:
         symbol = sig["symbol"]
-        logger.info(f"持仓信号: {symbol} 总涨+{sig['total_rise']}% 回撤-{sig['pullback_pct']}%")
+        logger.info(f"阻击信号: {symbol} 总涨+{sig['total_rise']}% 回撤-{sig['pullback_pct']}%")
         try:
             extra = scanner.get_signal_data(symbol)
             # 获取当前成交量
@@ -133,27 +133,36 @@ def _notify_private(text: str):
 def _auto_trade(sig: dict):
     """
     自动下单入口（AUTO_TRADE=true 时调用）
-    开空 → 绑定移动止盈 → 登记滚仓
+    开空 → (全仓:挂止损单) → 绑定移动止盈 → (全仓:登记滚仓)
     """
+    # ── 读取 MARGIN_MODE，未指定则拒绝执行 ──
+    margin_mode = os.getenv("MARGIN_MODE", "").strip().lower()
+    if margin_mode not in ("cross", "isolated"):
+        logger.error("[AUTO_TRADE] MARGIN_MODE 未指定或无效，拒绝执行。请在 .env 设置 cross 或 isolated")
+        _notify_private("❌ 自动下单失败：MARGIN_MODE 未指定\n请在 .env 设置 cross（全仓）或 isolated（逐仓）")
+        return
+
     symbol    = sig["symbol"]
     liq_price = sig["liq_price"]
     usdt      = float(os.getenv("AUTO_TRADE_USDT",    100))
     leverage  = int(os.getenv("AUTO_TRADE_LEVERAGE",  10))
-    logger.info(f"[AUTO_TRADE] 准备做空 {symbol} 强平价:{liq_price} {usdt}U {leverage}x")
+    mode_cn   = "全仓" if margin_mode == "cross" else "逐仓"
+    logger.info(f"[AUTO_TRADE] 准备做空 {symbol} {mode_cn} 强平价:{liq_price} {usdt}U {leverage}x")
 
     sys.path.insert(0, "/root/maomao")
     from trader.order import execute
     from trader.trailing import activate as trailing_activate
-    from trader.rolling import ROLL_FILE
+    from trader.exchange import get_client
+    from trader.precision import fix_price
     import json, pathlib
 
-    # 1. 开空（逐仓，强平价反推，暗单）
+    # 1. 开空（强平价反推，暗单）
     order = {
         "action":      "open_short",
         "symbol":      symbol,
         "price_type":  "liq",
         "liq_target":  liq_price,
-        "margin_mode": "isolated",
+        "margin_mode": margin_mode,
         "usdt":        usdt,
         "leverage":    leverage,
         "dark_order":  True,
@@ -162,16 +171,42 @@ def _auto_trade(sig: dict):
     logger.info(f"[AUTO_TRADE] 开仓结果: {result}")
 
     if "❌" in result:
-        logger.error(f"[AUTO_TRADE] 开仓失败，跳过技能绑定")
+        logger.error(f"[AUTO_TRADE] 开仓失败，跳过后续绑定")
         return
 
+    # 1.5 全仓模式：在 liq_price 挂 STOP_MARKET 止损单（等效强平保护）
+    stop_text = ""
+    if margin_mode == "cross":
+        try:
+            cl = get_client()
+            stop_price = fix_price(symbol, liq_price)
+            cl.new_order(
+                symbol=symbol, side="BUY", type="STOP_MARKET",
+                stopPrice=stop_price, closePosition="true",
+                timeInForce="GTC", workingType="MARK_PRICE"
+            )
+            stop_text = f"止损单: {stop_price}（标记价触发）"
+            logger.info(f"[AUTO_TRADE] 全仓止损单: {symbol} @ {stop_price}")
+        except Exception as e:
+            stop_text = f"⚠️ 止损单挂单失败: {e}"
+            logger.error(f"[AUTO_TRADE] 止损单挂单失败: {e}")
+
+    # 标记已执行
+    s = state_mgr.load()
+    if symbol in s["signals"]:
+        s["signals"][symbol]["executed"] = True
+        state_mgr.save(s)
+
     # 2. 推私信回执
-    _notify_private(
+    receipt = (
         f"🤖 自动开空执行 — {symbol.replace('USDT','')}\n"
-        f"金额: {usdt}U  杠杆: {leverage}x  逐仓\n"
+        f"金额: {usdt}U  杠杆: {leverage}x  {mode_cn}\n"
         f"强平价: {liq_price}\n"
-        f"{result}"
     )
+    if stop_text:
+        receipt += f"{stop_text}\n"
+    receipt += result
+    _notify_private(receipt)
 
     # 3. 绑定移动止盈（默认40%激活）
     try:
@@ -181,16 +216,17 @@ def _auto_trade(sig: dict):
     except Exception as e:
         logger.warning(f"[AUTO_TRADE] 移动止盈绑定失败: {e}")
 
-    # 4. 登记滚仓（写入滚仓监控名单）
-    try:
-        roll_list_file = pathlib.Path("/root/short_attack/data/roll_watch.json")
-        roll_list = json.loads(roll_list_file.read_text()) if roll_list_file.exists() else []
-        if symbol not in roll_list:
-            roll_list.append(symbol)
-        roll_list_file.write_text(json.dumps(roll_list, ensure_ascii=False))
-        logger.info(f"[AUTO_TRADE] 滚仓登记: {symbol}")
-    except Exception as e:
-        logger.warning(f"[AUTO_TRADE] 滚仓登记失败: {e}")
+    # 4. 全仓才登记滚仓，逐仓不绑滚仓
+    if margin_mode == "cross":
+        try:
+            roll_list_file = pathlib.Path("/root/short_attack/data/roll_watch.json")
+            roll_list = json.loads(roll_list_file.read_text()) if roll_list_file.exists() else []
+            if symbol not in roll_list:
+                roll_list.append(symbol)
+            roll_list_file.write_text(json.dumps(roll_list, ensure_ascii=False))
+            logger.info(f"[AUTO_TRADE] 滚仓登记: {symbol}")
+        except Exception as e:
+            logger.warning(f"[AUTO_TRADE] 滚仓登记失败: {e}")
 
 
 if __name__ == "__main__":

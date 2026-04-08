@@ -57,12 +57,15 @@ def _coin(symbol: str) -> str:
 def send_new_monitor(mon: dict):
     """新目标进入监控——立即推"""
     symbol = mon["symbol"]
+    funding = mon.get("funding_rate", 0)
+    funding_str = f"{funding:+.4f}%" if funding else "获取中"
     text = (
         f"🎯 <b>刃哥做空阻击</b>\n"
-        f"🚨 <b>新目标入场 — {_coin(symbol)}</b>\n\n"
+        f"🚨 <b>新目标进入监控等待买入时机 — {_coin(symbol)}</b>\n\n"
         f"📈 发现涨幅：+{mon['change_pct']}%\n"
         f"💰 发现价：{mon['price']}\n"
         f"💹 24h成交量：{_fmt_vol(mon['volume_usdt'])}\n"
+        f"📊 资金费率：{funding_str}\n"
         f"⏱ 监控开始：{time.strftime('%m-%d %H:%M')}\n\n"
         f"开空可以由玄玄自动执行，或由老大和社区兄弟们自行决定"
     )
@@ -80,11 +83,11 @@ def send_signal(sig: dict):
 
     text = (
         f"🎯 <b>刃哥做空阻击</b>\n"
-        f"🔥 <b>做空信号触发 — {_coin(symbol)}</b>\n\n"
+        f"🔥 <b>请立即执行做空 — {_coin(symbol)}</b>\n\n"
         f"📈 24h总涨幅：+{sig['total_rise']}%\n"
         f"📉 从最高价回撤：-{sig['pullback_pct']}%\n"
         f"💰 建议入场价：{sig['position_price']}\n"
-        f"⚡ 建议强平价：{sig['liq_price']}（市价×120%）\n\n"
+        f"⚡ 建议强平价：{sig['liq_price']}\n\n"
         f"📊 资金费率：{funding_str}\n"
         f"📌 OI变化：{oi_str}\n"
         f"💹 24h成交量：{_fmt_vol(vol)}\n\n"
@@ -110,23 +113,50 @@ def send_card(state: dict):
         rows = []
         for symbol, mon in monitoring.items():
             elapsed = _fmt_elapsed(mon["started_at"])
-            # 总峰值 = 从24h前基准算到最高点（包含发现前涨幅 + 监控中涨幅）
+            entry_price = mon["price_at_entry"]
+            base_price = entry_price / (1 + mon["entry_gain_pct"] / 100)
+            # 峰值涨幅（从24h基准）
             total_max = round(
-                (1 + mon["entry_gain_pct"] / 100) * (mon["max_price"] / mon["price_at_entry"]) * 100 - 100, 1
+                (1 + mon["entry_gain_pct"] / 100) * (mon["max_price"] / entry_price) * 100 - 100, 1
             )
+            # 实时涨幅（从24h基准）
+            cur_price = mon.get("cur_price", entry_price)
+            cur_gain = round((cur_price / base_price - 1) * 100, 1)
             vol_str = _fmt_vol(mon.get("volume_usdt", 0))
-            rows.append(f"{_coin(symbol):<8} 监控+{mon['entry_gain_pct']}% 峰+{total_max}%  量{vol_str}  已监控{elapsed}")
+            funding = mon.get("funding_rate", 0)
+            funding_str = f"费率{funding:+.4f}%" if funding else "费率获取中"
+            rows.append(f"{_coin(symbol):<8} 现价{cur_price} 涨+{cur_gain}% 峰+{total_max}%\n         量{vol_str}  {funding_str}  {elapsed}")
         lines.append("<pre>" + "\n".join(rows) + "</pre>")
 
-    # 持仓信号
-    lines.append(f"\n🚨 <b>持仓信号（{len(signals)}个）</b>" if signals else "\n🚨 <b>持仓信号：无</b>")
-    if signals:
+    # 阻击信号 / 持仓中
+    positions = {s: d for s, d in signals.items() if d.get("executed")}
+    pending   = {s: d for s, d in signals.items() if not d.get("executed")}
+
+    if pending:
+        lines.append(f"\n🚨 <b>阻击信号（{len(pending)}个）</b>")
         rows = []
-        for symbol, sig in signals.items():
-            elapsed  = _fmt_elapsed(sig["triggered_at"])
+        for symbol, sig in pending.items():
+            elapsed = _fmt_elapsed(sig["triggered_at"])
+            cur_price = sig.get("cur_price", sig["position_price"])
             rows.append(
-                f"{_coin(symbol)}  入场+{sig['total_rise']}% · 回撤-{sig['pullback_pct']}%\n"
-                f"  入场价:{sig['position_price']}  强平价:{sig['liq_price']}  {elapsed}"
+                f"{_coin(symbol)}  涨+{sig['total_rise']}% · 回撤-{sig['pullback_pct']}%\n"
+                f"  建议入场:{sig['position_price']}  现价:{cur_price}  {elapsed}"
+            )
+        lines.append("<pre>" + "\n\n".join(rows) + "</pre>")
+    else:
+        lines.append("\n🚨 <b>阻击信号：无</b>")
+
+    if positions:
+        lines.append(f"\n💀 <b>持仓中（{len(positions)}个）</b>")
+        rows = []
+        for symbol, sig in positions.items():
+            elapsed = _fmt_elapsed(sig["triggered_at"])
+            cur_price = sig.get("cur_price", sig["position_price"])
+            pnl_pct = round((sig["position_price"] - cur_price) / sig["position_price"] * 100, 1)
+            pnl_icon = "🟢" if pnl_pct > 0 else "🔴"
+            rows.append(
+                f"{_coin(symbol)}  入场:{sig['position_price']}  现价:{cur_price}\n"
+                f"  {pnl_icon}浮盈:{pnl_pct:+.1f}%  强平:{sig['liq_price']}  {elapsed}"
             )
         lines.append("<pre>" + "\n\n".join(rows) + "</pre>")
 
