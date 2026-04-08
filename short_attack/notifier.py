@@ -108,7 +108,7 @@ def send_card(state: dict):
     lines.append("━━━━━━━━━━━━━━━━━━━━")
 
     # 监控中
-    lines.append(f"\n👁 <b>等待买入时机（{len(monitoring)}个）</b>" if monitoring else "\n👁 <b>等待买入时机：无</b>")
+    lines.append(f"\n👁 <b>监控中并等待信号做空（{len(monitoring)}个）</b>" if monitoring else "\n👁 <b>不满条件进入监控</b>")
     if monitoring:
         rows = []
         for symbol, mon in monitoring.items():
