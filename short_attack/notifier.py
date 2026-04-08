@@ -148,7 +148,7 @@ def send_card(state: dict):
     else:
         lines.append("\n🚨 <b>阻击信号：无</b>")
 
-    lines.append(f"\n💀 <b>持仓中（{len(positions)}个）</b>" if positions else "\n💀 <b>持仓中：无</b>")
+    lines.append(f"\n💀 <b>已执行买入（{len(positions)}个）</b>" if positions else "\n💀 <b>没有发现买入信号</b>")
     if positions:
         rows = []
         for symbol, sig in positions.items():
