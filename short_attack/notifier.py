@@ -108,7 +108,7 @@ def send_card(state: dict):
     lines.append("━━━━━━━━━━━━━━━━━━━━")
 
     # 监控中
-    lines.append(f"\n👁 <b>监控中（{len(monitoring)}个）</b>" if monitoring else "\n👁 <b>监控中：无</b>")
+    lines.append(f"\n👁 <b>等待买入时机（{len(monitoring)}个）</b>" if monitoring else "\n👁 <b>等待买入时机：无</b>")
     if monitoring:
         rows = []
         for symbol, mon in monitoring.items():
@@ -148,8 +148,8 @@ def send_card(state: dict):
     else:
         lines.append("\n🚨 <b>阻击信号：无</b>")
 
+    lines.append(f"\n💀 <b>持仓中（{len(positions)}个）</b>" if positions else "\n💀 <b>持仓中：无</b>")
     if positions:
-        lines.append(f"\n💀 <b>持仓中（{len(positions)}个）</b>")
         rows = []
         for symbol, sig in positions.items():
             elapsed = _fmt_elapsed(sig["triggered_at"])
