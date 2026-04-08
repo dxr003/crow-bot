@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-共享底盘 v4.2 — 双管道核心引擎
-大猫和玄玄共用，通过参数区分行为。
-# 底座已固定 v4.2 — 新功能只通过 trader/ 模块挂载，禁止修改此文件
+共享底盘 v4.3 — Claude Code 代理核心
+大猫和玄玄共用，永远走 Claude Code 代理模式。
+读图走独立 ANTHROPIC_API_KEY，聊天永远走订阅。
+# 底座已固定 v4.3 — 新功能只通过 trader/ 模块挂载，禁止修改此文件
 """
 import os, json, logging, asyncio, time, base64, io
 from pathlib import Path
 from dotenv import load_dotenv
-
 from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from telegram.constants import ParseMode
@@ -26,26 +26,119 @@ def _state_file(bot_dir):
 def load_state(bot_dir):
     try:
         s = json.loads(_state_file(bot_dir).read_text())
-        if "model" not in s: s["model"] = MODELS[0]
+        if "model" not in s:
+            s["model"] = MODELS[0]
         return s
     except Exception:
-        return {"mode": "subscription", "model": MODELS[0]}
+        return {"model": MODELS[0]}
 
 def save_state(bot_dir, state):
     _state_file(bot_dir).write_text(json.dumps(state, ensure_ascii=False))
 
-def mode_label(mode):
-    return "🔑 API" if mode == "api" else "📦 订阅"
-
 def model_short(model):
     return model.replace("claude-", "").replace("-20251001", "")
 
-async def ask_with_timer(update, gen_coro, mode, model):
-    icon = "🔑" if mode == "api" else "📦"
-    thinking_msg = await update.message.reply_text(f"{icon} {model_short(model)} · 思考中... 0s")
-    start_time = time.time()
-    step_info = {"text": "思考中"}
 
+# ── Claude Code 完整 Agent（聊天永远走这里）──
+async def claudecode_gen(prompt, add_dir="/root", bot_dir="damao", model=None):
+    async def _gen(step_info):
+        import json as _json
+        TOOL_ICONS = {
+            "Bash": "🖥️", "Read": "📘", "Write": "📒", "Edit": "📙",
+            "Grep": "🔍", "Glob": "🗂️", "WebSearch": "🌐", "WebFetch": "🌏",
+            "Task": "🦾", "TodoWrite": "📌", "Skill": "✨",
+        }
+        step_info["text"] = "启动中"
+        step_info["actions"] = []
+        cmd = ["claude", "--print", "--verbose",
+               "--output-format", "stream-json",
+               "--permission-mode", "acceptEdits",
+               "--add-dir", add_dir]
+        if model:
+            cmd.extend(["--model", model])
+        cmd.extend(["-p", prompt])
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE, cwd=add_dir,
+            env={k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"})
+        final_result = ""
+        async def _read():
+            nonlocal final_result
+            async for raw_line in proc.stdout:
+                line = raw_line.decode("utf-8").strip()
+                if not line:
+                    continue
+                try:
+                    obj = _json.loads(line)
+                except Exception:
+                    continue
+                typ = obj.get("type")
+                if typ == "assistant":
+                    for item in obj.get("message", {}).get("content", []):
+                        if item.get("type") == "tool_use":
+                            tool_name = item.get("name", "")
+                            icon = TOOL_ICONS.get(tool_name, "⚙️")
+                            inp = item.get("input", {})
+                            brief = str(inp.get("command") or inp.get("file_path") or
+                                        inp.get("pattern") or inp.get("query") or
+                                        inp.get("prompt") or "")[:50]
+                            step_info["actions"].append(f"{icon} {brief or tool_name}")
+                            step_info["text"] = f"{icon} {tool_name}"
+                elif typ == "result":
+                    final_result = obj.get("result", "").strip()
+        try:
+            await asyncio.wait_for(_read(), timeout=600)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            step_info["text"] = "超时"
+            yield "⏱️ Claude响应超时（600s），已终止进程"
+            return
+        _, stderr_bytes = await proc.communicate()
+        step_info["text"] = "完成"
+        yield final_result or stderr_bytes.decode("utf-8")[:300] or "（无输出）"
+    return _gen
+
+
+# ── API 读图（仅用于图片，不用于聊天）──
+async def api_gen_image(prompt, api_key, model, system_prompt, image_b64):
+    async def _gen(step_info):
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+        content = [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}},
+            {"type": "text", "text": prompt or "请描述这张图片"}
+        ]
+        step_info["text"] = "读图中"
+        loop = asyncio.get_event_loop()
+        queue = asyncio.Queue()
+        def _stream():
+            try:
+                with client.messages.stream(model=model, max_tokens=4096, system=system_prompt,
+                    messages=[{"role": "user", "content": content}]) as stream:
+                    step_info["text"] = "生成描述"
+                    for text in stream.text_stream:
+                        loop.call_soon_threadsafe(queue.put_nowait, text)
+                loop.call_soon_threadsafe(queue.put_nowait, None)
+            except Exception as e:
+                loop.call_soon_threadsafe(queue.put_nowait, f"\n⚠️ 读图失败: {e}")
+                loop.call_soon_threadsafe(queue.put_nowait, None)
+        loop.run_in_executor(None, _stream)
+        while True:
+            chunk = await queue.get()
+            if chunk is None:
+                break
+            yield chunk
+    return _gen
+
+
+# ── 计时器 UI ──
+async def ask_with_timer(update, gen_coro, model):
+    thinking_msg = await update.message.reply_text(f"🐦 乌鸦团队 · 启动中... 0s")
+    start_time = time.time()
+    step_info = {"text": "启动中"}
     async def ticker():
         while True:
             await asyncio.sleep(1)
@@ -55,11 +148,11 @@ async def ask_with_timer(update, gen_coro, mode, model):
                 lines = "\n".join(f"  {a}" for a in actions[-10:])
                 txt = f"⚡ {elapsed}s\n{lines}"
             else:
-                txt = f"{icon} {model_short(model)} · {step_info['text']}... {elapsed}s"
+                txt = f"🐦 乌鸦团队 · {step_info['text']}... {elapsed}s"
             try:
                 await thinking_msg.edit_text(txt)
-            except Exception: pass
-
+            except Exception:
+                pass
     ticker_task = asyncio.create_task(ticker())
     full_text = ""
     try:
@@ -69,84 +162,16 @@ async def ask_with_timer(update, gen_coro, mode, model):
         full_text = f"⚠️ 错误: {e}"
     finally:
         ticker_task.cancel()
-
-    try: await thinking_msg.delete()
-    except Exception: pass
-
-    if not full_text.strip(): full_text = "（无输出）"
+    try:
+        await thinking_msg.delete()
+    except Exception:
+        pass
+    if not full_text.strip():
+        full_text = "（无输出）"
     chunks = [full_text[i:i+4000] for i in range(0, len(full_text), 4000)]
     for chunk in chunks:
         await update.message.reply_text(chunk)
 
-async def api_gen(prompt, api_key, model, system_prompt, image_b64=None):
-    async def _gen(step_info):
-        import anthropic
-        client = anthropic.Anthropic(api_key=api_key)
-        if image_b64:
-            content = [
-                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}},
-                {"type": "text", "text": prompt or "请描述这张图片"}
-            ]
-        else:
-            content = prompt
-        step_info["text"] = "调用API"
-        loop = asyncio.get_event_loop()
-        queue = asyncio.Queue()
-        def _stream():
-            try:
-                with client.messages.stream(model=model, max_tokens=4096, system=system_prompt,
-                    messages=[{"role": "user", "content": content}]) as stream:
-                    step_info["text"] = "生成回复"
-                    for text in stream.text_stream:
-                        loop.call_soon_threadsafe(queue.put_nowait, text)
-                loop.call_soon_threadsafe(queue.put_nowait, None)
-            except Exception as e:
-                loop.call_soon_threadsafe(queue.put_nowait, f"\n⚠️ {e}")
-                loop.call_soon_threadsafe(queue.put_nowait, None)
-        loop.run_in_executor(None, _stream)
-        while True:
-            chunk = await queue.get()
-            if chunk is None: break
-            yield chunk
-    return _gen
-
-async def subscription_gen(prompt, system_prompt, claude_add_dir=None):
-    async def _gen(step_info):
-        step_info["text"] = "调用Claude Code"
-        cmd = ["claude", "-p", prompt]
-        if claude_add_dir: cmd.extend(["--add-dir", claude_add_dir])
-        cmd.extend(["--append-system-prompt", system_prompt, "--output-format", "stream-json", "--verbose"])
-        proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env={k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"})
-        result_text = []
-        async for line in proc.stdout:
-            raw = line.decode("utf-8").strip()
-            if not raw: continue
-            try:
-                data = json.loads(raw)
-                t = data.get("type", "")
-                if t == "tool_use": step_info["text"] = f"执行 {data.get('name', '工具')}"
-                elif t == "text": result_text.append(data.get("text", ""))
-                elif t == "content_block_delta":
-                    delta = data.get("delta", {})
-                    if delta.get("type") == "text_delta": result_text.append(delta.get("text", ""))
-                elif t == "tool_result": step_info["text"] = "处理结果"
-            except json.JSONDecodeError: pass
-        await proc.wait()
-        if proc.returncode != 0:
-            err = await proc.stderr.read()
-            yield f"⚠️ claude CLI错误: {err.decode()[:200]}"
-            return
-        full = "".join(result_text).strip()
-        if full:
-            yield full
-        else:
-            cmd2 = ["claude", "-p", prompt]
-            if claude_add_dir: cmd2.extend(["--add-dir", claude_add_dir])
-            cmd2.extend(["--append-system-prompt", system_prompt, "--output-format", "text"])
-            proc2 = await asyncio.create_subprocess_exec(*cmd2, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-            stdout2, _ = await proc2.communicate()
-            yield stdout2.decode("utf-8").strip() or "（无输出）"
-    return _gen
 
 def create_and_run_bot(env_path, claude_add_dir=None):
     load_dotenv(env_path)
@@ -156,44 +181,45 @@ def create_and_run_bot(env_path, claude_add_dir=None):
     bot_name      = os.getenv("BOT_NAME", "Bot")
     bot_dir       = os.getenv("BOT_DIR", "bot")
     system_prompt = os.getenv("SYSTEM_PROMPT", "你是AI助手。")
-
     log_dir = Path(f"/root/{bot_dir}/logs")
     log_dir.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO,
         handlers=[logging.StreamHandler(), logging.FileHandler(log_dir / "bot.log", encoding="utf-8")])
     logger = logging.getLogger(bot_name)
+    if bot_dir == "damao":
+        _add_dir = claude_add_dir or "/root"
+    elif bot_dir == "maomao":
+        _add_dir = "/root/maomao"
+    else:
+        _add_dir = claude_add_dir or "/root"
 
     def admin_only(func):
         async def wrapper(update, ctx):
-            if update.effective_user.id != admin_id: return
+            if update.effective_user.id != admin_id:
+                return
             return await func(update, ctx)
         return wrapper
 
     async def ask_claude(update, prompt, image_b64=None):
         state = load_state(bot_dir)
-        mode = state.get("mode", "subscription")
         model = state.get("model", MODELS[0])
-        if mode == "api":
+        if image_b64:
             if not anthropic_key:
-                await update.message.reply_text("⚠️ ANTHROPIC_API_KEY 未设置")
+                await update.message.reply_text("⚠️ ANTHROPIC_API_KEY 未设置，无法读图")
                 return
-            gen = await api_gen(prompt, anthropic_key, model, system_prompt, image_b64)
+            gen = await api_gen_image(prompt, anthropic_key, model, system_prompt, image_b64)
         else:
-            if bot_dir == "damao":
-                gen = await claudecode_gen(prompt, add_dir=claude_add_dir or "/root", bot_dir=bot_dir)
-            elif bot_dir == "maomao":
-                gen = await claudecode_gen(prompt, add_dir="/root/maomao", bot_dir=bot_dir)
-            else:
-                gen = await subscription_gen(prompt, system_prompt, claude_add_dir)
-        await ask_with_timer(update, gen, mode, model)
+            gen = await claudecode_gen(prompt, add_dir=_add_dir, bot_dir=bot_dir, model=model)
+        await ask_with_timer(update, gen, model)
 
     @admin_only
     async def cmd_start(update, ctx):
         state = load_state(bot_dir)
+        icon = '🐱' if bot_name == '大猫' else '🐦' if bot_name == '玄玄' else '🐾'
         await update.message.reply_text(
-            f"{'🐱' if bot_name=='大猫' else '🐦' if bot_name=='玄玄' else '🐾'} <b>{bot_name} v4.2</b>\n\n"
-            f"模式: {mode_label(state['mode'])}\n模型: <code>{state['model']}</code>\n\n"
-            f"/cc — 切换模式\n/model — 切换模型\n/help — 全部命令",
+            f"{icon} <b>{bot_name} v4.3</b>\n\n"
+            f"模型: <code>{state['model']}</code>\n\n"
+            f"/model — 切换模型\n/help — 全部命令",
             parse_mode=ParseMode.HTML)
 
     @admin_only
@@ -201,47 +227,47 @@ def create_and_run_bot(env_path, claude_add_dir=None):
         state = load_state(bot_dir)
         await update.message.reply_text(
             f"<b>{bot_name}命令</b>\n\n"
-            f"模式: {mode_label(state['mode'])} | 模型: <code>{model_short(state['model'])}</code>\n\n"
-            f"/cc     — 切换 API ↔ 订阅\n/model  — 循环切换模型\n"
+            f"模型: <code>{model_short(state['model'])}</code>\n\n"
+            f"/model  — 循环切换模型\n"
             f"/mode   — 查看状态\n/status — 三Bot服务状态\n"
             f"/ping   — 心跳\n/log    — 查看日志\n\n"
-            f"<i>发文字 = 问{bot_name}\n发图片 = Vision读图</i>",
+            f"<i>发文字 = 问{bot_name}\n发图片 = Vision读图（消耗API额度）</i>",
             parse_mode=ParseMode.HTML)
-
-    @admin_only
-    async def cmd_cc(update, ctx):
-        state = load_state(bot_dir)
-        old = state["mode"]
-        new = "subscription" if old == "api" else "api"
-        state["mode"] = new
-        save_state(bot_dir, state)
-        await update.message.reply_text(f"✅ {mode_label(old)} → {mode_label(new)}")
 
     @admin_only
     async def cmd_model(update, ctx):
         state = load_state(bot_dir)
         cur = state.get("model", MODELS[0])
-        try: idx = MODELS.index(cur)
-        except ValueError: idx = 0
+        try:
+            idx = MODELS.index(cur)
+        except ValueError:
+            idx = 0
         nxt = MODELS[(idx + 1) % len(MODELS)]
         state["model"] = nxt
         save_state(bot_dir, state)
-        await update.message.reply_text(f"✅ 模型已切换\n\n`{model_short(cur)}`\n↓\n`{model_short(nxt)}`", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(
+            f"✅ 模型已切换\n\n`{model_short(cur)}`\n↓\n`{model_short(nxt)}`",
+            parse_mode=ParseMode.MARKDOWN)
 
     @admin_only
     async def cmd_mode(update, ctx):
         import shutil
         state = load_state(bot_dir)
         api_ok = "✅" if anthropic_key else "❌"
-        cli_ok = "✅" if shutil.which("claude") else "⚠️"
+        cli_ok = "✅" if shutil.which("claude") else "⚠️ 未找到"
         await update.message.reply_text(
-            f"<b>{bot_name} 状态</b>\n\n模式: {mode_label(state['mode'])}\n模型: <code>{state['model']}</code>\n\n"
-            f"🔑 API可用: {api_ok}\n📦 订阅可用: {cli_ok}", parse_mode=ParseMode.HTML)
+            f"<b>{bot_name} 状态</b>\n\n"
+            f"模型: <code>{state['model']}</code>\n\n"
+            f"📦 Claude Code: {cli_ok}\n"
+            f"🖼 读图API: {api_ok}",
+            parse_mode=ParseMode.HTML)
 
     @admin_only
     async def cmd_ping(update, ctx):
         state = load_state(bot_dir)
-        await update.message.reply_text(f"🏓 {bot_name}存活\n{mode_label(state['mode'])} · `{model_short(state['model'])}`", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(
+            f"🏓 {bot_name}存活 · `{model_short(state['model'])}`",
+            parse_mode=ParseMode.MARKDOWN)
 
     @admin_only
     async def cmd_status(update, ctx):
@@ -251,7 +277,9 @@ def create_and_run_bot(env_path, claude_add_dir=None):
             r = sp.run(["systemctl", "is-active", svc], capture_output=True, text=True)
             icon = "✅" if r.stdout.strip() == "active" else "❌"
             lines.append(f"{icon} {svc}: {r.stdout.strip()}")
-        await update.message.reply_text("<b>服务状态</b>\n\n" + "\n".join(lines), parse_mode=ParseMode.HTML)
+        await update.message.reply_text(
+            "<b>服务状态</b>\n\n" + "\n".join(lines),
+            parse_mode=ParseMode.HTML)
 
     @admin_only
     async def cmd_log(update, ctx):
@@ -271,8 +299,6 @@ def create_and_run_bot(env_path, claude_add_dir=None):
         if bot_dir == "maomao":
             import sys
             sys.path.insert(0, '/root/maomao')
-
-            # ── 文本确认/取消拦截（优先于 AI 和硬解析）──
             stripped = user_text.strip()
             if stripped in _CONFIRM_WORDS:
                 from trader.preview import pop_latest_pending
@@ -294,19 +320,15 @@ def create_and_run_bot(env_path, claude_add_dir=None):
                 if order is not None:
                     await update.message.reply_text("❌ 已取消")
                     return
-
-            # ── 硬解析交易指令 ──
             from trader.router import try_trade_command
             trade_result = try_trade_command(user_text)
             if trade_result is not None:
                 result_text, uid = trade_result
                 await update.message.reply_text(result_text, parse_mode=ParseMode.HTML)
                 if uid is None:
-                    # 直接动作（撤单等）已执行，记录日志
                     from trader.trade_log import log_trade
                     log_trade(raw_text=user_text, result=result_text)
                 if uid is not None:
-                    # 需要确认：启动60s超时
                     async def _auto_cancel():
                         import asyncio as _asyncio
                         await _asyncio.sleep(60)
@@ -318,7 +340,6 @@ def create_and_run_bot(env_path, claude_add_dir=None):
                                 pass
                     asyncio.create_task(_auto_cancel())
                 return
-
         await ask_claude(update, user_text)
 
     async def handle_callback(update, ctx):
@@ -332,7 +353,8 @@ def create_and_run_bot(env_path, claude_add_dir=None):
         await file.download_to_memory(buf)
         buf.seek(0)
         image_b64 = base64.b64encode(buf.read()).decode()
-        await ask_claude(update, update.message.caption or "请描述这张图片", image_b64)
+        caption = update.message.caption or "请描述这张图片"
+        await ask_claude(update, caption, image_b64)
 
     @admin_only
     async def cmd_restart(update, ctx):
@@ -350,7 +372,6 @@ def create_and_run_bot(env_path, claude_add_dir=None):
         logger.error("Exception:", exc_info=ctx.error)
         _bot_log("error", str(ctx.error)[:200])
 
-    # ── 玄玄专属快捷指令 /1-/6（仅 maomao 注册）──
     @admin_only
     async def cmd_q_positions(update, ctx):
         import sys; sys.path.insert(0, '/root/maomao')
@@ -386,18 +407,18 @@ def create_and_run_bot(env_path, claude_add_dir=None):
         try:
             b = get_all_balances()
             lines = ["<b>账户余额</b>\n"]
-            lines.append(f"<b>合约</b>")
+            lines.append("<b>合约</b>")
             lines.append(f"  余额: {b['futures']:.2f} U")
             lines.append(f"  可用: {b['futures_avail']:.2f} U")
             lines.append(f"  浮盈: {b['futures_upnl']:+.2f} U")
             spot = {k: v for k, v in b.get('spot', {}).items() if v >= 1}
             if spot:
-                lines.append(f"\n<b>现货</b>")
+                lines.append("\n<b>现货</b>")
                 for asset, amt in sorted(spot.items(), key=lambda x: -x[1]):
                     lines.append(f"  {asset}: {amt:.4f}")
             funding = {k: v for k, v in b.get('funding', {}).items() if v >= 1}
             if funding:
-                lines.append(f"\n<b>资金</b>")
+                lines.append("\n<b>资金</b>")
                 for asset, amt in sorted(funding.items(), key=lambda x: -x[1]):
                     lines.append(f"  {asset}: {amt:.4f}")
             await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
@@ -408,7 +429,7 @@ def create_and_run_bot(env_path, claude_add_dir=None):
         import sys; sys.path.insert(0, '/root/maomao')
         from trader.exchange import transfer_funds
         if not ctx.args:
-            await update.message.reply_text(f"用法: 发送 {desc} 后跟金额，例如：/3 100")
+            await update.message.reply_text(f"用法: {desc} 后跟金额，例如：/3 100")
             return
         try:
             amount = float(ctx.args[0])
@@ -446,8 +467,7 @@ def create_and_run_bot(env_path, claude_add_dir=None):
             try: n = min(50, int(ctx.args[0]))
             except: pass
         entries = get_recent(n)
-        text = format_for_tg(entries)
-        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+        await update.message.reply_text(format_for_tg(entries), parse_mode=ParseMode.HTML)
 
     @admin_only
     async def cmd_bot_log(update, ctx):
@@ -483,7 +503,7 @@ def create_and_run_bot(env_path, claude_add_dir=None):
     async def post_init(app):
         base_cmds = [
             BotCommand("start","状态"), BotCommand("help","帮助"),
-            BotCommand("cc","切换API/订阅"), BotCommand("model","切换模型"),
+            BotCommand("model","切换模型"),
             BotCommand("mode","查看状态"), BotCommand("status","三Bot服务状态"),
             BotCommand("ping","心跳"), BotCommand("log","查看日志"),
             BotCommand("restart","重启本Bot"), BotCommand("stop","关闭本Bot"),
@@ -502,20 +522,19 @@ def create_and_run_bot(env_path, claude_add_dir=None):
             ]
         await app.bot.set_my_commands(base_cmds)
         state = load_state(bot_dir)
-        logger.info(f"{bot_name} v4.2 | {mode_label(state['mode'])} | {state['model']}")
-        _bot_log("online", f"{mode_label(state['mode'])} | {model_short(state['model'])}")
+        logger.info(f"{bot_name} v4.3 | Claude Code代理 | {state['model']}")
+        _bot_log("online", f"Claude Code代理 | {model_short(state['model'])}")
         try:
             await app.bot.send_message(chat_id=admin_id,
-                text=f"✅ <b>{bot_name} 上线</b>\n\n模式: {mode_label(state['mode'])}\n模型: <code>{state['model']}</code>",
+                text=f"✅ <b>{bot_name} 上线</b>\n\n模型: <code>{state['model']}</code>",
                 parse_mode=ParseMode.HTML)
         except Exception as e:
             logger.warning(f"上线通知失败: {e}")
 
-    logger.info(f"=== {bot_name} v4.2 启动 ===")
+    logger.info(f"=== {bot_name} v4.3 启动 ===")
     app = Application.builder().token(bot_token).post_init(post_init).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
-    app.add_handler(CommandHandler("cc", cmd_cc))
     app.add_handler(CommandHandler("model", cmd_model))
     app.add_handler(CommandHandler("mode", cmd_mode))
     app.add_handler(CommandHandler("status", cmd_status))
@@ -538,6 +557,7 @@ def create_and_run_bot(env_path, claude_add_dir=None):
     from telegram.ext import CallbackQueryHandler
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_error_handler(error_handler)
+
     async def _heartbeat(ctx):
         logger.info(f"[heartbeat] {bot_name} alive")
         if bot_dir == "maomao":
@@ -557,65 +577,5 @@ def create_and_run_bot(env_path, claude_add_dir=None):
         try:
             httpx.post(f"https://api.telegram.org/bot{bot_token}/sendMessage",
                 json={"chat_id": admin_id, "text": f"🔴 <b>{bot_name} 下线</b>", "parse_mode": "HTML"}, timeout=5)
-        except Exception: pass
-
-
-# ── Claude Code完整Agent模式（大猫+玄玄共用，有记忆/有工具/有会话）──
-async def claudecode_gen(prompt, add_dir="/root", bot_dir="damao"):
-    async def _gen(step_info):
-        import json as _json
-        TOOL_ICONS = {
-            "Bash": "🖥️", "Read": "📖", "Write": "✍️", "Edit": "✏️",
-            "Grep": "🔍", "Glob": "📂", "WebSearch": "🌐", "WebFetch": "🌐",
-            "Task": "🤖", "TodoWrite": "📋", "Skill": "⚡",
-        }
-        step_info["text"] = "启动中"
-        step_info["actions"] = []
-        session_file = Path(f"/root/{bot_dir}/data/session.json")
-        session_id = None
-        try:
-            session_id = _json.loads(session_file.read_text()).get("session_id")
         except Exception:
             pass
-        cmd = ["claude", "--print", "--verbose",
-               "--output-format", "stream-json",
-               "--permission-mode", "acceptEdits",
-               "--add-dir", add_dir]
-        if session_id:
-            cmd.extend(["--resume", session_id])
-        cmd.extend(["-p", prompt])
-        proc = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE, cwd=add_dir,
-            env={k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"})
-        final_result = ""
-        async for raw_line in proc.stdout:
-            line = raw_line.decode("utf-8").strip()
-            if not line:
-                continue
-            try:
-                obj = _json.loads(line)
-            except Exception:
-                continue
-            typ = obj.get("type")
-            if typ == "assistant":
-                for item in obj.get("message", {}).get("content", []):
-                    if item.get("type") == "tool_use":
-                        tool_name = item.get("name", "")
-                        icon = TOOL_ICONS.get(tool_name, "⚙️")
-                        inp = item.get("input", {})
-                        brief = str(inp.get("command") or inp.get("file_path") or
-                                    inp.get("pattern") or inp.get("query") or
-                                    inp.get("prompt") or "")[:50]
-                        step_info["actions"].append(f"{icon} {brief or tool_name}")
-                        step_info["text"] = f"{icon} {tool_name}"
-            elif typ == "result":
-                new_sid = obj.get("session_id")
-                if new_sid:
-                    session_file.parent.mkdir(parents=True, exist_ok=True)
-                    session_file.write_text(_json.dumps({"session_id": new_sid}))
-                final_result = obj.get("result", "").strip()
-        _, stderr_bytes = await proc.communicate()
-        step_info["text"] = "完成"
-        yield final_result or stderr_bytes.decode("utf-8")[:300] or "（无输出）"
-    return _gen

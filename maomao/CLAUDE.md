@@ -117,17 +117,74 @@
 | parser.py | 🔒封板 | 自然语言→JSON，中文ASCII预处理 |
 | preview.py | 🔒封板 | 预览卡+确认流（文字确认/取消/60s超时） |
 | router.py | 🔒封板 | 交易关键词路由，直接动作vs预览动作 |
+| trailing.py | 🔒封板 | 移动止盈 v3.1，双方向，cron每5分钟检查 |
+| rolling.py | 🔒封板 | 滚仓 v2.0，双方向，浮盈50%加仓，暗单执行 |
 | risk.py | ⏳ | 风控拦截（待开发） |
 
 > 封板文件已 `chattr +i`，不得直接修改。需改必须先报乌鸦，解锁后再动。
 > /root/shared/core.py 同步封板。
 
-### 移动止盈三档
-| 档位 | 激活条件 |
-|------|---------|
-| 保守🛡 | +10% |
-| 中等⚖️ | +30% |
-| 激进🔥 | +60% |
+### 移动止盈 v3.1（最终定稿）
+单一动态规则，无档位。激活阈值可临时指定，默认40%。
+
+| 参数 | 值 |
+|------|-----|
+| 激活条件 | 浮盈 ≥ 阈值（默认40%，可指定任意值） |
+| 回撤触发 | 峰值精确回撤 25%，市价暗单全平 |
+| 追踪基准 | 从开仓价追溯，临时挂也按实际浮盈即时激活 |
+| 触发动作 | 先撤所有挂单，暗单全平，推通知 |
+
+**玄玄处理移动止盈指令的方式：**
+
+爸爸说"开移动止盈 BTC" 或 "开移动止盈 BTC 60%"，玄玄执行：
+```python
+from trader.trailing import activate, deactivate, format_status
+# 开启（默认40%）
+result = activate("BTC")
+# 开启（自定义阈值）
+result = activate("BTC", threshold=60)
+# 取消
+result = deactivate("BTC")
+# 查看状态
+status = format_status()
+```
+直接把 result 回复给爸爸，不加废话。
+
+cron 每5分钟自动检查，触发时推通知，不需要玄玄额外操作。
+
+### 滚仓 v2.0
+
+| 参数 | 值 |
+|------|-----|
+| 触发条件 | 浮盈 ≥ 50% |
+| 加仓金额 | 当前盈利 × 70% |
+| 执行方式 | 暗单加仓，同方向 |
+| 峰值更新 | max(原峰值, 当前价)，不往低压 |
+
+**玄玄处理滚仓指令的方式：**
+
+爸爸说"滚仓 BTC"，玄玄执行：
+```python
+from trader.rolling import execute_roll, format_status
+# 执行滚仓
+result = execute_roll("BTC")
+# 查看滚仓记录
+status = format_status()
+```
+直接把 result 回复给爸爸。浮盈不足50%会自动提示还差多少。
+
+**取消滚仓监控**：爸爸说"取消滚仓 BTC"，玄玄执行：
+```python
+import json
+from pathlib import Path
+f = Path("/root/short_attack/data/roll_watch.json")
+watch = json.loads(f.read_text()) if f.exists() else []
+watch = [s for s in watch if "BTC" not in s]
+f.write_text(json.dumps(watch, ensure_ascii=False))
+# 回复：✅ BTC 滚仓监控已取消
+```
+
+**支持双方向**：多单/空单都能滚，系统自动识别方向。
 
 ### 强平价反推公式
 做多：qty = wallet / (entry - liq × (1 - MMR))
