@@ -86,11 +86,11 @@ def get_klines_1m(symbol: str, limit: int = 5) -> list:
     return resp.json()
 
 
-def get_klines_1d(symbol: str, limit: int = 365) -> list:
-    """获取日线K线（用于历史高点计算）"""
+def get_klines_1d(symbol: str) -> list:
+    """获取日线K线（币安最大1500根，覆盖上线以来全部历史）"""
     resp = requests.get(
         f"{FAPI_BASE}/fapi/v1/klines",
-        params={"symbol": symbol, "interval": "1d", "limit": limit},
+        params={"symbol": symbol, "interval": "1d", "limit": 1500},
         timeout=10,
     )
     resp.raise_for_status()
@@ -137,7 +137,7 @@ def _get_listing_days(symbol: str) -> int:
     if symbol in _ath_cache:
         return _ath_cache[symbol].get("listing_days", 999)
     try:
-        klines = get_klines_1d(symbol, 365)
+        klines = get_klines_1d(symbol)
         days = len(klines)
         ath = max(float(k[2]) for k in klines)  # k[2] = high
         cur = float(klines[-1][4])               # k[4] = close

@@ -20,7 +20,7 @@ bull_sniper:
   min_listing_days: 30
   exclude_24h_above: 30
   exclude_daily_vol_below: 5000000
-  min_drop_from_ath: 30      # 距高点跌幅<30%排除
+  min_drop_from_ath: 50      # 距高点跌幅<50%排除（未腰斩不碰）
 
   # AI判断（第二阶段启用）
   ai:
