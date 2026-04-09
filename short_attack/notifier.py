@@ -60,14 +60,17 @@ def send_new_monitor(mon: dict):
     funding = mon.get("funding_rate", 0)
     funding_str = f"{funding:+.4f}%" if funding else "获取中"
     text = (
-        f"🎯 <b>刃哥做空阻击</b>\n"
-        f"🚨 <b>新目标进入监控等待买入时机 — {_coin(symbol)}</b>\n\n"
-        f"📈 发现涨幅：+{mon['change_pct']}%\n"
-        f"💰 发现价：{mon['price']}\n"
-        f"💹 24h成交量：{_fmt_vol(mon['volume_usdt'])}\n"
-        f"📊 资金费率：{funding_str}\n"
-        f"⏱ 监控开始：{time.strftime('%m-%d %H:%M')}\n\n"
-        f"开空可以由玄玄自动执行，或由老大和社区兄弟们自行决定"
+        f"🎯 <b>刃哥做空阻击</b>\n\n"
+        f"🚨 <b>新目标进入监控等待买入时机</b>\n\n"
+        f"<blockquote>"
+        f"🪙 代币：<b>{_coin(symbol)}</b>\n"
+        f"📈 发现涨幅：<code>+{mon['change_pct']}%</code>\n"
+        f"💰 发现价：<code>{mon['price']}</code>\n"
+        f"💹 成交量：<code>{_fmt_vol(mon['volume_usdt'])}</code>\n"
+        f"📊 资金费率：<code>{funding_str}</code>\n"
+        f"⏱ 监控开始：{time.strftime('%m-%d %H:%M')}"
+        f"</blockquote>\n\n"
+        f"<i>开空可以由玄玄自动执行，或由老大和社区兄弟们自行决定</i>"
     )
     _send(text)
 
@@ -82,16 +85,20 @@ def send_signal(sig: dict):
     oi_str      = f"{oi_chg:+.1f}%" if oi_chg else "获取中"
 
     text = (
-        f"🎯 <b>刃哥做空阻击</b>\n"
+        f"🎯 <b>刃哥做空阻击</b>\n\n"
         f"🔥 <b>请立即执行做空 — {_coin(symbol)}</b>\n\n"
-        f"📈 24h总涨幅：+{sig['total_rise']}%\n"
-        f"📉 从最高价回撤：-{sig['pullback_pct']}%\n"
-        f"💰 建议入场价：{sig['position_price']}\n"
-        f"⚡ 建议强平价：{sig['liq_price']}\n\n"
-        f"📊 资金费率：{funding_str}\n"
-        f"📌 OI变化：{oi_str}\n"
-        f"💹 24h成交量：{_fmt_vol(vol)}\n\n"
-        f"开空可以由玄玄自动执行，或由老大和社区兄弟们自行决定"
+        f"<blockquote>"
+        f"📈 24h总涨幅：<code>+{sig['total_rise']}%</code>\n"
+        f"📉 从最高价回撤：<code>-{sig['pullback_pct']}%</code>\n"
+        f"💰 建议入场价：<code>{sig['position_price']}</code>\n"
+        f"⚡ 建议强平价：<code>{sig['liq_price']}</code>"
+        f"</blockquote>\n\n"
+        f"<blockquote>"
+        f"📊 资金费率：<code>{funding_str}</code>\n"
+        f"📌 OI变化：<code>{oi_str}</code>\n"
+        f"💹 成交量：<code>{_fmt_vol(vol)}</code>"
+        f"</blockquote>\n\n"
+        f"<i>开空可以由玄玄自动执行，或由老大和社区兄弟们自行决定</i>"
     )
     _send(text)
 
@@ -105,28 +112,31 @@ def send_card(state: dict):
     stats      = state.get("stats", {"success": 0, "failed": 0})
 
     lines = [f"🎯 <b>刃哥做空阻击 · {time.strftime('%m-%d %H:%M')}</b>"]
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
 
     # 监控中
-    lines.append(f"\n👁 <b>监控中并等待信号做空（{len(monitoring)}个）</b>" if monitoring else "\n👁 <b>不满条件进入监控</b>")
     if monitoring:
-        rows = []
+        lines.append(f"\n👁 <b>监控中并等待信号做空（{len(monitoring)}个）</b>")
+        lines.append("<blockquote>")
         for symbol, mon in monitoring.items():
             elapsed = _fmt_elapsed(mon["started_at"])
             entry_price = mon["price_at_entry"]
             base_price = entry_price / (1 + mon["entry_gain_pct"] / 100)
-            # 峰值涨幅（从24h基准）
             total_max = round(
                 (1 + mon["entry_gain_pct"] / 100) * (mon["max_price"] / entry_price) * 100 - 100, 1
             )
-            # 实时涨幅（从24h基准）
             cur_price = mon.get("cur_price", entry_price)
             cur_gain = round((cur_price / base_price - 1) * 100, 1)
             vol_str = _fmt_vol(mon.get("volume_usdt", 0))
             funding = mon.get("funding_rate", 0)
-            funding_str = f"费率{funding:+.4f}%" if funding else "费率获取中"
-            rows.append(f"{_coin(symbol):<8} 现价{cur_price} 涨+{cur_gain}% 峰+{total_max}%\n         量{vol_str}  {funding_str}  {elapsed}")
-        lines.append("<pre>" + "\n".join(rows) + "</pre>")
+            funding_str = f"{funding:+.4f}%" if funding else "获取中"
+            lines.append(
+                f"🪙 <b>{_coin(symbol)}</b>  现价 <code>{cur_price}</code>\n"
+                f"   涨幅 <code>+{cur_gain}%</code>  峰值 <code>+{total_max}%</code>\n"
+                f"   量 <code>{vol_str}</code>  费率 <code>{funding_str}</code>  {elapsed}"
+            )
+        lines.append("</blockquote>")
+    else:
+        lines.append(f"\n👁 <b>不满条件进入监控</b>")
 
     # 阻击信号 / 持仓中
     positions = {s: d for s, d in signals.items() if d.get("executed")}
@@ -134,45 +144,47 @@ def send_card(state: dict):
 
     if pending:
         lines.append(f"\n🚨 <b>阻击信号（{len(pending)}个）</b>")
-        rows = []
+        lines.append("<blockquote>")
         for symbol, sig in pending.items():
             elapsed = _fmt_elapsed(sig["triggered_at"])
             cur_price = sig.get("cur_price", sig["position_price"])
             pnl_pct = round((sig["position_price"] - cur_price) / sig["position_price"] * 100, 1)
             pnl_str = f"+{pnl_pct}%" if pnl_pct > 0 else f"{pnl_pct}%"
-            rows.append(
-                f"{_coin(symbol)}  24h涨幅+{sig['total_rise']}%\n"
-                f"  建议入场:{sig['position_price']}  现价:{cur_price}（做空{pnl_str}）  {elapsed}"
+            lines.append(
+                f"🪙 <b>{_coin(symbol)}</b>  24h涨幅 <code>+{sig['total_rise']}%</code>\n"
+                f"   入场 <code>{sig['position_price']}</code>  现价 <code>{cur_price}</code>\n"
+                f"   做空盈亏 <code>{pnl_str}</code>  {elapsed}"
             )
-        lines.append("<pre>" + "\n\n".join(rows) + "</pre>")
+        lines.append("</blockquote>")
     else:
         lines.append("\n🚨 <b>阻击信号：无</b>")
 
-    lines.append(f"\n💀 <b>已执行买入（{len(positions)}个）</b>" if positions else "\n💀 <b>没有发现买入信号</b>")
     if positions:
-        rows = []
+        lines.append(f"\n💀 <b>已执行买入（{len(positions)}个）</b>")
+        lines.append("<blockquote>")
         for symbol, sig in positions.items():
             elapsed = _fmt_elapsed(sig["triggered_at"])
             cur_price = sig.get("cur_price", sig["position_price"])
             pnl_pct = round((sig["position_price"] - cur_price) / sig["position_price"] * 100, 1)
             pnl_icon = "🟢" if pnl_pct > 0 else "🔴"
-            rows.append(
-                f"{_coin(symbol)}  入场:{sig['position_price']}  现价:{cur_price}\n"
-                f"  {pnl_icon}浮盈:{pnl_pct:+.1f}%  强平:{sig['liq_price']}  {elapsed}"
+            lines.append(
+                f"{pnl_icon} <b>{_coin(symbol)}</b>\n"
+                f"   入场 <code>{sig['position_price']}</code>  现价 <code>{cur_price}</code>\n"
+                f"   浮盈 <code>{pnl_pct:+.1f}%</code>  强平 <code>{sig['liq_price']}</code>  {elapsed}"
             )
-        lines.append("<pre>" + "\n\n".join(rows) + "</pre>")
+        lines.append("</blockquote>")
+    else:
+        lines.append("\n💀 <b>没有发现买入信号</b>")
 
     # 近期退出
     if exits:
         lines.append("\n⏹ <b>近期退出</b>")
-        rows = []
+        lines.append("<blockquote>")
         for ex in exits:
             icon = "✅" if ex["reason"] == "阻击成功" else ("❌" if ex["reason"] == "阻击失败" else "↩️")
             ago  = _fmt_elapsed(ex["exited_at"])
-            rows.append(
-                f"{icon} {_coin(ex['symbol']):<6} {ex['reason']}  {ago}前"
-            )
-        lines.append("<pre>" + "\n".join(rows) + "</pre>")
+            lines.append(f"{icon} {_coin(ex['symbol'])}  {ex['reason']}  {ago}前")
+        lines.append("</blockquote>")
 
     # 战绩 + 底部
     lines.append(f"\n🏆 <b>战绩</b>  ✅击中 {stats['success']}  ❌失败 {stats['failed']}")
