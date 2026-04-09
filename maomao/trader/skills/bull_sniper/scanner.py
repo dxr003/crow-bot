@@ -27,6 +27,7 @@ import yaml
 import requests
 from pathlib import Path
 from datetime import datetime
+from notifier import send_signal, send_pool_entry
 
 BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
@@ -291,6 +292,12 @@ def scan_once(state: dict, tickers: list) -> dict:
             events["new_pool"].append(symbol)
             logger.info(f"[观察池] {symbol} 5m涨+{change_5m}% 正式进入")
 
+            # 推送进池通知
+            try:
+                send_pool_entry(state["watchpool"][symbol])
+            except Exception as e:
+                logger.warning(f"进池推送失败: {e}")
+
     # ── 4. 观察池管理 ──
     for symbol in list(state["watchpool"].keys()):
         pool = state["watchpool"][symbol]
@@ -351,6 +358,26 @@ def scan_once(state: dict, tickers: list) -> dict:
                 f"距高点跌{pool.get('drop_from_ath', 0):.1f}% "
                 f"（第一阶段仅记录）"
             )
+
+            # 推送信号通知（附带观察池快照）
+            try:
+                pool_snapshot = []
+                for ps, pv in state["watchpool"].items():
+                    ep = pv["entry_price"]
+                    cp = pv.get("cur_price", ep)
+                    pp = pv.get("peak_price", ep)
+                    pool_snapshot.append({
+                        "symbol": ps,
+                        "entry_price": ep,
+                        "cur_price": cp,
+                        "entered_at": pv["entered_at"],
+                        "gain_pct": (cp - ep) / ep * 100 if ep > 0 else 0,
+                        "peak_gain_pct": (pp - ep) / ep * 100 if ep > 0 else 0,
+                        "volume_usdt": pv.get("volume_usdt", 0),
+                    })
+                send_signal(signal, pool_snapshot if pool_snapshot else None)
+            except Exception as e:
+                logger.warning(f"信号推送失败: {e}")
 
     state["watchpool"] = {s: v for s, v in state["watchpool"].items()}
     save_state(state)
