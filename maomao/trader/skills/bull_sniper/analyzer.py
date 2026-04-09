@@ -17,6 +17,7 @@ bull_sniper analyzer.py — 信号分析器
 下架公告：独立通道，不走评分，不受新闻利空否决影响
 手工开关：config.yaml → analyzer.enabled / 各阶段独立开关
 """
+import json
 import logging
 import os
 import re
@@ -54,7 +55,8 @@ def fetch_news(symbol: str, cfg: dict) -> dict:
     查询币种相关新闻
     优先级：Tavily → Google RSS → CoinGecko
     Tavily连续失败3次自动切换Google RSS，成功一次重置计数
-    返回: {"sentiment": "bullish"/"bearish"/"neutral", "level": "major"/"minor"/None, "titles": [...]}
+    AI启用时：用Haiku判断情绪，失败回退关键词匹配
+    返回: {"sentiment": "bullish"/"bearish"/"neutral", "level": "major"/"minor"/None, "titles": [...], "ai_reason": str|None}
     """
     global _tavily_fail_count
     news_cfg = cfg.get("news", {})
@@ -82,9 +84,25 @@ def fetch_news(symbol: str, cfg: dict) -> dict:
         titles += _fetch_coingecko_news(base)
 
     if not titles:
-        return {"sentiment": "neutral", "level": None, "titles": []}
+        return {"sentiment": "neutral", "level": None, "titles": [], "ai_reason": None}
 
-    return _classify_news(titles, news_cfg)
+    # ── 位置1：AI新闻情绪判断（失败回退关键词） ──
+    ai_cfg = _get_ai_config(cfg)
+    if ai_cfg:
+        ai_result = ai_news_sentiment(titles, symbol, ai_cfg)
+        if ai_result:
+            return {
+                "sentiment": ai_result["sentiment"],
+                "level": ai_result.get("level"),
+                "titles": titles[:5],
+                "ai_reason": ai_result.get("reason", ""),
+            }
+        # AI失败，回退关键词
+        logger.info(f"AI新闻判断失败，回退关键词匹配 {symbol}")
+
+    result = _classify_news(titles, news_cfg)
+    result["ai_reason"] = None
+    return result
 
 
 def _fetch_tavily(base: str, news_cfg: dict) -> list:
@@ -211,6 +229,189 @@ def _classify_news(titles: list, news_cfg: dict) -> dict:
         return {"sentiment": "bullish", "level": "minor", "titles": titles[:5]}
 
     return {"sentiment": "neutral", "level": None, "titles": titles[:5]}
+
+
+# ══════════════════════════════════════════
+# BTC 基准数据
+# ══════════════════════════════════════════
+
+def get_btc_change_1h() -> float:
+    """获取BTC 1小时涨幅"""
+    try:
+        resp = requests.get(
+            f"{_FAPI_BASE}/fapi/v1/klines",
+            params={"symbol": "BTCUSDT", "interval": "1h", "limit": 2},
+            timeout=8,
+        )
+        resp.raise_for_status()
+        klines = resp.json()
+        prev = float(klines[-2][4])
+        cur  = float(klines[-1][4])
+        return round((cur - prev) / prev * 100, 2) if prev > 0 else 0.0
+    except Exception as e:
+        logger.debug(f"BTC涨幅获取失败: {e}")
+        return 0.0
+
+
+# ══════════════════════════════════════════
+# AI 模块（Claude Haiku）
+# ══════════════════════════════════════════
+
+def _get_ai_config(cfg: dict) -> dict:
+    """获取AI配置，返回空dict表示AI未启用"""
+    ai_cfg = cfg.get("ai", {})
+    if not ai_cfg.get("enabled", False):
+        return {}
+    api_key = os.getenv(ai_cfg.get("api_key_env", "ANTHROPIC_API_KEY"), "")
+    if not api_key:
+        logger.warning("AI已启用但API key未配置")
+        return {}
+    ai_cfg["_api_key"] = api_key
+    return ai_cfg
+
+
+def _call_haiku(prompt: str, ai_cfg: dict) -> Optional[dict]:
+    """
+    调用 Claude Haiku，返回解析后的JSON，失败返回None
+    """
+    api_key = ai_cfg.get("_api_key", "")
+    model = ai_cfg.get("model", "claude-haiku-4-5-20251001")
+    timeout = ai_cfg.get("timeout", 15)
+
+    try:
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": model,
+                "max_tokens": 256,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        text = data["content"][0]["text"].strip()
+        # 提取JSON（可能被markdown包裹）
+        json_match = re.search(r'\{[^{}]+\}', text)
+        if json_match:
+            return json.loads(json_match.group())
+        return json.loads(text)
+    except Exception as e:
+        logger.warning(f"AI调用失败: {e}")
+        return None
+
+
+def ai_news_sentiment(titles: list, symbol: str, ai_cfg: dict) -> Optional[dict]:
+    """
+    位置1：AI判断新闻情绪
+    返回: {"sentiment": "bullish"/"bearish"/"neutral", "reason": "..."}
+    失败返回None，由调用方回退到关键词匹配
+    """
+    if not titles:
+        return None
+    if not ai_cfg.get("news_sentiment", False):
+        return None
+
+    base = symbol.replace("USDT", "").replace("BUSD", "")
+    titles_text = "\n".join(f"- {t}" for t in titles[:8])
+
+    prompt = (
+        f"你是加密货币新闻分析师。以下是关于 {base} 的最新新闻标题：\n\n"
+        f"{titles_text}\n\n"
+        f"判断这些新闻对 {base} 价格的综合影响。\n"
+        f"只返回JSON，格式：{{\"sentiment\": \"bullish\"/\"bearish\"/\"neutral\", "
+        f"\"level\": \"major\"/\"minor\"/null, \"reason\": \"一句话理由\"}}\n"
+        f"注意：下架/delist消息不算利空（可能反拉），归为neutral。"
+    )
+
+    result = _call_haiku(prompt, ai_cfg)
+    if result and result.get("sentiment") in ("bullish", "bearish", "neutral"):
+        logger.info(f"AI新闻判断 {symbol}: {result}")
+        return result
+    return None
+
+
+def ai_final_decision(symbol: str, gain_pct: float, score: int,
+                      breakdown: dict, market_data: dict,
+                      news: dict, ai_cfg: dict) -> Optional[dict]:
+    """
+    位置2：AI最终决策
+    返回: {"decision": "buy"/"skip", "reason": "..."}
+    失败返回None → 按规则走（不阻止）
+    """
+    if not ai_cfg.get("final_decision", False):
+        return None
+
+    btc_1h = get_btc_change_1h()
+
+    base = symbol.replace("USDT", "").replace("BUSD", "")
+    news_summary = ", ".join(news.get("titles", [])[:3]) if news else "无新闻"
+    breakdown_text = ", ".join(f"{k}={v}" for k, v in breakdown.items())
+
+    system_prompt = (
+        "你是加密货币做多交易决策AI，遵守以下规则：\n"
+        "1. 综合评估涨幅、量比、OI、多空比、费率、新闻，判断是否值得做多\n"
+        "2. 假突破迹象（量价背离、上影线过长）返回skip\n"
+        "3. 明确利空新闻返回skip\n"
+        "4. 资金费率极端拥挤（>0.05%）谨慎对待\n"
+        "5. 若BTC同期1小时涨幅超过2%，且该币涨幅不超过BTC涨幅的3倍，"
+        "判定为跟随行情非独立爆发，返回skip\n"
+        "只返回JSON：{\"decision\": \"buy\"/\"skip\", \"reason\": \"一句话理由\"}"
+    )
+
+    user_prompt = (
+        f"以下是 {base} 的实时数据：\n\n"
+        f"涨幅: {gain_pct:.1f}%\n"
+        f"综合评分: {score}分\n"
+        f"评分明细: {breakdown_text}\n"
+        f"OI变化: {market_data.get('oi_change_pct', 0):.1f}%\n"
+        f"多空比: {market_data.get('long_short_ratio', 1.0):.2f}\n"
+        f"资金费率: {market_data.get('funding_rate', 0)*100:.3f}%\n"
+        f"量比: {market_data.get('volume_ratio', 1.0):.1f}x\n"
+        f"BTC 1小时涨幅: {btc_1h:+.2f}%\n"
+        f"新闻: {news_summary}\n\n"
+        f"问题：现在做多 {base} 是否值得？"
+    )
+
+    # 用system+user双消息，比单prompt更精准
+    api_key = ai_cfg.get("_api_key", "")
+    model = ai_cfg.get("model", "claude-haiku-4-5-20251001")
+    timeout = ai_cfg.get("timeout", 15)
+
+    try:
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": model,
+                "max_tokens": 256,
+                "system": system_prompt,
+                "messages": [{"role": "user", "content": user_prompt}],
+            },
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        text = data["content"][0]["text"].strip()
+        json_match = re.search(r'\{[^{}]+\}', text)
+        result = json.loads(json_match.group()) if json_match else json.loads(text)
+    except Exception as e:
+        logger.warning(f"AI决策调用失败: {e}")
+        return None
+
+    if result and result.get("decision") in ("buy", "skip"):
+        logger.info(f"AI决策 {symbol}: {result} (BTC 1h: {btc_1h:+.2f}%)")
+        return result
+    return None
 
 
 # ══════════════════════════════════════════
@@ -414,12 +615,32 @@ def analyze(symbol: str, gain_pct: float, market_data: dict, cfg: Optional[dict]
             return {"action": "veto", "reason": result["veto_reason"], "news": result.get("news")}
 
         if result["score"] >= signal_threshold:
+            # ── 位置2：AI最终决策（skip否决，buy/失败放行） ──
+            ai_cfg = _get_ai_config(cfg)
+            ai_decision = None
+            if ai_cfg:
+                ai_decision = ai_final_decision(
+                    symbol, gain_pct, result["score"],
+                    result["breakdown"], market_data,
+                    result.get("news", {}), ai_cfg
+                )
+                if ai_decision and ai_decision["decision"] == "skip":
+                    return {
+                        "action": "veto",
+                        "reason": f"AI否决: {ai_decision.get('reason', '')}",
+                        "score": result["score"],
+                        "breakdown": result["breakdown"],
+                        "news": result.get("news"),
+                        "ai_decision": ai_decision,
+                    }
+
             return {
                 "action": "signal_scored",
                 "score": result["score"],
                 "breakdown": result["breakdown"],
                 "gain_pct": gain_pct,
                 "news": result.get("news"),
+                "ai_decision": ai_decision,
             }
         else:
             return {
