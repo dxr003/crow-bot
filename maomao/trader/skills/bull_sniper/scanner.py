@@ -27,7 +27,7 @@ import yaml
 import requests
 from pathlib import Path
 from datetime import datetime
-from notifier import send_signal, send_pool_entry, send_health_report
+from notifier import send_signal, send_pool_entry, send_health_report, send_status_card
 from analyzer import analyze
 
 BASE_DIR = Path(__file__).parent
@@ -545,11 +545,16 @@ def run():
     while True:
         now = time.time()
 
-        # 每小时整点推健康报告（私信乌鸦）
+        # 每小时整点XX:00推状态卡片（群组）+ 健康报告（私信）
         if int(now) % 3600 < CFG["watchpool_refresh_sec"] and now - last_health_report > 300:
             try:
+                send_status_card(state)
+                logger.info("[整点卡片] 已推群组")
+            except Exception as e:
+                logger.warning(f"整点卡片推送失败: {e}")
+            try:
                 send_health_report(state, state.get("filter_log", []))
-                logger.info("[健康报告] 已推送")
+                logger.info("[健康报告] 已私信")
                 # 重置本小时统计
                 state["stats"] = {"scans": 0, "radar_hits": 0, "pool_entries": 0, "signals": 0}
                 last_health_report = now

@@ -111,7 +111,10 @@ def send_card(state: dict):
     exits      = state.get("exits", [])[:3]
     stats      = state.get("stats", {"success": 0, "failed": 0})
 
-    lines = [f"🎯 <b>刃哥做空阻击 · {time.strftime('%m-%d %H:%M')}</b>"]
+    lines = [
+        f"🎯 <b>刃哥做空阻击 · {time.strftime('%m-%d %H:%M')}</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+    ]
 
     # 监控中
     if monitoring:

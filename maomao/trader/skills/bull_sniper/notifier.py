@@ -158,8 +158,8 @@ def send_pool_entry(pool_item: dict):
 
 def send_status_card(state: dict):
     """
-    状态总览卡片（可选，手动调用或定时触发）
-    包含观察池 + 已记录信号 + 战绩
+    整点状态卡片（XX:00推群组）
+    包含观察池 + 信号记录（含analyzer结果） + 统计
     """
     now = time.time()
     watchpool = state.get("watchpool", {})
@@ -171,7 +171,7 @@ def send_status_card(state: dict):
         "━━━━━━━━━━━━━━━━━━━━",
     ]
 
-    # 观察池
+    # ── 观察池 ──
     if watchpool:
         lines.append(f"\n👁 <b>观察待做多信号（{len(watchpool)}个）</b>")
         lines.append("<blockquote>")
@@ -195,25 +195,54 @@ def send_status_card(state: dict):
     else:
         lines.append("\n👁 <b>当前无观察目标</b>")
 
-    # 近期信号（最近10条）
+    # ── 信号记录（含 analyzer 结果） ──
     recent_signals = signals[-10:] if signals else []
     if recent_signals:
-        lines.append(f"\n✅ <b>已记录做多信号（{len(recent_signals)}个）</b>")
-        lines.append("<blockquote>")
+        lines.append(f"\n✅ <b>已触发做多信号（{len(recent_signals)}个）</b>")
         for sig in reversed(recent_signals):
+            analyze = sig.get("analyze", {})
+            action = analyze.get("action", "")
+            reason = analyze.get("reason", "")
+            score = analyze.get("score")
+            breakdown = analyze.get("breakdown", {})
+            news = analyze.get("news", {})
+            news_titles = news.get("titles", [])[:2] if news else []
+
+            # 触发类型标识
+            if action == "signal_fast":
+                trigger_tag = f"⚡ 快速通道 — {reason}"
+            elif action == "signal_scored":
+                trigger_tag = f"📊 评分通道 — {score}分"
+            else:
+                trigger_tag = f"📌 记录"
+
+            lines.append("<blockquote>")
             lines.append(
-                f"<b>{_coin(sig['symbol'])}</b>  "
-                f"入场<code>{_fmt_price(sig['entry_price'])}</code>→"
-                f"触发<code>{_fmt_price(sig['cur_price'])}</code>  "
+                f"🪙 <b>{_coin(sig['symbol'])}</b>  "
                 f"<code>+{sig['gain_pct']}%</code>  "
-                f"量<code>{_fmt_vol(sig.get('volume_usdt', 0))}</code>  "
-                f"{sig.get('time', '')}"
+                f"{_fmt_vol(sig.get('volume_usdt', 0))}  "
+                f"{sig.get('time', '')[5:]}"
             )
-        lines.append("</blockquote>")
+            lines.append(f"   {trigger_tag}")
+            lines.append(
+                f"   进池<code>{_fmt_price(sig['entry_price'])}</code> → "
+                f"触发<code>{_fmt_price(sig['cur_price'])}</code>"
+            )
+
+            # 评分明细
+            if breakdown:
+                detail_parts = [f"{k}{v:+d}" for k, v in breakdown.items()]
+                lines.append(f"   📋 {' / '.join(detail_parts)}")
+
+            # 新闻摘要
+            if news_titles:
+                lines.append(f"   📰 {html_mod.escape(news_titles[0][:50])}")
+
+            lines.append("</blockquote>")
     else:
         lines.append("\n✅ <b>暂无信号记录</b>")
 
-    # 战绩统计
+    # ── 统计 ──
     total_signals = stats.get("signals", 0)
     scans = stats.get("scans", 0)
     radar_hits = stats.get("radar_hits", 0)
