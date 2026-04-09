@@ -52,11 +52,74 @@ bull_sniper:
   cooldown_after_tp_hours: 4
   cooldown_after_sl_hours: 8
 
-  # 新闻（第二阶段启用）
+  # 分析器
+  analyzer:
+    enabled: true                  # 手工总开关
+    stage1_enabled: true           # 第一阶段开关（8%快速通道）
+    stage1_gain_pct: 8             # 第一阶段触发涨幅%
+    stage2_enabled: true           # 第二阶段开关（打分通道）
+    stage2_gain_min: 10            # 第二阶段最低涨幅%
+    stage2_gain_max: 20            # 第二阶段最高涨幅%
+    signal_threshold: 30           # 推送阈值（实战后调大）
+    delist_enabled: true           # 下架反拉通道开关
+
+  # 评分参数（实战后可调）
+  scoring:
+    news_major: 15
+    news_minor: 5
+    gain_10_15: 10
+    gain_15_20: 20
+    oi_up: 10
+    oi_down: -5
+    lsr_short_dominant: 10
+    lsr_long_crowded: -5
+    funding_extreme_threshold: 0.005   # 0.5%
+    funding_extreme: 10
+    vol_ratio_3x: 15
+    vol_ratio_2x: 10
+    vol_ratio_1_5x: 5
+    vol_ratio_low: -5
+
+  # 新闻配置
   news:
-    enabled: false
-    sources: ["coingecko", "coinmarketcap"]
-    lookback_hours: 24
-    major_positive_bonus: 15
-    minor_positive_bonus: 5
-    negative_veto: true
+    enabled: true
+    use_google_rss: true
+    use_coingecko: false
+    delist_keywords:
+      - "delist"
+      - "delisting"
+      - "下架"
+      - "摘牌"
+      - "removed from"
+    bullish_major_keywords:
+      - "partnership"
+      - "合作"
+      - "listing"
+      - "上线"
+      - "mainnet"
+      - "主网"
+      - "upgrade"
+      - "升级"
+      - "etf"
+      - "institutional"
+      - "机构"
+      - "acquisition"
+      - "收购"
+    bullish_minor_keywords:
+      - "bullish"
+      - "surge"
+      - "rally"
+      - "上涨"
+      - "利好"
+      - "突破"
+    bearish_keywords:
+      - "hack"
+      - "exploit"
+      - "rug"
+      - "scam"
+      - "fraud"
+      - "黑客"
+      - "跑路"
+      - "欺诈"
+      - "破产"
+      - "bankruptcy"
