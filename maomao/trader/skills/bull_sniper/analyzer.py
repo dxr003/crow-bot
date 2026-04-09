@@ -264,10 +264,6 @@ def score_signal(symbol: str, gain_pct: float, market_data: dict, cfg: dict) -> 
         pts = scoring.get("lsr_short_dominant", 10)
         breakdown[f"多空比{lsr:.2f}空头占多"] = pts
         score += pts
-    elif lsr > 1.5:
-        pts = scoring.get("lsr_long_crowded", -5)
-        breakdown[f"多空比{lsr:.2f}多头过热"] = pts
-        score += pts
 
     # ── 资金费率 ──
     funding = market_data.get("funding_rate", 0)
