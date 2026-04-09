@@ -1,0 +1,20 @@
+[Unit]
+Description=做多阻击扫描器（第一阶段纯记录）
+After=network.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/maomao/trader/skills/bull_sniper
+EnvironmentFile=/root/maomao/.env
+ExecStart=/root/maomao/venv/bin/python scanner.py
+Restart=always
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bull-sniper
+
+[Install]
+WantedBy=multi-user.target
