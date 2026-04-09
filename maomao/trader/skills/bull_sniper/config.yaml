@@ -82,8 +82,10 @@ bull_sniper:
   # 新闻配置
   news:
     enabled: true
-    use_google_rss: true
+    use_tavily: true              # Tavily主力（API key在.env）
+    use_google_rss: true          # Google RSS备用
     use_coingecko: false
+    tavily_api_key_env: TAVILY_API_KEY
     delist_keywords:
       - "delist"
       - "delisting"

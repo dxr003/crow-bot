@@ -18,6 +18,7 @@ bull_sniper analyzer.py — 信号分析器
 手工开关：config.yaml → analyzer.enabled / 各阶段独立开关
 """
 import logging
+import os
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -34,6 +35,10 @@ logger = logging.getLogger("bull_analyzer")
 _delist_cache: dict = {"symbols": set(), "last_fetch": 0}
 _DELIST_TTL = 3600  # 1小时刷新一次
 
+# ── 新闻源失败计数（Tavily主力，Google RSS备用） ──
+_tavily_fail_count = 0
+_TAVILY_FAIL_THRESHOLD = 3  # 连续失败3次切换到Google RSS
+
 
 def load_config() -> dict:
     with open(BASE_DIR / "config.yaml", "r") as f:
@@ -47,19 +52,33 @@ def load_config() -> dict:
 def fetch_news(symbol: str, cfg: dict) -> dict:
     """
     查询币种相关新闻
+    优先级：Tavily → Google RSS → CoinGecko
+    Tavily连续失败3次自动切换Google RSS，成功一次重置计数
     返回: {"sentiment": "bullish"/"bearish"/"neutral", "level": "major"/"minor"/None, "titles": [...]}
     """
+    global _tavily_fail_count
     news_cfg = cfg.get("news", {})
     base = symbol.replace("USDT", "").replace("BUSD", "")
 
     titles = []
 
-    # Google News RSS
-    if news_cfg.get("use_google_rss", True):
+    # Tavily主力
+    if news_cfg.get("use_tavily", False) and _tavily_fail_count < _TAVILY_FAIL_THRESHOLD:
+        tavily_titles = _fetch_tavily(base, news_cfg)
+        if tavily_titles:
+            _tavily_fail_count = 0
+            titles += tavily_titles
+        else:
+            _tavily_fail_count += 1
+            if _tavily_fail_count >= _TAVILY_FAIL_THRESHOLD:
+                logger.warning(f"Tavily连续{_TAVILY_FAIL_THRESHOLD}次失败，切换Google RSS")
+
+    # Google RSS备用（Tavily失败或没开启时）
+    if not titles and news_cfg.get("use_google_rss", True):
         titles += _fetch_google_rss(base)
 
     # CoinGecko
-    if news_cfg.get("use_coingecko", False):
+    if not titles and news_cfg.get("use_coingecko", False):
         titles += _fetch_coingecko_news(base)
 
     if not titles:
@@ -68,8 +87,43 @@ def fetch_news(symbol: str, cfg: dict) -> dict:
     return _classify_news(titles, news_cfg)
 
 
+def _fetch_tavily(base: str, news_cfg: dict) -> list:
+    """Tavily Search API查询加密新闻"""
+    try:
+        api_key_env = news_cfg.get("tavily_api_key_env", "TAVILY_API_KEY")
+        api_key = os.getenv(api_key_env, "")
+        if not api_key:
+            logger.warning("TAVILY_API_KEY未配置")
+            return []
+
+        resp = requests.post(
+            "https://api.tavily.com/search",
+            json={
+                "api_key": api_key,
+                "query": f"{base} crypto news",
+                "search_depth": "basic",
+                "max_results": 10,
+                "include_answer": False,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        titles = []
+        for result in data.get("results", []):
+            title = result.get("title", "")
+            if title:
+                titles.append(title.lower())
+        logger.debug(f"Tavily {base}: {len(titles)}条")
+        return titles
+    except Exception as e:
+        logger.warning(f"Tavily查询失败 {base}: {e}")
+        return []
+
+
 def _fetch_google_rss(base: str) -> list:
-    """Google News RSS抓取"""
+    """Google News RSS抓取（备用）"""
     try:
         url = (
             f"https://news.google.com/rss/search"
