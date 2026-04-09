@@ -1,0 +1,12 @@
+{
+  "radar": {},
+  "watchpool": {},
+  "signals": [],
+  "cooldowns": {},
+  "stats": {
+    "scans": 1,
+    "radar_hits": 0,
+    "pool_entries": 0,
+    "signals": 0
+  }
+}

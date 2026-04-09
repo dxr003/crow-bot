@@ -1,0 +1,62 @@
+bull_sniper:
+  enabled: true
+  mode: off                  # auto / alert / off（第一阶段用off，纯记录）
+
+  # 扫描
+  scan_interval_sec: 30
+  watchpool_max: 10
+  watchpool_timeout_min: 30
+  watchpool_refresh_sec: 10
+
+  # 双层触发
+  radar_1m_change: 3         # 1分钟涨幅%（雷达预警）
+  confirm_5m_change: 5       # 5分钟涨幅%（确认进池）
+
+  # 狙击窗口
+  snipe_window_min: 10       # 最低介入涨幅%
+  snipe_window_max: 18       # 最高介入涨幅%，超过放弃
+
+  # 过滤
+  min_listing_days: 30
+  exclude_24h_above: 30
+  exclude_daily_vol_below: 5000000
+  min_drop_from_ath: 30      # 距高点跌幅<30%排除
+
+  # AI判断（第二阶段启用）
+  ai:
+    provider: anthropic
+    model: claude-haiku-4-5-20251001
+    api_key_env: ANTHROPIC_API_KEY
+  ai_auto_threshold: 75
+  ai_alert_threshold: 60
+  ai_mid_cap_threshold: 80
+
+  # 仓位（统一20U）
+  position_usd: 20
+  default_leverage: 5
+  max_position_usd: 50000    # 安全阀上限，防bug
+  max_slippage_pct: 1        # 滑点>1%仓位减半，>2%放弃
+
+  # 移动止盈（v3.1单一规则）
+  trailing:
+    activation_pct: 40       # 浮盈≥40%激活
+    pullback_trigger: 25     # 回撤25%触发
+    tolerance: 3             # 容错防抖3%
+
+  # 风控
+  max_concurrent_positions: 3
+  daily_loss_limit_usd: 5000
+  btc_circuit_breaker_pct: 2
+
+  # 冷却
+  cooldown_after_tp_hours: 4
+  cooldown_after_sl_hours: 8
+
+  # 新闻（第二阶段启用）
+  news:
+    enabled: false
+    sources: ["coingecko", "coinmarketcap"]
+    lookback_hours: 24
+    major_positive_bonus: 15
+    minor_positive_bonus: 5
+    negative_veto: true
