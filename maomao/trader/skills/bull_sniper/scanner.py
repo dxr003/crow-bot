@@ -27,7 +27,7 @@ import yaml
 import requests
 from pathlib import Path
 from datetime import datetime
-from notifier import send_signal, send_pool_entry
+from notifier import send_signal, send_pool_entry, send_health_report
 from analyzer import analyze
 
 BASE_DIR = Path(__file__).parent
@@ -122,6 +122,7 @@ def load_state() -> dict:
         "watchpool": {},      # 观察池: {symbol: {entered_at, entry_price, ...}}
         "signals": [],        # 记录的信号（第一阶段只记录）
         "cooldowns": {},      # 冷却: {symbol: expire_ts}
+        "filter_log": [],     # 过滤日志（最近50条滚动）
         "stats": {"scans": 0, "radar_hits": 0, "pool_entries": 0, "signals": 0},
     }
 
@@ -335,6 +336,12 @@ def scan_once(state: dict, tickers: list) -> dict:
             ok, reason = passes_filter(symbol, t)
             if not ok:
                 logger.debug(f"[雷达] {symbol} 1m+{change_1m}% 被过滤: {reason}")
+                # 记录过滤日志（滚动50条）
+                if "filter_log" not in state:
+                    state["filter_log"] = []
+                state["filter_log"].append({"symbol": symbol, "reason": reason, "time": now})
+                if len(state["filter_log"]) > 50:
+                    state["filter_log"] = state["filter_log"][-50:]
                 continue
 
             state["radar"][symbol] = {
@@ -526,13 +533,28 @@ def scan_once(state: dict, tickers: list) -> dict:
 
 
 def run():
-    """主循环：30秒扫描 + 观察池10秒刷新"""
+    """主循环：30秒扫描 + 观察池10秒刷新 + 每小时健康报告"""
     logger.info("=== 做多阻击扫描器启动（第一阶段：纯记录） ===")
     state = load_state()
+    # 确保旧state有filter_log字段
+    if "filter_log" not in state:
+        state["filter_log"] = []
     last_full_scan = 0
+    last_health_report = 0
 
     while True:
         now = time.time()
+
+        # 每小时整点推健康报告（私信乌鸦）
+        if int(now) % 3600 < CFG["watchpool_refresh_sec"] and now - last_health_report > 300:
+            try:
+                send_health_report(state, state.get("filter_log", []))
+                logger.info("[健康报告] 已推送")
+                # 重置本小时统计
+                state["stats"] = {"scans": 0, "radar_hits": 0, "pool_entries": 0, "signals": 0}
+                last_health_report = now
+            except Exception as e:
+                logger.warning(f"健康报告推送失败: {e}")
 
         # 每30秒全市场扫描
         if now - last_full_scan >= CFG["scan_interval_sec"]:

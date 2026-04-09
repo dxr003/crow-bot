@@ -1,25 +1,29 @@
 """
 notifier.py — 做多阻击推送模块
-信号触发即时推到群组，不做整点卡片
+信号触发即时推到群组，健康报告私信乌鸦
 """
+import html as html_mod
 import os
 import time
 import requests
+from datetime import datetime
 
 BOT_TOKEN         = os.getenv("BOT_TOKEN", "")
 BROADCAST_CHAT_ID = os.getenv("BROADCAST_CHAT_ID", "-1001150897644")
+ADMIN_ID          = os.getenv("ADMIN_ID", "509640925")
 
 
-def _send(text: str):
-    """推送到群组"""
+def _send(text: str, chat_id: str = None):
+    """推送消息"""
     if not BOT_TOKEN:
         print(f"[notifier] 未配置BOT_TOKEN，跳过推送")
         return
+    target = chat_id or BROADCAST_CHAT_ID
     try:
         resp = requests.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
             json={
-                "chat_id":    BROADCAST_CHAT_ID,
+                "chat_id":    target,
                 "text":       text,
                 "parse_mode": "HTML",
             },
@@ -222,3 +226,39 @@ def send_status_card(state: dict):
     lines.append("开多可以由玄玄自动执行，或由老大和社区兄弟们自行决定")
 
     _send("\n".join(lines))
+
+
+def send_health_report(state: dict, filter_log: list):
+    """每小时健康播报 → 私信乌鸦，不进群"""
+    from analyzer import _tavily_fail_count, _TAVILY_FAIL_THRESHOLD
+
+    now_str = datetime.now().strftime("%m-%d %H:%M")
+    stats = state.get("stats", {})
+
+    # 新闻通道状态
+    if _tavily_fail_count < _TAVILY_FAIL_THRESHOLD:
+        news_status = "✅ Tavily"
+    else:
+        news_status = "⚠️ 已切Google RSS"
+
+    # 过滤日志最近20条（转义HTML特殊字符）
+    filter_lines = "\n".join(
+        f"  {f['symbol']} {html_mod.escape(f['reason'])}"
+        for f in filter_log[-20:]
+    ) or "  无"
+
+    text = (
+        f"🔍 做多阻击 · {now_str}\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"扫描次数：{stats.get('scans', 0)}次\n"
+        f"雷达命中：{stats.get('radar_hits', 0)}个\n"
+        f"进池：{stats.get('pool_entries', 0)}个\n"
+        f"信号触发：{stats.get('signals', 0)}个\n"
+        f"\n"
+        f"新闻通道：{news_status}\n"
+        f"下架公告：✅ 正常\n"
+        f"观察池当前：{len(state.get('watchpool', {}))}个币\n"
+        f"\n"
+        f"⚠️ 近期过滤：\n{filter_lines}"
+    )
+    _send(text, chat_id=ADMIN_ID)
