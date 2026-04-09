@@ -100,10 +100,15 @@ def _fetch_tavily(base: str, news_cfg: dict) -> list:
             "https://api.tavily.com/search",
             json={
                 "api_key": api_key,
-                "query": f"{base} crypto news",
+                "query": f"{base} cryptocurrency latest news",
                 "search_depth": "basic",
                 "max_results": 10,
                 "include_answer": False,
+                "include_domains": [
+                    "coindesk.com", "cointelegraph.com", "theblock.co",
+                    "decrypt.co", "blockworks.co", "cryptoslate.com",
+                    "bitcoinmagazine.com", "coingecko.com",
+                ],
             },
             timeout=10,
         )
@@ -209,12 +214,15 @@ def _classify_news(titles: list, news_cfg: dict) -> dict:
 
 
 # ══════════════════════════════════════════
-# 币安下架公告
+# 币安下架检测（原生API，铁律4）
 # ══════════════════════════════════════════
+
+_FAPI_BASE = "https://fapi.binance.com"
 
 def fetch_delist_symbols(cfg: dict) -> set:
     """
-    通过Tavily搜索币安下架公告，提取涉及的币种
+    从币安 exchangeInfo 获取非 TRADING 状态的合约
+    包括 SETTLING / PRE_DELIVERING / END_OF_DAY 等
     每小时缓存一次
     """
     global _delist_cache
@@ -223,61 +231,30 @@ def fetch_delist_symbols(cfg: dict) -> set:
     if now - _delist_cache["last_fetch"] < _DELIST_TTL:
         return _delist_cache["symbols"]
 
-    # 排除词：常见非币种大写词
-    _EXCLUDE = {
-        "USDT", "BUSD", "USD", "BTC", "ETH", "AND", "FOR", "THE",
-        "WILL", "BINANCE", "WITH", "FROM", "FUTURES", "NOT", "ALL",
-        "COIN", "USDS", "THIS", "THAT", "ARE", "HAS", "BEEN",
-        "PERPETUAL", "CONTRACT", "CONTRACTS", "MARGIN", "SPOT",
-    }
-
-    api_key = os.getenv(
-        cfg.get("news", {}).get("tavily_api_key_env", "TAVILY_API_KEY"), ""
-    )
-    if not api_key:
-        logger.warning("TAVILY_API_KEY未配置，跳过下架检测")
-        return _delist_cache["symbols"]
-
     try:
-        resp = requests.post(
-            "https://api.tavily.com/search",
-            json={
-                "api_key": api_key,
-                "query": "Binance delist futures perpetual contract 2026",
-                "search_depth": "basic",
-                "max_results": 10,
-            },
-            timeout=10,
-        )
+        resp = requests.get(f"{_FAPI_BASE}/fapi/v1/exchangeInfo", timeout=10)
         resp.raise_for_status()
         data = resp.json()
 
         symbols = set()
-        for result in data.get("results", []):
-            title = result.get("title", "")
-            content = result.get("content", "")
-            text = title + " " + content
-            # 匹配 XXXUSDT 或 XXXUSDS 格式，提取币名
-            found = re.findall(r'\b([A-Z]{2,10})(?:USDT|USDS)\b', text)
-            # 也匹配独立大写币名（在delist上下文中）
-            if "delist" in title.lower():
-                found += re.findall(r'\b([A-Z]{2,10})\b', title)
-            for sym in found:
-                if sym not in _EXCLUDE and len(sym) >= 3:
-                    symbols.add(sym)
+        for s in data.get("symbols", []):
+            if not s["symbol"].endswith("USDT"):
+                continue
+            if s["status"] != "TRADING":
+                base = s["symbol"].replace("USDT", "")
+                symbols.add(base)
 
         _delist_cache = {"symbols": symbols, "last_fetch": now}
-        if symbols:
-            logger.info(f"下架币更新（Tavily）: {symbols}")
+        logger.info(f"下架/非TRADING币更新: {len(symbols)}个")
         return symbols
 
     except Exception as e:
-        logger.warning(f"下架公告搜索失败: {e}")
+        logger.warning(f"exchangeInfo获取失败: {e}")
         return _delist_cache["symbols"]
 
 
 def is_delist_target(symbol: str, cfg: dict) -> bool:
-    """判断该币是否在下架名单中"""
+    """判断该币是否在下架/非TRADING状态"""
     base = symbol.replace("USDT", "").replace("BUSD", "")
     delist_symbols = fetch_delist_symbols(cfg)
     return base in delist_symbols
