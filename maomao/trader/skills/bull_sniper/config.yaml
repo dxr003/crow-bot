@@ -1,6 +1,6 @@
 bull_sniper:
   enabled: true
-  mode: off                  # auto / alert / off（第一阶段用off，纯记录）
+  mode: auto                 # auto / alert / off
 
   # 扫描
   scan_interval_sec: 30
@@ -8,14 +8,17 @@ bull_sniper:
   watchpool_timeout_min: 30
   watchpool_refresh_sec: 10
 
-  # 进池门槛（24h涨幅≥8%直接进池，无雷达/确认层）
-  pool_entry_gain_pct: 8
+  # 第一层过滤（全市场扫描）
+  min_listing_days: 1         # 上线超1天即可（第一天涨幅不可参考）
+  ath_exempt_days: 180        # 上线<180天跳过ATH检查（新币不要求腰斩）
+  exclude_24h_above: 40       # 24h涨幅>40%排除（极端追高）
+  exclude_daily_vol_below: 20000000
+  min_drop_from_ath: 60       # 距高点跌幅<60%排除（仅对上线≥180天的老币）
 
-  # 过滤
-  min_listing_days: 30
-  exclude_24h_above: 30
-  exclude_daily_vol_below: 5000000
-  min_drop_from_ath: 50      # 距高点跌幅<50%排除（未腰斩不碰）
+  # 第二层候选池→观察池
+  pool_entry_1h_change: 5     # 1小时涨幅≥5%进观察池
+  min_oi_usdt: 5000000        # OI≥500万U
+  min_volume_ratio: 2         # 量比≥2倍
 
   # AI判断
   ai:
@@ -43,7 +46,7 @@ bull_sniper:
     tolerance: 3             # 容错防抖3%
 
   # 风控
-  max_concurrent_positions: 3
+  max_concurrent_positions: 10
   daily_loss_limit_usd: 5000
   btc_circuit_breaker_pct: 2
 
@@ -55,11 +58,12 @@ bull_sniper:
   analyzer:
     enabled: true                  # 手工总开关
     stage1_enabled: true           # 第一阶段开关（8%快速通道）
-    stage1_gain_pct: 8             # 第一阶段触发涨幅%
+    stage1_gain_pct: 12            # 第一阶段触发（1h涨幅%）
     stage2_enabled: true           # 第二阶段开关（打分通道）
-    stage2_gain_min: 10            # 第二阶段最低涨幅%
-    stage2_gain_max: 20            # 第二阶段最高涨幅%
-    signal_threshold: 30           # 推送阈值（实战后调大）
+    stage2_gain_min: 10            # 第二阶段最低（1h涨幅%）
+    stage2_gain_max: 35            # 第二阶段最高（1h涨幅%）
+    snipe_5m_trigger: 5            # 触发时5分钟涨幅≥5%
+    signal_threshold: 35           # 推送阈值（实战调整）
     delist_enabled: true           # 下架反拉通道开关
 
   # 评分参数（实战后可调）
