@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-播报 Bot (@Maoju9_bot) — 单向播报骨架 v1.0
-职责: 接收毛毛/手动触发的信号，推送到频道/群
+贝贝 Bot (@Maoju9_bot) — 播报骨架 v1.0
+职责: 接收信号推送、持仓快照、系统健康报告
 特点: 单向输出为主，不参与交易决策
 """
 import os, logging
@@ -53,7 +53,7 @@ async def broadcast(app: Application, text: str):
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     target = BROADCAST_CHAT_ID or "⚠️ 未设置"
     await update.message.reply_text(
-        "📢 <b>播报Bot 在线</b>\n\n"
+        "📢 <b>贝贝 在线</b>\n\n"
         f"播报目标: <code>{target}</code>\n"
         "状态: ✅ 正常\n\n"
         "/help 查看命令",
@@ -63,7 +63,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 @admin_only
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "<b>播报Bot命令</b>\n\n"
+        "<b>贝贝命令</b>\n\n"
         "/start   — 状态\n"
         "/ping    — 心跳\n"
         "/test    — 发送测试播报\n"
@@ -73,11 +73,11 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 @admin_only
 async def cmd_ping(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🏓 Pong！播报Bot存活")
+    await update.message.reply_text("🏓 Pong！贝贝存活")
 
 @admin_only
 async def cmd_test(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await broadcast(ctx.application, "📢 <b>播报测试</b>\n\n这是一条测试消息，播报Bot正常运行。")
+    await broadcast(ctx.application, "📢 <b>播报测试</b>\n\n这是一条测试消息，贝贝正常运行。")
     await update.message.reply_text("✅ 测试播报已发送")
 
 @admin_only
@@ -106,7 +106,7 @@ async def post_init(app: Application):
     ])
 
 def main():
-    logger.info("=== 播报Bot启动 v1.0 ===")
+    logger.info("=== 贝贝启动 v1.0 ===")
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help",  cmd_help))
@@ -115,7 +115,8 @@ def main():
     app.add_handler(CommandHandler("bc",    cmd_bc))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_text))
     app.add_error_handler(error_handler)
-    app.job_queue.run_repeating(lambda ctx: logger.info("[heartbeat] 播报alive"), interval=300, first=10)
+    async def _heartbeat(ctx): logger.info("[heartbeat] 播报alive")
+    app.job_queue.run_repeating(_heartbeat, interval=300, first=10)
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":

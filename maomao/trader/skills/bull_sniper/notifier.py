@@ -395,19 +395,80 @@ def send_trade_report(signal: dict, buy_result: dict, analyze_result: dict):
 
 
 def send_health_report(state: dict, filter_log: list):
-    """每小时健康播报 → 私信乌鸦，不进群"""
+    """每小时健康播报 → 私信乌鸦，不进群。含系统自检诊断"""
     from analyzer import _tavily_fail_count, _TAVILY_FAIL_THRESHOLD
 
     now_str = datetime.now().strftime("%m-%d %H:%M")
+    now_ts = time.time()
     stats = state.get("stats", {})
+    watchpool = state.get("watchpool", {})
 
-    # 新闻通道状态
+    # ── 系统自检 ──
+    diag_lines = []
+    all_ok = True
+
+    # 1) OI数据检查
+    try:
+        from scanner import _oi_cache
+        if not _oi_cache:
+            diag_lines.append("⚠️ OI：缓存为空，尚未采集到数据")
+            all_ok = False
+        else:
+            freshest = max(v["time"] for v in _oi_cache.values())
+            age_min = (now_ts - freshest) / 60
+            if age_min > 10:
+                diag_lines.append(f"⚠️ OI：最新数据 {age_min:.0f}分钟前，可能断连")
+                all_ok = False
+            else:
+                diag_lines.append(f"✅ OI：{len(_oi_cache)}币缓存，最新 {age_min:.0f}分钟前")
+    except Exception as e:
+        diag_lines.append(f"❌ OI：导入失败 {e}")
+        all_ok = False
+
+    # 2) 新闻通道
     if _tavily_fail_count < _TAVILY_FAIL_THRESHOLD:
-        news_status = "✅ Tavily"
+        diag_lines.append("✅ 新闻：Tavily 正常")
     else:
-        news_status = "⚠️ 已切Google RSS"
+        diag_lines.append("⚠️ 新闻：已切Google RSS备用")
+        all_ok = False
 
-    # 过滤日志最近20条（转义HTML特殊字符）
+    # 3) 扫描活跃度
+    scans = stats.get("scans", 0)
+    if scans == 0:
+        diag_lines.append("⚠️ 扫描：本周期0次，可能卡住")
+        all_ok = False
+    else:
+        diag_lines.append(f"✅ 扫描：{scans}次")
+
+    # 4) 评分活跃度（池内币是否被评分过）
+    scored_count = sum(1 for wp in watchpool.values() if wp.get("analyzed") or wp.get("last_analyze_time", 0) > 0)
+    pool_count = len(watchpool)
+    if pool_count > 0 and scored_count == 0:
+        diag_lines.append(f"⚠️ 评分：池内{pool_count}币但0个被评分")
+        all_ok = False
+    elif pool_count > 0:
+        diag_lines.append(f"✅ 评分：池内{pool_count}币，{scored_count}个已评分")
+    else:
+        diag_lines.append("✅ 评分：池空，待观察")
+
+    # 5) 状态文件完整性
+    from pathlib import Path
+    state_file = Path(__file__).parent / "data" / "state.json"
+    if state_file.exists():
+        age_min = (now_ts - state_file.stat().st_mtime) / 60
+        if age_min > 5:
+            diag_lines.append(f"⚠️ 状态文件：{age_min:.0f}分钟未更新")
+            all_ok = False
+        else:
+            diag_lines.append(f"✅ 状态文件：{age_min:.0f}分钟前更新")
+    else:
+        diag_lines.append("⚠️ 状态文件：不存在")
+        all_ok = False
+
+    health_icon = "✅" if all_ok else "⚠️"
+    diag_block = "\n".join(diag_lines)
+
+    # ── 过滤日志 ──
     filter_lines = "\n".join(
         f"  {f['symbol']} {html_mod.escape(f['reason'])}"
         for f in filter_log[-20:]
@@ -416,14 +477,14 @@ def send_health_report(state: dict, filter_log: list):
     text = (
         f"🔍 做多阻击 · {now_str}\n"
         f"━━━━━━━━━━━━━━\n"
-        f"扫描次数：{stats.get('scans', 0)}次\n"
-        f"雷达命中：{stats.get('radar_hits', 0)}个\n"
-        f"进池：{stats.get('pool_entries', 0)}个\n"
-        f"信号触发：{stats.get('signals', 0)}个\n"
+        f"扫描：{stats.get('scans', 0)}  "
+        f"雷达：{stats.get('radar_hits', 0)}  "
+        f"进池：{stats.get('pool_entries', 0)}  "
+        f"信号：{stats.get('signals', 0)}\n"
+        f"观察池：{pool_count}个币\n"
         f"\n"
-        f"新闻通道：{news_status}\n"
-        f"下架公告：✅ 正常\n"
-        f"观察池当前：{len(state.get('watchpool', {}))}个币\n"
+        f"{health_icon} <b>系统自检</b>\n"
+        f"{diag_block}\n"
         f"\n"
         f"⚠️ 近期过滤：\n{filter_lines}"
     )
