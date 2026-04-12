@@ -4,7 +4,7 @@ bull_sniper scanner.py — 做多阻击扫描器 v3.0
 
 三层过滤架构：
   第一层（全市场30秒扫描）：基础过滤
-    24h成交额≥2000万 / 上线≥1天 / 距ATH≥60%（新币<180天豁免） / 24h涨幅<40%
+    24h成交额≥2000万 / 上线≥1天 / 距ATH≥60%（新币<180天豁免） / 2h涨幅<40%
   第二层（候选池→观察池）：动量确认
     1小时涨幅≥5% / OI≥500万U / 量比≥2倍
   第三层（观察池触发）：用1小时涨幅判断
@@ -112,6 +112,48 @@ def calc_1h_change(symbol: str) -> float:
         return round((close_now - open_1h) / open_1h * 100, 2) if open_1h > 0 else 0.0
     except Exception as e:
         logger.debug(f"1h涨幅计算失败 {symbol}: {e}")
+        return 0.0
+
+
+def calc_1m_change(symbol: str) -> float:
+    """计算1分钟涨幅：拉2根1分钟K线"""
+    try:
+        klines = get_klines_1m(symbol, 2)
+        if len(klines) < 2:
+            return 0.0
+        open_1m = float(klines[0][1])
+        close_now = float(klines[-1][4])
+        return round((close_now - open_1m) / open_1m * 100, 2) if open_1m > 0 else 0.0
+    except Exception as e:
+        logger.debug(f"1m涨幅计算失败 {symbol}: {e}")
+        return 0.0
+
+
+def calc_3m_change(symbol: str) -> float:
+    """计算3分钟涨幅：拉4根1分钟K线"""
+    try:
+        klines = get_klines_1m(symbol, 4)
+        if len(klines) < 4:
+            return 0.0
+        open_3m = float(klines[0][1])
+        close_now = float(klines[-1][4])
+        return round((close_now - open_3m) / open_3m * 100, 2) if open_3m > 0 else 0.0
+    except Exception as e:
+        logger.debug(f"3m涨幅计算失败 {symbol}: {e}")
+        return 0.0
+
+
+def calc_2h_change(symbol: str) -> float:
+    """计算2小时涨幅：拉121根1分钟K线，用120分钟前开盘价vs当前收盘价"""
+    try:
+        klines = get_klines_1m(symbol, 121)
+        if len(klines) < 121:
+            return 0.0
+        open_2h = float(klines[0][1])
+        close_now = float(klines[-1][4])
+        return round((close_now - open_2h) / open_2h * 100, 2) if open_2h > 0 else 0.0
+    except Exception as e:
+        logger.debug(f"2h涨幅计算失败 {symbol}: {e}")
         return 0.0
 
 
@@ -243,9 +285,11 @@ def passes_filter(symbol: str, ticker: dict) -> tuple[bool, str]:
     过滤检查
     返回 (True, "") 或 (False, 原因)
     """
-    # 24h涨幅已>20%（昨天热点排除）
-    if ticker["change_pct"] > CFG["exclude_24h_above"]:
-        return False, f"24h已涨{ticker['change_pct']:.1f}%>{CFG['exclude_24h_above']}%"
+    # 2h涨幅过滤（替代24h，更敏感）
+    change_2h = calc_2h_change(symbol)
+    exclude_2h = CFG.get("exclude_2h_above", 40)
+    if change_2h > exclude_2h:
+        return False, f"2h已涨{change_2h:.1f}%>{exclude_2h}%"
 
     # 日成交额不足
     min_vol = CFG["exclude_daily_vol_below"]
@@ -457,17 +501,22 @@ def scan_once(state: dict, tickers: list) -> dict:
                 logger.debug(f"[观察] {symbol} 1h+{change_1h:.1f}% 但5m+{change_5m:.1f}%<{snipe_5m}%，等加速")
                 continue
 
+            # 计算短周期爆发数据
+            change_1m = calc_1m_change(symbol)
+            change_3m = calc_3m_change(symbol)
+            market_data = fetch_market_data(symbol)
+            market_data["change_1m"] = change_1m
+            market_data["change_3m"] = change_3m
+            market_data["change_5m"] = change_5m
+
             if change_1h >= stage1_min:
-                # 第一阶段快速通道（1h≥12%）
-                logger.info(f"[分析] {symbol} 1h+{change_1h:.1f}% 5m+{change_5m:.1f}% 快速通道")
-                analyze_result = analyze(symbol, change_1h, {}, cfg=CFG)
-            else:
-                # 第二阶段打分通道（1h 10-12%）
-                logger.info(f"[分析] {symbol} 1h+{change_1h:.1f}% 5m+{change_5m:.1f}% 打分通道")
-                market_data = fetch_market_data(symbol)
+                logger.info(f"[分析] {symbol} 1h+{change_1h:.1f}% 5m+{change_5m:.1f}% 1m+{change_1m:.1f}% 快速通道")
                 analyze_result = analyze(symbol, change_1h, market_data, cfg=CFG)
-                if analyze_result:
-                    analyze_result["market_data"] = market_data
+            else:
+                logger.info(f"[分析] {symbol} 1h+{change_1h:.1f}% 5m+{change_5m:.1f}% 1m+{change_1m:.1f}% 打分通道")
+                analyze_result = analyze(symbol, change_1h, market_data, cfg=CFG)
+            if analyze_result:
+                analyze_result["market_data"] = market_data
 
         if analyze_result is None:
             continue

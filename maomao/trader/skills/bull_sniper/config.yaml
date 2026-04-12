@@ -11,7 +11,7 @@ bull_sniper:
   # 第一层过滤（全市场扫描）
   min_listing_days: 1         # 上线超1天即可（第一天涨幅不可参考）
   ath_exempt_days: 180        # 上线<180天跳过ATH检查（新币不要求腰斩）
-  exclude_24h_above: 40       # 24h涨幅>40%排除（极端追高）
+  exclude_2h_above: 40        # 2h涨幅>40%排除（替代24h，更敏感）
   exclude_daily_vol_below: 20000000
   min_drop_from_ath: 60       # 距高点跌幅<60%排除（仅对上线≥180天的老币）
 
@@ -63,20 +63,33 @@ bull_sniper:
     stage2_gain_min: 10            # 第二阶段最低（1h涨幅%）
     stage2_gain_max: 35            # 第二阶段最高（1h涨幅%）
     snipe_5m_trigger: 5            # 触发时5分钟涨幅≥5%
-    signal_threshold: 35           # 推送阈值（实战调整）
+    signal_threshold: 28           # 推送阈值 v2（瞬时爆发+多维共振）
     delist_enabled: true           # 下架反拉通道开关
 
-  # 评分参数（实战后可调）
+  # 评分参数 v2（瞬时爆发+趋势确认，2026-04-12）
   scoring:
-    news_major: 15
-    news_minor: 5
-    gain_10_15: 10
-    gain_15_20: 20
-    oi_up: 10
+    # 新闻（降权：利好+5，利空-10，不再一票否决）
+    news_bullish: 5
+    news_bearish: -10
+    # 瞬时爆发（可叠加）
+    burst_1m: 5              # 1分钟涨>3%
+    burst_3m: 8              # 3分钟涨>5%
+    burst_5m: 10             # 5分钟涨>8%
+    # 趋势确认（1h涨幅分档）
+    gain_5_10: 5
+    gain_10_15: 8
+    gain_15_25: 12
+    gain_25_40: 15
+    # OI（分档）
+    oi_up_mild: 5            # OI上涨5-15%
+    oi_up_strong: 10         # OI上涨>15%
     oi_down: -5
-    lsr_short_dominant: 10
+    # 挤空+费率
+    lsr_short_dominant: 8    # 多空比<0.8
     funding_extreme_threshold: 0.005   # 0.5%
-    funding_extreme: 10
+    funding_extreme: 8
+    # 量比（多一档>5x）
+    vol_ratio_5x: 18
     vol_ratio_3x: 15
     vol_ratio_2x: 10
     vol_ratio_1_5x: 5

@@ -4,17 +4,18 @@ bull_sniper analyzer.py — 信号分析器
 
 两阶段触发：
   第一阶段：涨幅≥8% → 查新闻+查币安下架公告 → 有利好/下架反拉 → 直接推信号
-  第二阶段：涨幅10-20% → 综合打分 ≥ 阈值 → 推信号
+  第二阶段：涨幅10-35% → 综合打分 ≥ 28分 → 推信号
 
-评分体系（全部参数在config.yaml可调）：
-  新闻：重大利好+15 / 普通利好+5 / 利空直接否决
-  涨幅：10-15%+10 / 15-20%+20
-  OI：上涨+10 / 下跌-5
-  多空比：<0.8空头占多+10 / >1.5多头过热-5
-  费率：≤-0.5%或≥+0.5%+10
-  量比：>3倍+15 / 2-3倍+10 / 1.5-2倍+5 / <1倍-5
+评分体系 v2（瞬时爆发+趋势确认，2026-04-12）：
+  瞬时爆发：1m>3%+5 / 3m>5%+8 / 5m>8%+10（可叠加）
+  趋势确认：1h 5-10%+5 / 10-15%+8 / 15-25%+12 / 25-40%+15
+  量比：1.5-2x+5 / 2-3x+10 / 3-5x+15 / >5x+18
+  OI：上涨5-15%+5 / >15%+10 / 下跌-5
+  挤空：多空比<0.8 +8
+  费率：极端>±0.5% +8
+  新闻：AI判断利好+5 / 利空-10（不再一票否决）
 
-下架公告：独立通道，不走评分，不受新闻利空否决影响
+下架公告：独立通道，不走评分
 手工开关：config.yaml → analyzer.enabled / 各阶段独立开关
 """
 import json
@@ -467,46 +468,70 @@ def is_delist_target(symbol: str, cfg: dict) -> bool:
 
 def score_signal(symbol: str, gain_pct: float, market_data: dict, cfg: dict) -> dict:
     """
-    综合打分
-    market_data: {oi_change_pct, long_short_ratio, funding_rate, volume_ratio}
+    综合打分 v2（瞬时爆发+趋势确认+量能+持仓+挤空+费率+新闻）
+    market_data: {oi_change_pct, long_short_ratio, funding_rate, volume_ratio, change_1m, change_3m, change_5m}
     返回: {"score": int, "breakdown": dict, "vetoed": bool, "veto_reason": str}
     """
     scoring = cfg.get("scoring", {})
     breakdown = {}
     score = 0
 
-    # ── 新闻评分 ──
+    # ── 新闻评分（降权：利好+5，利空-10，不再一票否决） ──
     news_result = fetch_news(symbol, cfg)
-    if news_result["sentiment"] == "bearish":
-        return {
-            "score": 0, "breakdown": {}, "vetoed": True,
-            "veto_reason": "利空新闻否决", "news": news_result
-        }
-
-    if news_result["level"] == "major":
-        pts = scoring.get("news_major", 15)
-        breakdown["新闻重大利好"] = pts
+    if news_result["sentiment"] == "bullish":
+        pts = scoring.get("news_bullish", 5)
+        breakdown["新闻利好"] = pts
         score += pts
-    elif news_result["level"] == "minor":
-        pts = scoring.get("news_minor", 5)
-        breakdown["新闻普通利好"] = pts
+    elif news_result["sentiment"] == "bearish":
+        pts = scoring.get("news_bearish", -10)
+        breakdown["新闻利空"] = pts
         score += pts
 
-    # ── 涨幅评分 ──
-    if 15 <= gain_pct < 20:
-        pts = scoring.get("gain_15_20", 20)
-        breakdown[f"涨幅{gain_pct:.1f}%"] = pts
+    # ── 瞬时爆发（1m/3m/5m可叠加） ──
+    change_1m = market_data.get("change_1m", 0)
+    change_3m = market_data.get("change_3m", 0)
+    change_5m = market_data.get("change_5m", 0)
+
+    if change_1m > 3:
+        pts = scoring.get("burst_1m", 5)
+        breakdown[f"1m爆发+{change_1m:.1f}%"] = pts
+        score += pts
+    if change_3m > 5:
+        pts = scoring.get("burst_3m", 8)
+        breakdown[f"3m爆发+{change_3m:.1f}%"] = pts
+        score += pts
+    if change_5m > 8:
+        pts = scoring.get("burst_5m", 10)
+        breakdown[f"5m爆发+{change_5m:.1f}%"] = pts
+        score += pts
+
+    # ── 趋势确认（1h涨幅分档） ──
+    if 25 <= gain_pct < 40:
+        pts = scoring.get("gain_25_40", 15)
+        breakdown[f"1h趋势+{gain_pct:.1f}%"] = pts
+        score += pts
+    elif 15 <= gain_pct < 25:
+        pts = scoring.get("gain_15_25", 12)
+        breakdown[f"1h趋势+{gain_pct:.1f}%"] = pts
         score += pts
     elif 10 <= gain_pct < 15:
-        pts = scoring.get("gain_10_15", 10)
-        breakdown[f"涨幅{gain_pct:.1f}%"] = pts
+        pts = scoring.get("gain_10_15", 8)
+        breakdown[f"1h趋势+{gain_pct:.1f}%"] = pts
+        score += pts
+    elif 5 <= gain_pct < 10:
+        pts = scoring.get("gain_5_10", 5)
+        breakdown[f"1h趋势+{gain_pct:.1f}%"] = pts
         score += pts
 
-    # ── OI变化 ──
+    # ── OI变化（分档） ──
     oi_change = market_data.get("oi_change_pct", 0)
-    if oi_change > 0:
-        pts = scoring.get("oi_up", 10)
-        breakdown[f"OI上涨{oi_change:.1f}%"] = pts
+    if oi_change > 15:
+        pts = scoring.get("oi_up_strong", 10)
+        breakdown[f"OI大涨+{oi_change:.1f}%"] = pts
+        score += pts
+    elif oi_change > 5:
+        pts = scoring.get("oi_up_mild", 5)
+        breakdown[f"OI上涨+{oi_change:.1f}%"] = pts
         score += pts
     elif oi_change < -5:
         pts = scoring.get("oi_down", -5)
@@ -516,22 +541,26 @@ def score_signal(symbol: str, gain_pct: float, market_data: dict, cfg: dict) -> 
     # ── 多空比 ──
     lsr = market_data.get("long_short_ratio", 1.0)
     if lsr < 0.8:
-        pts = scoring.get("lsr_short_dominant", 10)
-        breakdown[f"多空比{lsr:.2f}空头占多"] = pts
+        pts = scoring.get("lsr_short_dominant", 8)
+        breakdown[f"挤空{lsr:.2f}"] = pts
         score += pts
 
     # ── 资金费率 ──
     funding = market_data.get("funding_rate", 0)
     funding_threshold = scoring.get("funding_extreme_threshold", 0.005)
     if abs(funding) >= funding_threshold:
-        pts = scoring.get("funding_extreme", 10)
+        pts = scoring.get("funding_extreme", 8)
         direction = "负" if funding < 0 else "正"
         breakdown[f"费率极端{direction}{funding*100:.3f}%"] = pts
         score += pts
 
-    # ── 量比 ──
+    # ── 量比（多一档>5x） ──
     volume_ratio = market_data.get("volume_ratio", 1.0)
-    if volume_ratio > 3:
+    if volume_ratio > 5:
+        pts = scoring.get("vol_ratio_5x", 18)
+        breakdown[f"量比{volume_ratio:.1f}x"] = pts
+        score += pts
+    elif volume_ratio > 3:
         pts = scoring.get("vol_ratio_3x", 15)
         breakdown[f"量比{volume_ratio:.1f}x"] = pts
         score += pts
@@ -590,10 +619,8 @@ def analyze(symbol: str, gain_pct: float, market_data: dict, cfg: Optional[dict]
                 "score": None,
             }
 
-        # 新闻快速通道
+        # 新闻快速通道（利空不再否决，只有利好才快速触发）
         news = fetch_news(symbol, cfg)
-        if news["sentiment"] == "bearish":
-            return {"action": "veto", "reason": "利空新闻否决", "news": news}
         if news["sentiment"] == "bullish":
             return {
                 "action": "signal_fast",
@@ -610,9 +637,6 @@ def analyze(symbol: str, gain_pct: float, market_data: dict, cfg: Optional[dict]
 
     if stage2_min <= gain_pct <= stage2_max and analyzer_cfg.get("stage2_enabled", True):
         result = score_signal(symbol, gain_pct, market_data, cfg)
-
-        if result["vetoed"]:
-            return {"action": "veto", "reason": result["veto_reason"], "news": result.get("news")}
 
         if result["score"] >= signal_threshold:
             # ── 位置2：AI最终决策（skip否决，buy/失败放行） ──

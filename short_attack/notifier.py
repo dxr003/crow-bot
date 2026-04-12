@@ -118,7 +118,7 @@ def send_card(state: dict):
 
     # 监控中
     if monitoring:
-        lines.append(f"\n👁 <b>监控中并等待信号做空（{len(monitoring)}个）</b>")
+        lines.append(f"\n👁 <b>狙击准备中（{len(monitoring)}个）</b>")
         lines.append("<blockquote>")
         for symbol, mon in monitoring.items():
             elapsed = _fmt_elapsed(mon["started_at"])
@@ -139,45 +139,28 @@ def send_card(state: dict):
             )
         lines.append("</blockquote>")
     else:
-        lines.append(f"\n👁 <b>不满条件进入监控</b>")
+        lines.append(f"\n👁 <b>暂无狙击目标</b>")
 
-    # 阻击信号 / 持仓中
-    positions = {s: d for s, d in signals.items() if d.get("executed")}
-    pending   = {s: d for s, d in signals.items() if not d.get("executed")}
+    # 做空中（不区分是否已执行，对外统一展示）
+    all_signals = {s: d for s, d in signals.items()}
 
-    if pending:
-        lines.append(f"\n🚨 <b>阻击信号（{len(pending)}个）</b>")
+    if all_signals:
+        lines.append(f"\n🚨 <b>做空中（{len(all_signals)}个）</b>")
         lines.append("<blockquote>")
-        for symbol, sig in pending.items():
-            elapsed = _fmt_elapsed(sig["triggered_at"])
-            cur_price = sig.get("cur_price", sig["position_price"])
-            pnl_pct = round((sig["position_price"] - cur_price) / sig["position_price"] * 100, 1)
-            pnl_str = f"+{pnl_pct}%" if pnl_pct > 0 else f"{pnl_pct}%"
-            lines.append(
-                f"🪙 <b>{_coin(symbol)}</b>  24h涨幅 <code>+{sig['total_rise']}%</code>\n"
-                f"   入场 <code>{sig['position_price']}</code>  现价 <code>{cur_price}</code>\n"
-                f"   做空盈亏 <code>{pnl_str}</code>  {elapsed}"
-            )
-        lines.append("</blockquote>")
-    else:
-        lines.append("\n🚨 <b>阻击信号：无</b>")
-
-    if positions:
-        lines.append(f"\n💀 <b>已执行买入（{len(positions)}个）</b>")
-        lines.append("<blockquote>")
-        for symbol, sig in positions.items():
+        for symbol, sig in all_signals.items():
             elapsed = _fmt_elapsed(sig["triggered_at"])
             cur_price = sig.get("cur_price", sig["position_price"])
             pnl_pct = round((sig["position_price"] - cur_price) / sig["position_price"] * 100, 1)
             pnl_icon = "🟢" if pnl_pct > 0 else "🔴"
+            liq_price = sig.get("liq_price", 0)
             lines.append(
-                f"{pnl_icon} <b>{_coin(symbol)}</b>\n"
+                f"{pnl_icon} <b>{_coin(symbol)}</b>  24h涨幅 <code>+{sig['total_rise']}%</code>\n"
                 f"   入场 <code>{sig['position_price']}</code>  现价 <code>{cur_price}</code>\n"
-                f"   浮盈 <code>{pnl_pct:+.1f}%</code>  强平 <code>{sig['liq_price']}</code>  {elapsed}"
+                f"   做空盈亏 <code>{pnl_pct:+.1f}%</code>  强平 <code>{liq_price}</code>  {elapsed}"
             )
         lines.append("</blockquote>")
     else:
-        lines.append("\n💀 <b>没有发现买入信号</b>")
+        lines.append("\n🚨 <b>暂无做空信号</b>")
 
     # 近期退出
     if exits:
@@ -190,7 +173,12 @@ def send_card(state: dict):
         lines.append("</blockquote>")
 
     # 战绩 + 底部
-    lines.append(f"\n🏆 <b>战绩</b>  ✅击中 {stats['success']}  ❌失败 {stats['failed']}")
+    all_exits = state.get("exits", [])
+    hits = [e for e in all_exits if e.get("reason") == "阻击成功"]
+    fails = [e for e in all_exits if e.get("reason") == "阻击失败"]
+    hit_str = " ".join(f"{_coin(e['symbol'])}({time.strftime('%m/%d', time.localtime(e['exited_at']))})" for e in hits[-5:]) if hits else "—"
+    fail_str = " ".join(f"{_coin(e['symbol'])}({time.strftime('%m/%d', time.localtime(e['exited_at']))})" for e in fails[-5:]) if fails else "—"
+    lines.append(f"\n🏆 <b>战绩</b>  ✅{stats['success']} {hit_str}  ❌{stats['failed']} {fail_str}")
     lines.append("━━━━━━━━━━━━━━━━━━━━")
     lines.append("开空可以由玄玄自动执行，或由老大和社区兄弟们自行决定")
 
