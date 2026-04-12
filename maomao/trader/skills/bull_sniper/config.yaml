@@ -4,8 +4,7 @@ bull_sniper:
 
   # 扫描
   scan_interval_sec: 30
-  watchpool_max: 10
-  watchpool_timeout_min: 30
+  watchpool_max: 30
   watchpool_refresh_sec: 10
 
   # 第一层过滤（全市场扫描）
@@ -33,8 +32,8 @@ bull_sniper:
   ai_alert_threshold: 60
   ai_mid_cap_threshold: 80
 
-  # 仓位（统一20U）
-  position_usd: 20
+  # 仓位（统一50U）
+  position_usd: 50
   default_leverage: 5
   max_position_usd: 50000    # 安全阀上限，防bug
   max_slippage_pct: 1        # 滑点>1%仓位减半，>2%放弃
@@ -60,10 +59,7 @@ bull_sniper:
     stage1_enabled: true           # 第一阶段开关（8%快速通道）
     stage1_gain_pct: 12            # 第一阶段触发（1h涨幅%）
     stage2_enabled: true           # 第二阶段开关（打分通道）
-    stage2_gain_min: 10            # 第二阶段最低（1h涨幅%）
-    stage2_gain_max: 35            # 第二阶段最高（1h涨幅%）
-    snipe_5m_trigger: 5            # 触发时5分钟涨幅≥5%
-    signal_threshold: 28           # 推送阈值 v2（瞬时爆发+多维共振）
+    signal_threshold: 25           # 推送阈值 v3（无前置门槛，定期打分）
     delist_enabled: true           # 下架反拉通道开关
 
   # 评分参数 v2（瞬时爆发+趋势确认，2026-04-12）

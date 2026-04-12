@@ -195,9 +195,42 @@ def get_oi_usdt(symbol: str) -> float:
         return 0.0
 
 
+_oi_cache: dict = {}  # {symbol: {"value": float, "time": float}}
+
 def get_oi_change(symbol: str) -> float:
-    """获取OI变化（占位，币安无历史OI接口，后续可接Coinglass）"""
-    return 0.0
+    """获取OI变化百分比（当前OI vs 缓存的前值，缓存5分钟刷新）"""
+    global _oi_cache
+    now = time.time()
+    try:
+        resp = requests.get(
+            f"{FAPI_BASE}/fapi/v1/openInterest",
+            params={"symbol": symbol},
+            timeout=8,
+        )
+        resp.raise_for_status()
+        cur_oi = float(resp.json()["openInterest"])
+    except Exception as e:
+        logger.debug(f"OI获取失败 {symbol}: {e}")
+        return 0.0
+
+    prev = _oi_cache.get(symbol)
+    if prev is None or now - prev["time"] >= 300:
+        # 首次或缓存过期，存当前值作为基准，返回0
+        _oi_cache[symbol] = {"value": cur_oi, "time": now}
+        if prev is None:
+            return 0.0
+        # 有旧值，计算变化后更新缓存
+        old_oi = prev["value"]
+        _oi_cache[symbol] = {"value": cur_oi, "time": now}
+        if old_oi <= 0:
+            return 0.0
+        return round((cur_oi - old_oi) / old_oi * 100, 2)
+
+    # 缓存未过期，用缓存值计算变化
+    old_oi = prev["value"]
+    if old_oi <= 0:
+        return 0.0
+    return round((cur_oi - old_oi) / old_oi * 100, 2)
 
 
 def get_lsr(symbol: str) -> float:
@@ -407,12 +440,13 @@ def scan_once(state: dict, tickers: list) -> dict:
             state["cooldowns"][symbol] = now + 1800
             continue
 
-        # 观察池已满，淘汰最早进入的
-        max_pool = CFG.get("watchpool_max", 10)
+        # 观察池已满，淘汰最弱的（进池后涨幅最低）
+        max_pool = CFG.get("watchpool_max", 30)
         if len(state["watchpool"]) >= max_pool:
-            oldest = min(state["watchpool"].items(), key=lambda x: x[1]["entered_at"])
-            del state["watchpool"][oldest[0]]
-            logger.info(f"[观察池] 已满，淘汰 {oldest[0]}")
+            weakest = min(state["watchpool"].items(),
+                          key=lambda x: x[1].get("gain_since_entry", 0))
+            del state["watchpool"][weakest[0]]
+            logger.info(f"[观察池] 已满，淘汰最弱 {weakest[0]} ({weakest[1].get('gain_since_entry', 0):.1f}%)")
 
         # 进入观察池
         ath_data = _load_ath(symbol)
@@ -438,13 +472,7 @@ def scan_once(state: dict, tickers: list) -> dict:
             f"24h量:{t['volume_usdt']/1e6:.1f}M 距ATH跌{ath_data['drop_from_ath']:.1f}%"
         )
 
-    # ── 4. 第三层：观察池管理（用1h涨幅判断） ──
-    analyzer_cfg = CFG.get("analyzer", {})
-    stage1_min   = analyzer_cfg.get("stage1_gain_pct", 12)
-    stage2_min   = analyzer_cfg.get("stage2_gain_min", 10)
-    stage2_max   = analyzer_cfg.get("stage2_gain_max", 18)
-    snipe_5m     = analyzer_cfg.get("snipe_5m_trigger", 5)
-
+    # ── 4. 第三层：观察池管理（零成本观察，定期打分） ──
     for symbol in list(state["watchpool"].keys()):
         pool = state["watchpool"][symbol]
         t = ticker_map.get(symbol)
@@ -460,63 +488,40 @@ def scan_once(state: dict, tickers: list) -> dict:
             pool["peak_price"] = cur_price
         pool["cur_price"] = cur_price
 
-        # 实时1小时涨幅（核心基准）
+        # 进池后涨幅（核心基准，替代1h）
+        gain_since_entry = (cur_price - entry_price) / entry_price * 100
+        pool["gain_since_entry"] = round(gain_since_entry, 2)
+
+        # 1h涨幅仅供打分参考，不作为门槛
         change_1h = calc_1h_change(symbol)
         pool["change_1h"] = change_1h
 
-        # ── 退出条件（用1h涨幅判断） ──
-        exit_reason = None
+        # ── 退出条件：池满淘汰最弱（无超时、无涨跌幅退出） ──
+        # 池内零成本观察，不主动退出，由池满淘汰机制处理
 
-        if change_1h < 3:
-            exit_reason = f"1h涨幅回落{change_1h:.1f}%<3%"
-        elif change_1h > stage2_max:
-            exit_reason = f"1h涨{change_1h:.1f}%超{stage2_max}%不追高"
-        elif elapsed_min > CFG.get("watchpool_timeout_min", 30):
-            exit_reason = "观察超时30分钟"
-
-        if exit_reason:
-            del state["watchpool"][symbol]
-            state["cooldowns"][symbol] = now + 1800
-            events["pool_exits"].append({"symbol": symbol, "reason": exit_reason})
-            logger.info(f"[退出] {symbol} {exit_reason}")
-            continue
-
-        # ── 价格变化≥1%且距上次分析≥5分钟才重新分析 ──
+        # ── 定期打分：价格变化≥1%就重新打分（无时间冷却） ──
         last_price = pool.get("last_analyze_price", 0)
-        last_analyze_time = pool.get("last_analyze_time", 0)
         if last_price > 0 and abs(cur_price - last_price) / last_price * 100 >= 1:
-            if now - last_analyze_time >= 300:
-                pool["analyzed"] = False
+            pool["analyzed"] = False
 
         if pool.get("analyzed"):
             continue
 
-        # ── 分析触发（1h涨幅 + 5m涨幅双确认） ──
+        # ── 打分（无前置门槛，直接进评分体系） ──
         analyze_result = None
 
-        if change_1h >= stage2_min:
-            # 5分钟涨幅确认
-            change_5m = calc_5m_change(symbol)
-            if change_5m < snipe_5m:
-                logger.debug(f"[观察] {symbol} 1h+{change_1h:.1f}% 但5m+{change_5m:.1f}%<{snipe_5m}%，等加速")
-                continue
+        change_5m = calc_5m_change(symbol)
+        change_1m = calc_1m_change(symbol)
+        change_3m = calc_3m_change(symbol)
+        market_data = fetch_market_data(symbol)
+        market_data["change_1m"] = change_1m
+        market_data["change_3m"] = change_3m
+        market_data["change_5m"] = change_5m
 
-            # 计算短周期爆发数据
-            change_1m = calc_1m_change(symbol)
-            change_3m = calc_3m_change(symbol)
-            market_data = fetch_market_data(symbol)
-            market_data["change_1m"] = change_1m
-            market_data["change_3m"] = change_3m
-            market_data["change_5m"] = change_5m
-
-            if change_1h >= stage1_min:
-                logger.info(f"[分析] {symbol} 1h+{change_1h:.1f}% 5m+{change_5m:.1f}% 1m+{change_1m:.1f}% 快速通道")
-                analyze_result = analyze(symbol, change_1h, market_data, cfg=CFG)
-            else:
-                logger.info(f"[分析] {symbol} 1h+{change_1h:.1f}% 5m+{change_5m:.1f}% 1m+{change_1m:.1f}% 打分通道")
-                analyze_result = analyze(symbol, change_1h, market_data, cfg=CFG)
-            if analyze_result:
-                analyze_result["market_data"] = market_data
+        logger.info(f"[分析] {symbol} 池内+{gain_since_entry:.1f}% 1h+{change_1h:.1f}% 5m+{change_5m:.1f}% 1m+{change_1m:.1f}%")
+        analyze_result = analyze(symbol, change_1h, market_data, cfg=CFG)
+        if analyze_result:
+            analyze_result["market_data"] = market_data
 
         if analyze_result is None:
             continue
@@ -534,7 +539,7 @@ def scan_once(state: dict, tickers: list) -> dict:
                 "time":         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "entry_price":  entry_price,
                 "cur_price":    cur_price,
-                "gain_pct":     round(change_1h, 1),
+                "gain_pct":     round(gain_since_entry, 1),
                 "volume_usdt":  t["volume_usdt"],
                 "drop_from_ath": pool.get("drop_from_ath", 0),
                 "elapsed_min":  round(elapsed_min, 1),

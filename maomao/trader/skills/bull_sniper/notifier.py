@@ -8,7 +8,7 @@ import time
 import requests
 from datetime import datetime
 
-BOT_TOKEN         = os.getenv("BOT_TOKEN", "")
+BOT_TOKEN         = os.getenv("PUSH_BOT_TOKEN", "") or os.getenv("BOT_TOKEN", "")
 BROADCAST_CHAT_ID = os.getenv("BROADCAST_CHAT_ID", "-1001150897644")
 ADMIN_ID          = os.getenv("ADMIN_ID", "509640925")
 
@@ -114,12 +114,13 @@ def send_signal(signal: dict, watchpool_snapshot: list = None):
         lines.append(f"👁 <b>观察待做多信号（{len(watchpool_snapshot)}个）</b>")
         lines.append("<blockquote>")
         for wp in watchpool_snapshot:
-            pool_gain = wp.get("gain_pct", 0)
+            gain_since = wp.get("gain_since_entry", 0)
             peak_gain = wp.get("peak_gain_pct", 0)
             wp_elapsed = _fmt_elapsed(wp["entered_at"])
+            sign = "+" if gain_since >= 0 else ""
             lines.append(
                 f"<b>{_coin(wp['symbol'])}</b>  "
-                f"进池<code>+{pool_gain:.1f}%</code>  "
+                f"池内<code>{sign}{gain_since:.1f}%</code>  "
                 f"峰<code>+{peak_gain:.1f}%</code>  "
                 f"现价<code>{_fmt_price(wp.get('cur_price', wp['entry_price']))}</code>  "
                 f"量<code>{_fmt_vol(wp.get('volume_usdt', 0))}</code>  "
@@ -200,13 +201,10 @@ def send_status_card(state: dict):
     if recent_signals:
         lines.append(f"\n✅ <b>已触发做多信号（{len(recent_signals)}个）</b>")
         for sig in reversed(recent_signals):
-            analyze = sig.get("analyze", {})
-            action = analyze.get("action", "")
-            reason = analyze.get("reason", "")
-            score = analyze.get("score")
-            breakdown = analyze.get("breakdown", {})
-            news = analyze.get("news", {})
-            news_titles = news.get("titles", [])[:2] if news else []
+            # 字段在顶层（scanner写入时直接放顶层）
+            action = sig.get("action", "")
+            reason = sig.get("reason", "")
+            score = sig.get("score")
 
             # 触发类型标识
             if action == "signal_fast":
@@ -214,7 +212,7 @@ def send_status_card(state: dict):
             elif action == "signal_scored":
                 trigger_tag = f"📊 评分通道 — {score}分"
             else:
-                trigger_tag = f"📌 记录"
+                trigger_tag = f"📌 {reason}" if reason else "📌 记录"
 
             lines.append("<blockquote>")
             lines.append(
@@ -229,14 +227,10 @@ def send_status_card(state: dict):
                 f"触发<code>{_fmt_price(sig['cur_price'])}</code>"
             )
 
-            # 评分明细
-            if breakdown:
-                detail_parts = [f"{k}{v:+d}" for k, v in breakdown.items()]
-                lines.append(f"   📋 {' / '.join(detail_parts)}")
-
-            # 新闻摘要
-            if news_titles:
-                lines.append(f"   📰 {html_mod.escape(news_titles[0][:50])}")
+            # AI理由
+            ai_reason = sig.get("ai_reason", "")
+            if ai_reason:
+                lines.append(f"   🤖 {html_mod.escape(ai_reason[:60])}")
 
             lines.append("</blockquote>")
     else:
@@ -255,6 +249,149 @@ def send_status_card(state: dict):
     lines.append("开多可以由玄玄自动执行，或由老大和社区兄弟们自行决定")
 
     _send("\n".join(lines))
+
+
+def send_trade_report(signal: dict, buy_result: dict, analyze_result: dict):
+    """
+    成交详情报告 → 私信乌鸦
+    完整展示：触发原因 → 分析过程 → 评分明细 → 入场参数 → 风控状态
+    """
+    sym = _coin(signal["symbol"])
+    now_str = time.strftime("%m-%d %H:%M:%S")
+
+    # ── 触发通道 ──
+    action = signal.get("action", "")
+    reason = signal.get("reason", "")
+    ai_reason = signal.get("ai_reason", "")
+    score = signal.get("score")
+
+    if action == "signal_fast":
+        channel = f"⚡ 快速通道（8-10%）"
+        trigger = f"触发原因：{reason}"
+    elif action == "signal_scored":
+        channel = f"📊 评分通道（10-20%）"
+        trigger = f"触发原因：{score}分 ≥ 30分阈值"
+    else:
+        channel = f"📌 {action}"
+        trigger = f"触发原因：{reason}"
+
+    # ── 分析详情 ──
+    analyze_lines = []
+    analyze = analyze_result or {}
+
+    # 新闻情绪
+    news = analyze.get("news", {})
+    if news:
+        sentiment = news.get("sentiment", "")
+        news_reason = news.get("reason", "")
+        titles = news.get("titles", [])
+        if sentiment:
+            analyze_lines.append(f"📰 新闻情绪：{sentiment}")
+        if news_reason:
+            analyze_lines.append(f"   判断：{html_mod.escape(news_reason[:80])}")
+        for t in titles[:2]:
+            analyze_lines.append(f"   · {html_mod.escape(t[:60])}")
+
+    # 下架检测
+    delist = analyze.get("delist")
+    if delist:
+        analyze_lines.append(f"🚫 下架检测：{html_mod.escape(str(delist)[:60])}")
+
+    # AI最终决策
+    ai_decision = analyze.get("ai_decision", "")
+    ai_full_reason = analyze.get("ai_reason", "") or ai_reason
+    if ai_decision:
+        analyze_lines.append(f"🤖 AI决策：{ai_decision}")
+    if ai_full_reason:
+        analyze_lines.append(f"   理由：{html_mod.escape(ai_full_reason[:100])}")
+
+    # BTC关联
+    btc_1h = analyze.get("btc_1h")
+    if btc_1h is not None:
+        analyze_lines.append(f"₿ BTC 1h：{btc_1h:+.2f}%")
+
+    # 评分明细
+    breakdown = analyze.get("breakdown", {})
+    if breakdown:
+        analyze_lines.append(f"📋 评分明细：")
+        for k, v in breakdown.items():
+            analyze_lines.append(f"   {k}: {v:+d}")
+        if score is not None:
+            analyze_lines.append(f"   总分: {score}")
+
+    analyze_block = "\n".join(analyze_lines) if analyze_lines else "无详细分析数据"
+
+    # ── 市场数据 ──
+    market = analyze.get("market_data", {})
+    market_lines = []
+    if market:
+        if "oi_change_pct" in market:
+            market_lines.append(f"OI变化: {market['oi_change_pct']:+.1f}%")
+        if "long_short_ratio" in market:
+            market_lines.append(f"多空比: {market['long_short_ratio']:.2f}")
+        if "funding_rate" in market:
+            market_lines.append(f"费率: {market['funding_rate']*100:.4f}%")
+        if "volume_ratio" in market:
+            market_lines.append(f"量比: {market['volume_ratio']:.1f}x")
+    market_block = " / ".join(market_lines) if market_lines else "—"
+
+    # ── 执行结果 ──
+    status = buy_result.get("status", "?")
+    if status == "executed":
+        exec_icon = "✅"
+        sl_price = buy_result.get("sl_price", "?")
+        order_id = buy_result.get("order_id", "?")
+        trailing = buy_result.get("trailing")
+        trailing_status = "已挂载" if trailing else "挂载失败"
+
+        exec_block = (
+            f"订单ID: {order_id}\n"
+            f"止损价: {sl_price}（保证金-15%）\n"
+            f"移动止盈: {trailing_status}（40%激活/25%回撤）"
+        )
+    elif status == "skipped":
+        exec_icon = "⏭"
+        exec_block = f"跳过：{buy_result.get('reason', '?')}"
+    else:
+        exec_icon = "❌"
+        exec_block = f"失败：{buy_result.get('reason', '?')}"
+
+    # ── 组装卡片 ──
+    text = (
+        f"{exec_icon} <b>做多阻击成交报告 · {sym}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"⏰ {now_str}\n\n"
+
+        f"<b>1️⃣ 触发</b>\n"
+        f"<blockquote>"
+        f"{channel}\n"
+        f"{trigger}\n"
+        f"24h涨幅: +{signal.get('gain_pct', 0)}%\n"
+        f"进池价: {_fmt_price(signal.get('entry_price', 0))}\n"
+        f"触发价: {_fmt_price(signal.get('cur_price', 0))}\n"
+        f"成交量: {_fmt_vol(signal.get('volume_usdt', 0))}\n"
+        f"距ATH: -{signal.get('drop_from_ath', 0):.1f}%\n"
+        f"观察时长: {signal.get('elapsed_min', 0):.0f}分钟"
+        f"</blockquote>\n\n"
+
+        f"<b>2️⃣ 分析过程</b>\n"
+        f"<blockquote>"
+        f"{analyze_block}"
+        f"</blockquote>\n\n"
+
+        f"<b>3️⃣ 市场数据</b>\n"
+        f"<blockquote>"
+        f"{market_block}"
+        f"</blockquote>\n\n"
+
+        f"<b>4️⃣ 执行结果</b>\n"
+        f"<blockquote>"
+        f"{exec_block}"
+        f"</blockquote>\n"
+        f"━━━━━━━━━━━━━━━━━━━━"
+    )
+
+    _send(text, chat_id=ADMIN_ID)
 
 
 def send_health_report(state: dict, filter_log: list):

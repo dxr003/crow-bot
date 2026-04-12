@@ -3,8 +3,8 @@
 bull_sniper analyzer.py — 信号分析器
 
 两阶段触发：
-  第一阶段：涨幅≥8% → 查新闻+查币安下架公告 → 有利好/下架反拉 → 直接推信号
-  第二阶段：涨幅10-35% → 综合打分 ≥ 28分 → 推信号
+  第一阶段：涨幅≥12% → 查新闻+查币安下架公告 → 有利好/下架反拉 → 直接推信号
+  第二阶段：定期打分（无涨幅范围限制）→ 综合打分 ≥ 25分 → 推信号
 
 评分体系 v2（瞬时爆发+趋势确认，2026-04-12）：
   瞬时爆发：1m>3%+5 / 3m>5%+8 / 5m>8%+10（可叠加）
@@ -630,12 +630,10 @@ def analyze(symbol: str, gain_pct: float, market_data: dict, cfg: Optional[dict]
                 "score": None,
             }
 
-    # ── 第二阶段：10-20%打分通道 ──
-    stage2_min = analyzer_cfg.get("stage2_gain_min", 10)
-    stage2_max = analyzer_cfg.get("stage2_gain_max", 20)
-    signal_threshold = analyzer_cfg.get("signal_threshold", 30)
+    # ── 第二阶段：打分通道（无涨幅范围限制，由评分体系自行判断） ──
+    signal_threshold = analyzer_cfg.get("signal_threshold", 25)
 
-    if stage2_min <= gain_pct <= stage2_max and analyzer_cfg.get("stage2_enabled", True):
+    if analyzer_cfg.get("stage2_enabled", True):
         result = score_signal(symbol, gain_pct, market_data, cfg)
 
         if result["score"] >= signal_threshold:
@@ -674,4 +672,4 @@ def analyze(symbol: str, gain_pct: float, market_data: dict, cfg: Optional[dict]
                 "breakdown": result["breakdown"],
             }
 
-    return {"action": "hold", "reason": f"涨幅{gain_pct:.1f}%未达触发条件"}
+    return {"action": "hold", "reason": f"1h+{gain_pct:.1f}%，等待评分达标"}
