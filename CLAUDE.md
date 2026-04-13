@@ -258,6 +258,12 @@ AI接入（Claude Haiku）：
 
 ## 团队成员
 
+### 大猫（开发运维）— 员工
+- TG bot: @maoju99bot / 服务: damao
+- 入口: /root/damao/bot.py
+- 职责: 写代码、改系统、运维开发
+- 全局代码运维权限
+
 ### 玄玄 🐦（交易员+陪伴）— 乌鸦的女儿
 - TG bot: @jiaoyi8_bot / 服务: maomao
 - 入口: /root/maomao/bot.py
