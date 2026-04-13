@@ -2,137 +2,126 @@ bull_sniper:
   enabled: true
   mode: auto                 # auto / alert / off
 
-  # 扫描
-  scan_interval_sec: 30
+  # 扫描（60分钟一轮，节能模式）
+  scan_interval_sec: 3600
   watchpool_max: 30
-  watchpool_refresh_sec: 10
+  watchpool_refresh_sec: 60
 
-  # 第一层过滤（全市场扫描）
-  min_listing_days: 1         # 上线超1天即可（第一天涨幅不可参考）
-  ath_exempt_days: 180        # 上线<180天跳过ATH检查（新币不要求腰斩）
-  exclude_2h_above: 40        # 2h涨幅>40%排除（替代24h，更敏感）
+  # ── 第一步：基础过滤 ──
+  startup_max_change_pct: 15  # 启动时任意时段>15%排除（仅启动时生效）
+  min_listing_days: 1
+  ath_exempt_days: 180
   exclude_daily_vol_below: 20000000
-  min_drop_from_ath: 60       # 距高点跌幅<60%排除（仅对上线≥180天的老币）
+  min_drop_from_ath: 60
 
-  # 第二层候选池→观察池
-  pool_entry_1h_change: 5     # 1小时涨幅≥5%进观察池
+  # ── 进池条件 ──
+  # 第一层：瞬时触发（任意一条）
+  pool_burst_1m: 12           # 1m涨>12%
+  pool_burst_3m: 8            # 3m涨>8%
+  pool_burst_5m: 7            # 5m涨>7%
+  pool_burst_15m: 12          # 15m涨>12%
+  # 第二层（同时满足）
   min_oi_usdt: 5000000        # OI≥500万U
-  min_volume_ratio: 2         # 量比≥2倍
 
-  # AI判断
+  # ── AI判断 ──
   ai:
     enabled: true
     provider: anthropic
     model: claude-haiku-4-5-20251001
     api_key_env: ANTHROPIC_API_KEY
-    timeout: 15                      # AI请求超时秒数
-    news_sentiment: true             # 位置1：新闻情绪AI判断
-    final_decision: true             # 位置2：最终买入AI决策
-  ai_auto_threshold: 75
-  ai_alert_threshold: 60
-  ai_mid_cap_threshold: 80
+    timeout: 15
+    final_decision: true       # AI最终买入决策
 
-  # 仓位（统一50U）
+  # ── 仓位 ──
   position_usd: 50
   default_leverage: 5
-  max_position_usd: 50000    # 安全阀上限，防bug
-  max_slippage_pct: 1        # 滑点>1%仓位减半，>2%放弃
+  max_position_usd: 50000
+  max_slippage_pct: 2          # 滑点>2%放弃（v3.1简化）
+  min_available_balance: 150   # 可用余额<150U跳过
 
-  # 移动止盈（v3.1单一规则）
+  # ── 移动止盈 ──
   trailing:
-    activation_pct: 40       # 浮盈≥40%激活
-    pullback_trigger: 25     # 回撤25%触发
-    tolerance: 3             # 容错防抖3%
+    activation_pct: 50         # 浮盈≥50%激活（v3.1）
+    pullback_trigger: 25
+    tolerance: 3
 
-  # 风控
+  # ── 滚仓 ──
+  rolling:
+    activation_pct: 90         # 浮盈≥90%触发（v3.1）
+    profit_ratio: 0.6          # 加仓60%利润（v3.1）
+
+  # ── 风控 ──
   max_concurrent_positions: 10
   daily_loss_limit_usd: 5000
   btc_circuit_breaker_pct: 2
 
-  # 冷却
-  cooldown_after_tp_hours: 4
-  cooldown_after_sl_hours: 8
+  # ── 冷却（v3.1：统一48h） ──
+  cooldown_after_tp_hours: 48
+  cooldown_after_sl_hours: 48
+  cooldown_after_veto_min: 30
 
-  # 分析器
+  # ── 分析器 ──
   analyzer:
-    enabled: true                  # 手工总开关
-    stage1_enabled: true           # 第一阶段开关（8%快速通道）
-    stage1_gain_pct: 12            # 第一阶段触发（1h涨幅%）
-    stage2_enabled: true           # 第二阶段开关（打分通道）
-    signal_threshold: 25           # 推送阈值 v3（无前置门槛，定期打分）
-    delist_enabled: true           # 下架反拉通道开关
+    enabled: true
+    signal_threshold: 25       # v3.1推送阈值（观察期）
 
-  # 评分参数 v2（瞬时爆发+趋势确认，2026-04-12）
+  # ── 评分参数 v3.1 ──
   scoring:
-    # 新闻（降权：利好+5，利空-10，不再一票否决）
-    news_bullish: 5
-    news_bearish: -10
-    # 瞬时爆发（可叠加）
-    burst_1m: 5              # 1分钟涨>3%
-    burst_3m: 8              # 3分钟涨>5%
-    burst_5m: 10             # 5分钟涨>8%
-    # 趋势确认（1h涨幅分档）
-    gain_5_10: 5
-    gain_10_15: 8
-    gain_15_25: 12
-    gain_25_40: 15
-    # OI（分档）
-    oi_up_mild: 5            # OI上涨5-15%
-    oi_up_strong: 10         # OI上涨>15%
-    oi_down: -5
-    # 挤空+费率
-    lsr_short_dominant: 8    # 多空比<0.8
-    funding_extreme_threshold: 0.005   # 0.5%
-    funding_extreme: 8
-    # 量比（多一档>5x）
+    # A. 价格动能（互斥取最高）
+    burst_1m_threshold: 12     # 1m涨>12%
+    burst_1m: 8
+    burst_3m_threshold: 8      # 3m涨>8%
+    burst_3m: 7
+    burst_5m_threshold: 7      # 5m涨>7%
+    burst_5m: 6
+
+    # B. 1h趋势（互斥取最高，越早越高）
+    gain_5_10: 10              # 初期
+    gain_10_15: 8              # 中期
+    gain_15_25: 7              # 强势
+    gain_25_40: 5              # 过热
+
+    # C. 量比（互斥取最高）
     vol_ratio_5x: 18
     vol_ratio_3x: 15
     vol_ratio_2x: 10
     vol_ratio_1_5x: 5
     vol_ratio_low: -5
 
-  # 新闻配置
-  news:
-    enabled: true
-    use_tavily: true              # Tavily主力（API key在.env）
-    use_google_rss: true          # Google RSS备用
-    use_coingecko: false
-    tavily_api_key_env: TAVILY_API_KEY
-    delist_keywords:
-      - "delist"
-      - "delisting"
-      - "下架"
-      - "摘牌"
-      - "removed from"
-    bullish_major_keywords:
-      - "partnership"
-      - "合作"
-      - "listing"
-      - "上线"
-      - "mainnet"
-      - "主网"
-      - "upgrade"
-      - "升级"
-      - "etf"
-      - "institutional"
-      - "机构"
-      - "acquisition"
-      - "收购"
-    bullish_minor_keywords:
-      - "bullish"
-      - "surge"
-      - "rally"
-      - "上涨"
-      - "利好"
-      - "突破"
-    bearish_keywords:
-      - "hack"
-      - "exploit"
-      - "rug"
-      - "scam"
-      - "fraud"
-      - "黑客"
-      - "跑路"
-      - "欺诈"
-      - "破产"
-      - "bankruptcy"
+    # D. OI与资金费率（独立可叠加）
+    oi_up_mild: 5              # 5-15%
+    oi_up_strong: 8            # 15-30%
+    oi_up_super: 10            # >30%
+    oi_down: -5                # <-5%
+    lsr_short_dominant: 2      # 多空比<0.8
+    funding_extreme_threshold: 0.0005  # 0.05%
+    funding_extreme: 3
+
+    # E. 社交+聪明钱（读缓存）
+    social_positive: 2
+    social_burst: 5            # 替代+2
+    social_burst_threshold: 100000  # 热度>10万
+    smart_money_buy: 4         # direction=buy+status=valid
+    smart_money_multi: 6       # smartMoneyCount≥3（替代+4）
+    smart_money_multi_threshold: 3
+    smart_money_large: 10      # totalTokenValue≥$5万（替代+6）
+    smart_money_large_threshold: 50000
+    smart_money_reduce: -10    # Smart Money Remove Holdings
+    smart_money_wash: -8       # Insider Wash Trading
+
+    # F. 链上转账（读缓存）
+    chain_large_threshold: 200000     # $20万
+    chain_large: 5                    # ≥1笔>$20万
+    chain_whale_threshold: 1000000    # $100万
+    chain_whale: 15                   # ≥1笔>$100万（叠加+5）
+    chain_dense_count: 3              # ≥3笔>$20万
+    chain_dense: 10                   # 密集独立叠加
+    # 实时部分（后期加）
+    chain_realtime_large_threshold: 200000
+    chain_realtime_large: 10
+    chain_realtime_whale_threshold: 500000
+    chain_realtime_whale: 15          # 替代+10
+
+    # G. 公告因子
+    announce_new_listing: 5    # 新增合约
+    announce_delist: -5        # 下架/SETTLING

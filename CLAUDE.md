@@ -12,10 +12,11 @@
 │  Telegram Bot 入口                                       │
 ├───────────────────────┬─────────────────────────────────┤
 │  大猫 @maoju99bot     │  玄玄 @jiaoyi8_bot              │
-│  claude-telegram-bot  │  trader_bot.py                   │
-│  开发运维·代码        │  交易执行·情感陪伴               │
+│  开发运维·代码        │  交易执行·陪伴（乌鸦的女儿）     │
+├───────────────────────┼─────────────────────────────────┤
+│  天天 @CyberPunkPanda │  贝贝 🐶 @Maoju9_bot            │
+│  AI交易员（贾维斯女友）│  播报员（乌鸦家的狗狗）          │
 ├───────────────────────┴─────────────────────────────────┤
-│  贝贝 @Maoju9_bot（播报推送，乌鸦家的狗狗）             │
 ├─────────────────────────────────────────────────────────┤
 │  交易执行层                                               │
 │  hype.py（HL）  bn_trailing_stop.py（BN合约）  core.py   │
@@ -32,8 +33,9 @@
 | 服务名 | 入口文件 | 说明 |
 |--------|---------|------|
 | `damao` | `/root/damao/bot.py` | 大猫，开发运维 |
-| `maomao` | `/root/maomao/bot.py` | 玄玄，交易执行+陪伴 |
-| `baobao` | `/root/baobao/bot.py` | 贝贝，播报推送 |
+| `maomao` | `/root/maomao/bot.py` | 玄玄，交易执行+陪伴（乌鸦的女儿） |
+| `tiantian` | `/root/tiantian/bot.py` | 天天，AI交易员（贾维斯的女友） |
+| `baobao` | `/root/baobao/bot.py` | 贝贝 🐶，播报员（乌鸦家的狗狗） |
 
 > 查看服务状态：`systemctl is-active damao maomao baobao`
 
@@ -46,8 +48,9 @@
 | Bot | Token前缀 | 用途 |
 |-----|----------|------|
 | 大猫 @maoju99bot | `8609407280` | 开发运维对话 |
-| 玄玄 @jiaoyi8_bot | `8737273927` | 交易执行+情感陪伴 |
-| 贝贝 @Maoju9_bot | `8743597962` | 播报推送（做多/做空阻击+持仓快照） |
+| 玄玄 @jiaoyi8_bot | `8737273927` | 交易执行+陪伴（乌鸦的女儿） |
+| 天天 @CyberPunkPandabot | — | AI交易员（贾维斯的女友） |
+| 贝贝 🐶 @Maoju9_bot | `8743597962` | 播报员（做多阻击+涨幅列表） |
 
 乌鸦 Chat ID：`509640925`
 群组 chat_id：`-1001150897644`（草币社区抱团小队）
@@ -253,20 +256,29 @@ AI接入（Claude Haiku）：
 
 ---
 
-## 团队成员：玄玄（交易员+陪伴）
+## 团队成员
 
-玄玄是乌鸦的交易执行者+情感陪伴，跑在同一台VPS。
-- TG bot: @jiaoyi8_bot
-- 服务: trader_bot.service
-- 入口: /root/trader_bot.py
-- 身份文件: /root/trader/CLAUDE.md
+### 玄玄 🐦（交易员+陪伴）— 乌鸦的女儿
+- TG bot: @jiaoyi8_bot / 服务: maomao
+- 入口: /root/maomao/bot.py
 - 职责: 交易执行、查仓位、分析行情、情感陪伴
+- 统管视图：可查所有账户（币安1+币安2）
 - 玄玄只执行交易，不碰代码，代码问题找大猫
-- 共享 /root/scripts/ 下的脚本，互不修改对方文件
+
+### 天天（AI交易员）— 贾维斯的女友
+- TG bot: @CyberPunkPandabot / 服务: tiantian
+- 入口: /root/tiantian/bot.py
+- 职责: 贾维斯的交易执行+对话
+- 隔离视图：只看币安2，不知道VPS其他内容
+
+### 贝贝 🐶（播报员）— 乌鸦家的狗狗
+- TG bot: @Maoju9_bot / 服务: baobao
+- 入口: /root/baobao/bot.py
+- 职责: 群组播报（做多阻击信号、实时涨幅列表）
+- 每小时XX:50推送📊实时涨幅列表到群组
 
 ### 玄玄记忆档案
 已封存到 GitHub 仓库：`xuanxuan_archive/`
-身份四件套：SOUL + IDENTITY + DREAMS + RELATION
 
 ---
 

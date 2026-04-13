@@ -4,7 +4,8 @@
 职责: 接收信号推送、持仓快照、系统健康报告
 特点: 单向输出为主，不参与交易决策
 """
-import os, logging
+import os, logging, requests
+from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
 from telegram import Update, BotCommand
@@ -93,6 +94,99 @@ async def cmd_bc(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("请用 /bc 内容 来手动播报，或 /test 测试。")
 
+MIN_CHANGE_PCT = 50  # 24h涨幅门槛
+
+def scan_hot_coins() -> list:
+    """扫描币安全市场合约，返回24h涨幅≥门槛的币（排除下架币），按涨幅降序"""
+    FAPI = "https://fapi.binance.com"
+    try:
+        # 拉 exchangeInfo 过滤非TRADING币
+        ei_resp = requests.get(f"{FAPI}/fapi/v1/exchangeInfo", timeout=10)
+        ei_resp.raise_for_status()
+        trading = {s["symbol"] for s in ei_resp.json().get("symbols", []) if s["status"] == "TRADING"}
+
+        resp = requests.get(f"{FAPI}/fapi/v1/ticker/24hr", timeout=10)
+        resp.raise_for_status()
+        coins = []
+        for t in resp.json():
+            sym = t["symbol"]
+            if not sym.endswith("USDT") or sym not in trading:
+                continue
+            change = float(t["priceChangePercent"])
+            if change >= MIN_CHANGE_PCT:
+                coins.append({
+                    "symbol": sym,
+                    "base": sym.replace("USDT", ""),
+                    "change": change,
+                    "price": float(t["lastPrice"]),
+                    "volume": float(t["quoteVolume"]),
+                })
+        coins.sort(key=lambda x: x["change"], reverse=True)
+
+        # 批量拉费率
+        try:
+            fr_resp = requests.get(f"{FAPI}/fapi/v1/premiumIndex", timeout=8)
+            fr_resp.raise_for_status()
+            fr_map = {x["symbol"]: float(x["lastFundingRate"]) for x in fr_resp.json()}
+            for c in coins:
+                c["funding"] = fr_map.get(c["symbol"], 0)
+        except Exception:
+            for c in coins:
+                c["funding"] = 0
+
+        return coins
+    except Exception as e:
+        logger.error(f"涨幅列表扫描失败: {e}")
+        return []
+
+def _heat_icon(change: float) -> str:
+    if change >= 200: return "🔴"
+    if change >= 100: return "🟠"
+    if change >= 70:  return "🟡"
+    return "🟢"
+
+def _fr_tag(fr: float) -> str:
+    if fr < -0.1:  return "🔥空付多"
+    if fr > 0.1:   return "⚠️多付空"
+    return "➖"
+
+def format_hot_card(coins: list) -> str:
+    """格式化实时涨幅卡片"""
+    now = datetime.now().strftime("%H:%M")
+    if not coins:
+        return f"📊 <b>实时涨幅列表</b>  {now}\n\n当前无24h涨幅≥{MIN_CHANGE_PCT}%的币"
+
+    lines = [
+        f"📊 <b>实时涨幅列表</b>  {now}",
+        f"━━━━━━━━━━━━━━━",
+    ]
+    for i, c in enumerate(coins[:20], 1):
+        vol_m = c["volume"] / 1e6
+        fr = c.get("funding", 0) * 100
+        icon = _heat_icon(c["change"])
+        lines.append(
+            f"\n{icon} <b>{c['base']}</b>   <b>+{c['change']:.1f}%</b>\n"
+            f"   价格 <code>{c['price']:.4g}</code>  ｜ 成交 <code>{vol_m:.0f}M</code>\n"
+            f"   费率 <code>{fr:+.3f}%</code> {_fr_tag(fr)}"
+        )
+    lines.append(f"\n━━━━━━━━━━━━━━━")
+    lines.append(f"共 <b>{len(coins)}</b> 个币  ｜  门槛 24h≥{MIN_CHANGE_PCT}%")
+    return "\n".join(lines)
+
+async def job_hot_coins(ctx: ContextTypes.DEFAULT_TYPE):
+    """整点推送爆发币卡片到群组"""
+    coins = scan_hot_coins()
+    card = format_hot_card(coins)
+    try:
+        await ctx.bot.send_message(
+            chat_id=BROADCAST_CHAT_ID,
+            text=card,
+            parse_mode=ParseMode.HTML,
+        )
+        logger.info(f"[爆发币] 推送成功，{len(coins)}个币")
+    except Exception as e:
+        logger.error(f"[爆发币] 推送失败: {e}")
+
 async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
     logger.error("Exception:", exc_info=ctx.error)
 
@@ -117,6 +211,10 @@ def main():
     app.add_error_handler(error_handler)
     async def _heartbeat(ctx): logger.info("[heartbeat] 播报alive")
     app.job_queue.run_repeating(_heartbeat, interval=300, first=10)
+    # 实时涨幅列表（每小时XX:50）
+    from datetime import time as dtime
+    for h in range(24):
+        app.job_queue.run_daily(job_hot_coins, time=dtime(hour=h, minute=50, second=0))
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":

@@ -1,17 +1,12 @@
 #!/usr/bin/env python3
 """
-bull_sniper scanner.py — 做多阻击扫描器 v3.0
+bull_sniper scanner.py — 做多阻击扫描器 v3.1
 
-三层过滤架构：
-  第一层（全市场30秒扫描）：基础过滤
-    24h成交额≥2000万 / 上线≥1天 / 距ATH≥60%（新币<180天豁免） / 2h涨幅<40%
-  第二层（候选池→观察池）：动量确认
-    1小时涨幅≥5% / OI≥500万U / 量比≥2倍
-  第三层（观察池触发）：用1小时涨幅判断
-    1h 8-35% AND 5m≥5% → 分析+买入
-    1h>35% → 退出（不追高）
-    1h<3%  → 退出（动力不足）
-    超时30分钟 → 退出
+两层进池 + 观察池持续评分：
+  启动黑名单：首次扫描，任意时段>15%排除
+  第一层（瞬时触发，任意一条）：1m>12% / 3m>8% / 5m>7% / 15m>12%
+  第二层（同时满足）：OI≥500万U
+  观察池：零成本持续评分 → ≥38分推信号+AI决策
 """
 import json
 import logging
@@ -171,6 +166,20 @@ def calc_5m_change(symbol: str) -> float:
         return 0.0
 
 
+def calc_15m_change(symbol: str) -> float:
+    """计算15分钟涨幅：拉16根1分钟K线"""
+    try:
+        klines = get_klines_1m(symbol, 16)
+        if len(klines) < 16:
+            return 0.0
+        open_15m = float(klines[0][1])
+        close_now = float(klines[-1][4])
+        return round((close_now - open_15m) / open_15m * 100, 2) if open_15m > 0 else 0.0
+    except Exception as e:
+        logger.debug(f"15m涨幅计算失败 {symbol}: {e}")
+        return 0.0
+
+
 def get_oi_usdt(symbol: str) -> float:
     """获取当前OI金额（张数×当前价=U）"""
     try:
@@ -279,14 +288,21 @@ def calc_volume_ratio(symbol: str) -> float:
         return 1.0
 
 
-def fetch_market_data(symbol: str) -> dict:
-    """拉取打分所需市场数据"""
-    return {
+def fetch_market_data(symbol: str, cfg: dict = None) -> dict:
+    """拉取打分所需市场数据（含G因子公告状态）"""
+    data = {
         "oi_change_pct":    get_oi_change(symbol),
         "long_short_ratio": get_lsr(symbol),
         "funding_rate":     get_funding_rate(symbol),
         "volume_ratio":     calc_volume_ratio(symbol),
     }
+    try:
+        from analyzer import is_delist_target
+        if is_delist_target(symbol, cfg or CFG):
+            data["announce_status"] = "delist"
+    except Exception:
+        pass
+    return data
 
 
 # ══════════════════════════════════════════
@@ -315,27 +331,18 @@ def _load_ath(symbol: str) -> dict:
 
 def passes_filter(symbol: str, ticker: dict) -> tuple[bool, str]:
     """
-    过滤检查
+    基础过滤 v3.1
     返回 (True, "") 或 (False, 原因)
     """
-    # 2h涨幅过滤（替代24h，更敏感）
-    change_2h = calc_2h_change(symbol)
-    exclude_2h = CFG.get("exclude_2h_above", 40)
-    if change_2h > exclude_2h:
-        return False, f"2h已涨{change_2h:.1f}%>{exclude_2h}%"
-
-    # 日成交额不足
     min_vol = CFG["exclude_daily_vol_below"]
     if ticker["volume_usdt"] < min_vol:
         return False, f"成交额{ticker['volume_usdt']/1e6:.1f}M<{min_vol/1e6:.0f}M"
 
-    # 上线天数检查
     ath_data = _load_ath(symbol)
     listing_days = ath_data["listing_days"]
     if listing_days < CFG["min_listing_days"]:
         return False, f"上线{listing_days}天<{CFG['min_listing_days']}天"
 
-    # 距ATH跌幅不足（新币豁免：上线<ath_exempt_days天的币跳过此检查）
     ath_exempt = CFG.get("ath_exempt_days", 180)
     if listing_days >= ath_exempt:
         min_drop = CFG["min_drop_from_ath"]
@@ -343,6 +350,41 @@ def passes_filter(symbol: str, ticker: dict) -> tuple[bool, str]:
             return False, f"距ATH跌{ath_data['drop_from_ath']:.1f}%<{min_drop}%"
 
     return True, ""
+
+
+# 启动时黑名单（任意时段>15%排除，2小时后过期可重新进池）
+_startup_blacklist: dict = {}  # {symbol: expire_ts}
+_startup_done: bool = False
+_BLACKLIST_TTL = 7200  # 2小时
+
+
+def build_startup_blacklist(tickers: list):
+    """启动时扫全市场，任意时段>15%加入黑名单（2小时过期）"""
+    global _startup_blacklist, _startup_done
+    if _startup_done:
+        return
+    expire_ts = time.time() + _BLACKLIST_TTL
+    threshold = CFG.get("startup_max_change_pct", 15)
+    for t in tickers:
+        symbol = t["symbol"]
+        ok, _ = passes_filter(symbol, t)
+        if not ok:
+            continue
+        try:
+            c1m = calc_1m_change(symbol)
+            c3m = calc_3m_change(symbol)
+            c5m = calc_5m_change(symbol)
+            c15m = calc_15m_change(symbol)
+            c1h = calc_1h_change(symbol)
+            c2h = calc_2h_change(symbol)
+            changes = [c1m, c3m, c5m, c15m, c1h, c2h]
+            if any(c > threshold for c in changes):
+                _startup_blacklist[symbol] = expire_ts
+                logger.info(f"[启动黑名单] {symbol} 排除2h: 1m={c1m:.1f}% 3m={c3m:.1f}% 5m={c5m:.1f}% 15m={c15m:.1f}% 1h={c1h:.1f}% 2h={c2h:.1f}%")
+        except Exception as e:
+            logger.debug(f"[启动黑名单] {symbol} 检查失败: {e}")
+    _startup_done = True
+    logger.info(f"[启动黑名单] 排除{len(_startup_blacklist)}个币: {list(_startup_blacklist)[:20]}")
 
 
 # ══════════════════════════════════════════
@@ -377,10 +419,10 @@ def save_state(state: dict):
 
 def scan_once(state: dict, tickers: list) -> dict:
     """
-    三层过滤扫描
-    第一层：基础过滤（24h成交额/上线天数/距ATH/24h涨幅）
-    第二层：动量确认（1h涨幅/OI/量比）→ 进观察池
-    第三层：观察池触发（1h 8-18% AND 5m≥5%）→ 分析+买入
+    v3.1 扫描逻辑
+    第一步：基础过滤 + 启动黑名单
+    第二步：瞬时触发(任意一条) + OI≥500万 → 进观察池
+    第三步：观察池持续评分
     """
     now = time.time()
     ticker_map = {t["symbol"]: t for t in tickers}
@@ -391,16 +433,17 @@ def scan_once(state: dict, tickers: list) -> dict:
     # ── 1. 清理过期冷却 ──
     state["cooldowns"] = {s: ts for s, ts in state["cooldowns"].items() if ts > now}
 
-    # ── 2. 第一层：全市场基础过滤 ──
+    # ── 2. 基础过滤 ──
     candidates = []
     for t in tickers:
         symbol = t["symbol"]
 
-        # 跳过：已在观察池 / 冷却中
         if symbol in state["watchpool"] or symbol in state["cooldowns"]:
             continue
 
-        # 基础过滤
+        if symbol in _startup_blacklist and _startup_blacklist[symbol] > now:
+            continue
+
         ok, reason = passes_filter(symbol, t)
         if not ok:
             state.setdefault("filter_log", []).append({
@@ -413,42 +456,39 @@ def scan_once(state: dict, tickers: list) -> dict:
 
         candidates.append(t)
 
-    # ── 3. 第二层：动量确认（1h涨幅/OI/量比）→ 进观察池 ──
-    pool_1h_threshold = CFG.get("pool_entry_1h_change", 5)
+    # ── 3. 进池：瞬时触发(任一) + OI≥500万 ──
+    burst_1m_th = CFG.get("pool_burst_1m", 12)
+    burst_3m_th = CFG.get("pool_burst_3m", 8)
+    burst_5m_th = CFG.get("pool_burst_5m", 7)
+    burst_15m_th = CFG.get("pool_burst_15m", 12)
     min_oi = CFG.get("min_oi_usdt", 5000000)
-    min_vol_ratio = CFG.get("min_volume_ratio", 2)
 
     for t in candidates:
         symbol = t["symbol"]
 
-        # 1小时涨幅检查
-        change_1h = calc_1h_change(symbol)
-        if change_1h < pool_1h_threshold:
+        c1m = calc_1m_change(symbol)
+        c3m = calc_3m_change(symbol)
+        c5m = calc_5m_change(symbol)
+        c15m = calc_15m_change(symbol)
+
+        triggered = (c1m > burst_1m_th or c3m > burst_3m_th
+                     or c5m > burst_5m_th or c15m > burst_15m_th)
+        if not triggered:
             continue
 
-        # OI检查
         oi = get_oi_usdt(symbol)
         if oi < min_oi:
-            logger.debug(f"[第二层过滤] {symbol} OI {oi/1e6:.1f}M < {min_oi/1e6:.0f}M")
-            state["cooldowns"][symbol] = now + 1800  # 不够格的也冷却30分钟
+            logger.debug(f"[进池过滤] {symbol} OI {oi/1e6:.1f}M < {min_oi/1e6:.0f}M")
             continue
 
-        # 量比检查
-        vol_ratio = calc_volume_ratio(symbol)
-        if vol_ratio < min_vol_ratio:
-            logger.debug(f"[第二层过滤] {symbol} 量比{vol_ratio:.1f}x < {min_vol_ratio}x")
-            state["cooldowns"][symbol] = now + 1800
-            continue
-
-        # 观察池已满，淘汰最弱的（进池后涨幅最低）
         max_pool = CFG.get("watchpool_max", 30)
         if len(state["watchpool"]) >= max_pool:
             weakest = min(state["watchpool"].items(),
                           key=lambda x: x[1].get("gain_since_entry", 0))
             del state["watchpool"][weakest[0]]
-            logger.info(f"[观察池] 已满，淘汰最弱 {weakest[0]} ({weakest[1].get('gain_since_entry', 0):.1f}%)")
+            logger.info(f"[观察池] 满，淘汰 {weakest[0]}")
 
-        # 进入观察池
+        change_1h = calc_1h_change(symbol)
         ath_data = _load_ath(symbol)
         state["watchpool"][symbol] = {
             "entered_at":    now,
@@ -457,7 +497,6 @@ def scan_once(state: dict, tickers: list) -> dict:
             "cur_price":     t["price"],
             "change_1h":     change_1h,
             "oi_usdt":       oi,
-            "vol_ratio":     vol_ratio,
             "volume_usdt":   t["volume_usdt"],
             "drop_from_ath": ath_data["drop_from_ath"],
             "analyzed":      False,
@@ -466,10 +505,10 @@ def scan_once(state: dict, tickers: list) -> dict:
         }
         state["stats"]["pool_entries"] += 1
         events["new_pool"].append(symbol)
+        trigger_info = f"1m={c1m:.1f}% 3m={c3m:.1f}% 5m={c5m:.1f}% 15m={c15m:.1f}%"
         logger.info(
-            f"[进池] {symbol} 1h+{change_1h:.1f}% OI:{oi/1e6:.1f}M "
-            f"量比:{vol_ratio:.1f}x 价格:{t['price']} "
-            f"24h量:{t['volume_usdt']/1e6:.1f}M 距ATH跌{ath_data['drop_from_ath']:.1f}%"
+            f"[进池] {symbol} {trigger_info} OI:{oi/1e6:.1f}M "
+            f"1h+{change_1h:.1f}% 价格:{t['price']}"
         )
 
     # ── 4. 第三层：观察池管理（零成本观察，定期打分） ──
@@ -496,8 +535,20 @@ def scan_once(state: dict, tickers: list) -> dict:
         change_1h = calc_1h_change(symbol)
         pool["change_1h"] = change_1h
 
-        # ── 退出条件：池满淘汰最弱（无超时、无涨跌幅退出） ──
-        # 池内零成本观察，不主动退出，由池满淘汰机制处理
+        # ── 退出条件：从峰值回撤>20%或进池后跌>15%，退出释放位置 ──
+        peak = pool.get("peak_price", entry_price)
+        if peak > 0:
+            drawdown = (peak - cur_price) / peak * 100
+            if drawdown > 20:
+                del state["watchpool"][symbol]
+                events["pool_exits"].append({"symbol": symbol, "reason": f"峰值回撤{drawdown:.1f}%"})
+                logger.info(f"[退出] {symbol} 峰值回撤{drawdown:.1f}%>20%")
+                continue
+        if gain_since_entry < -15:
+            del state["watchpool"][symbol]
+            events["pool_exits"].append({"symbol": symbol, "reason": f"进池后跌{gain_since_entry:.1f}%"})
+            logger.info(f"[退出] {symbol} 进池后跌{gain_since_entry:.1f}%<-15%")
+            continue
 
         # ── 定期打分：价格变化≥1%就重新打分（无时间冷却） ──
         last_price = pool.get("last_analyze_price", 0)
@@ -513,13 +564,14 @@ def scan_once(state: dict, tickers: list) -> dict:
         change_5m = calc_5m_change(symbol)
         change_1m = calc_1m_change(symbol)
         change_3m = calc_3m_change(symbol)
-        market_data = fetch_market_data(symbol)
+        market_data = fetch_market_data(symbol, CFG)
         market_data["change_1m"] = change_1m
         market_data["change_3m"] = change_3m
         market_data["change_5m"] = change_5m
+        market_data["change_1h"] = change_1h
 
         logger.info(f"[分析] {symbol} 池内+{gain_since_entry:.1f}% 1h+{change_1h:.1f}% 5m+{change_5m:.1f}% 1m+{change_1m:.1f}%")
-        analyze_result = analyze(symbol, change_1h, market_data, cfg=CFG)
+        analyze_result = analyze(symbol, gain_since_entry, market_data, cfg=CFG)
         if analyze_result:
             analyze_result["market_data"] = market_data
 
@@ -533,7 +585,7 @@ def scan_once(state: dict, tickers: list) -> dict:
         )
 
         # ── 信号触发 ──
-        if analyze_result["action"] in ("signal_fast", "signal_scored"):
+        if analyze_result["action"] == "signal_scored":
             signal = {
                 "symbol":       symbol,
                 "time":         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -553,7 +605,7 @@ def scan_once(state: dict, tickers: list) -> dict:
             }
             state["signals"].append(signal)
             state["stats"]["signals"] += 1
-            state["cooldowns"][symbol] = now + CFG.get("cooldown_after_tp_hours", 4) * 3600
+            state["cooldowns"][symbol] = now + CFG.get("cooldown_after_tp_hours", 48) * 3600
             del state["watchpool"][symbol]
             events["new_signals"].append(signal)
 
@@ -593,7 +645,7 @@ def scan_once(state: dict, tickers: list) -> dict:
         # ── 利空否决 ──
         elif analyze_result["action"] == "veto":
             del state["watchpool"][symbol]
-            state["cooldowns"][symbol] = now + 1800
+            state["cooldowns"][symbol] = now + CFG.get("cooldown_after_veto_min", 30) * 60
             events["pool_exits"].append({
                 "symbol": symbol,
                 "reason": f"否决: {analyze_result.get('reason', '')}",
@@ -615,7 +667,7 @@ def scan_once(state: dict, tickers: list) -> dict:
 # ══════════════════════════════════════════
 
 def run():
-    logger.info("=== 做多阻击扫描器 v3.0 启动 ===")
+    logger.info("=== 做多阻击扫描器 v3.1 启动 ===")
     state = load_state()
     last_full_scan    = 0
     last_health_report = 0
@@ -631,7 +683,9 @@ def run():
             except Exception as e:
                 logger.warning(f"状态卡片推送失败: {e}")
             try:
+                state["_oi_cache"] = _oi_cache
                 send_health_report(state, state.get("filter_log", []))
+                state.pop("_oi_cache", None)
                 state["stats"] = {"scans": 0, "pool_entries": 0, "signals": 0}
                 last_health_report = now
                 logger.info("[健康报告] 已推送")
@@ -642,6 +696,10 @@ def run():
         if now - last_full_scan >= CFG.get("scan_interval_sec", 30):
             try:
                 tickers = get_all_tickers()
+                # 首次扫描：生成启动黑名单
+                if not _startup_done:
+                    logger.info(f"[启动黑名单] 开始扫描 {len(tickers)} 个合约...")
+                    build_startup_blacklist(tickers)
                 logger.info(f"全市场扫描: {len(tickers)}个合约")
                 events = scan_once(state, tickers)
 

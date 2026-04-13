@@ -58,6 +58,26 @@ def _coin(symbol: str) -> str:
     return symbol.replace("USDT", "").replace("usdt", "")
 
 
+def _fetch_prices(symbols: list) -> dict:
+    """批量拉实时价格 {symbol: price}"""
+    if not symbols:
+        return {}
+    try:
+        resp = requests.get("https://fapi.binance.com/fapi/v1/ticker/price", timeout=8)
+        resp.raise_for_status()
+        return {t["symbol"]: float(t["price"]) for t in resp.json() if t["symbol"] in symbols}
+    except Exception:
+        return {}
+
+
+def _pnl_icon(pct: float) -> str:
+    if pct >= 50: return "🟣"
+    if pct >= 20: return "🔴"
+    if pct >= 5:  return "🟢"
+    if pct >= 0:  return "⚪"
+    return "🔻"
+
+
 def _fmt_price(price: float) -> str:
     """智能格式化价格"""
     if price >= 100:
@@ -196,38 +216,52 @@ def send_status_card(state: dict):
     else:
         lines.append("\n👁 <b>当前无观察目标</b>")
 
-    # ── 信号记录（含 analyzer 结果） ──
+    # ── 信号记录（含实时价格+浮盈） ──
     recent_signals = signals[-10:] if signals else []
     if recent_signals:
+        # 批量拉实时价格
+        sig_symbols = [s["symbol"] for s in recent_signals]
+        live_prices = _fetch_prices(sig_symbols)
+
         lines.append(f"\n✅ <b>已触发做多信号（{len(recent_signals)}个）</b>")
         for sig in reversed(recent_signals):
-            # 字段在顶层（scanner写入时直接放顶层）
             action = sig.get("action", "")
             reason = sig.get("reason", "")
             score = sig.get("score")
 
-            # 触发类型标识
             if action == "signal_fast":
-                trigger_tag = f"⚡ 快速通道 — {reason}"
+                trigger_tag = f"⚡️ 快速通道 — {reason}"
             elif action == "signal_scored":
                 trigger_tag = f"📊 评分通道 — {score}分"
             else:
                 trigger_tag = f"📌 {reason}" if reason else "📌 记录"
 
+            # 实时价格 & 浮盈
+            entry_p = sig.get("entry_price", 0)
+            live_p = live_prices.get(sig["symbol"], 0)
+            if live_p > 0 and entry_p > 0:
+                pnl_pct = (live_p - entry_p) / entry_p * 100
+                icon = _pnl_icon(pnl_pct)
+                price_line = (
+                    f"   入场 <code>{_fmt_price(entry_p)}</code> → "
+                    f"现价 <code>{_fmt_price(live_p)}</code>  "
+                    f"{icon}<b>{pnl_pct:+.1f}%</b>"
+                )
+            else:
+                price_line = (
+                    f"   入场 <code>{_fmt_price(entry_p)}</code> → "
+                    f"触发 <code>{_fmt_price(sig.get('cur_price', 0))}</code>"
+                )
+
             lines.append("<blockquote>")
             lines.append(
                 f"🪙 <b>{_coin(sig['symbol'])}</b>  "
-                f"<code>+{sig['gain_pct']}%</code>  "
                 f"{_fmt_vol(sig.get('volume_usdt', 0))}  "
                 f"{sig.get('time', '')[5:]}"
             )
             lines.append(f"   {trigger_tag}")
-            lines.append(
-                f"   进池<code>{_fmt_price(sig['entry_price'])}</code> → "
-                f"触发<code>{_fmt_price(sig['cur_price'])}</code>"
-            )
+            lines.append(price_line)
 
-            # AI理由
             ai_reason = sig.get("ai_reason", "")
             if ai_reason:
                 lines.append(f"   🤖 {html_mod.escape(ai_reason[:60])}")
@@ -396,7 +430,8 @@ def send_trade_report(signal: dict, buy_result: dict, analyze_result: dict):
 
 def send_health_report(state: dict, filter_log: list):
     """每小时健康播报 → 私信乌鸦，不进群。含系统自检诊断"""
-    from analyzer import _tavily_fail_count, _TAVILY_FAIL_THRESHOLD
+    _tavily_fail_count = 0
+    _TAVILY_FAIL_THRESHOLD = 999
 
     now_str = datetime.now().strftime("%m-%d %H:%M")
     now_ts = time.time()
@@ -407,23 +442,19 @@ def send_health_report(state: dict, filter_log: list):
     diag_lines = []
     all_ok = True
 
-    # 1) OI数据检查
-    try:
-        from scanner import _oi_cache
-        if not _oi_cache:
-            diag_lines.append("⚠️ OI：缓存为空，尚未采集到数据")
+    # 1) OI数据检查（通过state传入的oi_cache快照）
+    oi_cache = state.get("_oi_cache", {})
+    if not oi_cache:
+        diag_lines.append("⚠️ OI：缓存为空，尚未采集到数据")
+        all_ok = False
+    else:
+        freshest = max(v["time"] for v in oi_cache.values())
+        age_min = (now_ts - freshest) / 60
+        if age_min > 10:
+            diag_lines.append(f"⚠️ OI：最新数据 {age_min:.0f}分钟前，可能断连")
             all_ok = False
         else:
-            freshest = max(v["time"] for v in _oi_cache.values())
-            age_min = (now_ts - freshest) / 60
-            if age_min > 10:
-                diag_lines.append(f"⚠️ OI：最新数据 {age_min:.0f}分钟前，可能断连")
-                all_ok = False
-            else:
-                diag_lines.append(f"✅ OI：{len(_oi_cache)}币缓存，最新 {age_min:.0f}分钟前")
-    except Exception as e:
-        diag_lines.append(f"❌ OI：导入失败 {e}")
-        all_ok = False
+            diag_lines.append(f"✅ OI：{len(oi_cache)}币缓存，最新 {age_min:.0f}分钟前")
 
     # 2) 新闻通道
     if _tavily_fail_count < _TAVILY_FAIL_THRESHOLD:
@@ -453,7 +484,7 @@ def send_health_report(state: dict, filter_log: list):
 
     # 5) 状态文件完整性
     from pathlib import Path
-    state_file = Path(__file__).parent / "data" / "state.json"
+    state_file = Path(__file__).parent / "data" / "scanner_state.json"
     if state_file.exists():
         age_min = (now_ts - state_file.stat().st_mtime) / 60
         if age_min > 5:

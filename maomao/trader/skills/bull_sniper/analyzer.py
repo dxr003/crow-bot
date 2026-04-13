@@ -1,22 +1,13 @@
 #!/usr/bin/env python3
 """
-bull_sniper analyzer.py — 信号分析器
+bull_sniper analyzer.py — 信号分析器 v3.1
 
-两阶段触发：
-  第一阶段：涨幅≥12% → 查新闻+查币安下架公告 → 有利好/下架反拉 → 直接推信号
-  第二阶段：定期打分（无涨幅范围限制）→ 综合打分 ≥ 25分 → 推信号
+统一评分体系，无快速通道：
+  7因子：A动能 + B趋势 + C量比 + D-OI费率 + E社交聪明钱 + F链上 + G公告
+  ≥38分 → AI最终决策 → 推信号
+  理论满分116
 
-评分体系 v2（瞬时爆发+趋势确认，2026-04-12）：
-  瞬时爆发：1m>3%+5 / 3m>5%+8 / 5m>8%+10（可叠加）
-  趋势确认：1h 5-10%+5 / 10-15%+8 / 15-25%+12 / 25-40%+15
-  量比：1.5-2x+5 / 2-3x+10 / 3-5x+15 / >5x+18
-  OI：上涨5-15%+5 / >15%+10 / 下跌-5
-  挤空：多空比<0.8 +8
-  费率：极端>±0.5% +8
-  新闻：AI判断利好+5 / 利空-10（不再一票否决）
-
-下架公告：独立通道，不走评分
-手工开关：config.yaml → analyzer.enabled / 各阶段独立开关
+2026-04-13 v3.1 重构
 """
 import json
 import logging
@@ -37,9 +28,7 @@ logger = logging.getLogger("bull_analyzer")
 _delist_cache: dict = {"symbols": set(), "last_fetch": 0}
 _DELIST_TTL = 3600  # 1小时刷新一次
 
-# ── 新闻源失败计数（Tavily主力，Google RSS备用） ──
-_tavily_fail_count = 0
-_TAVILY_FAIL_THRESHOLD = 3  # 连续失败3次切换到Google RSS
+# ── 新闻源（Google RSS免费方案） ──
 
 
 def load_config() -> dict:
@@ -54,30 +43,17 @@ def load_config() -> dict:
 def fetch_news(symbol: str, cfg: dict) -> dict:
     """
     查询币种相关新闻
-    优先级：Tavily → Google RSS → CoinGecko
-    Tavily连续失败3次自动切换Google RSS，成功一次重置计数
+    优先级：Google RSS → CoinGecko
     AI启用时：用Haiku判断情绪，失败回退关键词匹配
     返回: {"sentiment": "bullish"/"bearish"/"neutral", "level": "major"/"minor"/None, "titles": [...], "ai_reason": str|None}
     """
-    global _tavily_fail_count
     news_cfg = cfg.get("news", {})
     base = symbol.replace("USDT", "").replace("BUSD", "")
 
     titles = []
 
-    # Tavily主力
-    if news_cfg.get("use_tavily", False) and _tavily_fail_count < _TAVILY_FAIL_THRESHOLD:
-        tavily_titles = _fetch_tavily(base, news_cfg)
-        if tavily_titles:
-            _tavily_fail_count = 0
-            titles += tavily_titles
-        else:
-            _tavily_fail_count += 1
-            if _tavily_fail_count >= _TAVILY_FAIL_THRESHOLD:
-                logger.warning(f"Tavily连续{_TAVILY_FAIL_THRESHOLD}次失败，切换Google RSS")
-
-    # Google RSS备用（Tavily失败或没开启时）
-    if not titles and news_cfg.get("use_google_rss", True):
+    # Google RSS（免费，通用搜索）
+    if news_cfg.get("use_google_rss", True):
         titles += _fetch_google_rss(base)
 
     # CoinGecko
@@ -104,46 +80,6 @@ def fetch_news(symbol: str, cfg: dict) -> dict:
     result = _classify_news(titles, news_cfg)
     result["ai_reason"] = None
     return result
-
-
-def _fetch_tavily(base: str, news_cfg: dict) -> list:
-    """Tavily Search API查询加密新闻"""
-    try:
-        api_key_env = news_cfg.get("tavily_api_key_env", "TAVILY_API_KEY")
-        api_key = os.getenv(api_key_env, "")
-        if not api_key:
-            logger.warning("TAVILY_API_KEY未配置")
-            return []
-
-        resp = requests.post(
-            "https://api.tavily.com/search",
-            json={
-                "api_key": api_key,
-                "query": f"{base} cryptocurrency latest news",
-                "search_depth": "basic",
-                "max_results": 10,
-                "include_answer": False,
-                "include_domains": [
-                    "coindesk.com", "cointelegraph.com", "theblock.co",
-                    "decrypt.co", "blockworks.co", "cryptoslate.com",
-                    "bitcoinmagazine.com", "coingecko.com",
-                ],
-            },
-            timeout=10,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-
-        titles = []
-        for result in data.get("results", []):
-            title = result.get("title", "")
-            if title:
-                titles.append(title.lower())
-        logger.debug(f"Tavily {base}: {len(titles)}条")
-        return titles
-    except Exception as e:
-        logger.warning(f"Tavily查询失败 {base}: {e}")
-        return []
 
 
 def _fetch_google_rss(base: str) -> list:
@@ -322,9 +258,12 @@ def ai_news_sentiment(titles: list, symbol: str, ai_cfg: dict) -> Optional[dict]
     titles_text = "\n".join(f"- {t}" for t in titles[:8])
 
     prompt = (
-        f"你是加密货币新闻分析师。以下是关于 {base} 的最新新闻标题：\n\n"
+        f"你是加密货币新闻分析师。以下是搜索 {base} 得到的新闻标题：\n\n"
         f"{titles_text}\n\n"
         f"判断这些新闻对 {base} 价格的综合影响。\n"
+        f"核心规则：只有直接提到 {base} 项目本身的新闻才算数。"
+        f"泛市场新闻（如BTC走势、交易所政策、宏观经济）即使搜索结果里出现了，"
+        f"只要不是专门针对 {base} 的，一律视为neutral，不加分不减分。\n"
         f"只返回JSON，格式：{{\"sentiment\": \"bullish\"/\"bearish\"/\"neutral\", "
         f"\"level\": \"major\"/\"minor\"/null, \"reason\": \"一句话理由\"}}\n"
         f"注意：下架/delist消息不算利空（可能反拉），归为neutral。"
@@ -355,10 +294,11 @@ def ai_final_decision(symbol: str, gain_pct: float, score: int,
     breakdown_text = ", ".join(f"{k}={v}" for k, v in breakdown.items())
 
     system_prompt = (
-        "你是加密货币做多交易决策AI，遵守以下规则：\n"
+        f"你是加密货币做多交易决策AI，当前目标币种：{base}。遵守以下规则：\n"
         "1. 综合评估涨幅、量比、OI、多空比、费率、新闻，判断是否值得做多\n"
         "2. 假突破迹象（量价背离、上影线过长）返回skip\n"
-        "3. 明确利空新闻返回skip\n"
+        f"3. 只有直接针对 {base} 项目本身的利空新闻才能作为skip依据。"
+        "泛市场新闻（BTC走势、交易所政策、宏观经济等）与该币无直接关系，不作为判断依据\n"
         "4. 资金费率极端拥挤（>0.05%）谨慎对待\n"
         "5. 若BTC同期1小时涨幅超过2%，且该币涨幅不超过BTC涨幅的3倍，"
         "判定为跟随行情非独立爆发，返回skip\n"
@@ -468,118 +408,151 @@ def is_delist_target(symbol: str, cfg: dict) -> bool:
 
 def score_signal(symbol: str, gain_pct: float, market_data: dict, cfg: dict) -> dict:
     """
-    综合打分 v2（瞬时爆发+趋势确认+量能+持仓+挤空+费率+新闻）
-    market_data: {oi_change_pct, long_short_ratio, funding_rate, volume_ratio, change_1m, change_3m, change_5m}
-    返回: {"score": int, "breakdown": dict, "vetoed": bool, "veto_reason": str}
+    综合打分 v3.1（7因子：动能+趋势+量比+OI费率+社交聪明钱+链上+公告）
+    A-C互斥取最高，D独立叠加，E社交/聪明钱各自互斥，F叠加规则见文档，G独立
     """
     scoring = cfg.get("scoring", {})
     breakdown = {}
     score = 0
 
-    # ── 新闻评分（降权：利好+5，利空-10，不再一票否决） ──
-    news_result = fetch_news(symbol, cfg)
-    if news_result["sentiment"] == "bullish":
-        pts = scoring.get("news_bullish", 5)
-        breakdown["新闻利好"] = pts
-        score += pts
-    elif news_result["sentiment"] == "bearish":
-        pts = scoring.get("news_bearish", -10)
-        breakdown["新闻利空"] = pts
-        score += pts
-
-    # ── 瞬时爆发（1m/3m/5m可叠加） ──
+    # ── A. 价格动能（互斥取最高） ──
     change_1m = market_data.get("change_1m", 0)
     change_3m = market_data.get("change_3m", 0)
     change_5m = market_data.get("change_5m", 0)
 
-    if change_1m > 3:
-        pts = scoring.get("burst_1m", 5)
-        breakdown[f"1m爆发+{change_1m:.1f}%"] = pts
+    burst_1m_th = scoring.get("burst_1m_threshold", 12)
+    burst_3m_th = scoring.get("burst_3m_threshold", 8)
+    burst_5m_th = scoring.get("burst_5m_threshold", 7)
+
+    if change_1m > burst_1m_th:
+        pts = scoring.get("burst_1m", 8)
+        breakdown[f"A.1m爆发+{change_1m:.1f}%"] = pts
         score += pts
-    if change_3m > 5:
-        pts = scoring.get("burst_3m", 8)
-        breakdown[f"3m爆发+{change_3m:.1f}%"] = pts
+    elif change_3m > burst_3m_th:
+        pts = scoring.get("burst_3m", 7)
+        breakdown[f"A.3m爆发+{change_3m:.1f}%"] = pts
         score += pts
-    if change_5m > 8:
-        pts = scoring.get("burst_5m", 10)
-        breakdown[f"5m爆发+{change_5m:.1f}%"] = pts
+    elif change_5m > burst_5m_th:
+        pts = scoring.get("burst_5m", 6)
+        breakdown[f"A.5m爆发+{change_5m:.1f}%"] = pts
         score += pts
 
-    # ── 趋势确认（1h涨幅分档） ──
-    if 25 <= gain_pct < 40:
-        pts = scoring.get("gain_25_40", 15)
-        breakdown[f"1h趋势+{gain_pct:.1f}%"] = pts
-        score += pts
-    elif 15 <= gain_pct < 25:
-        pts = scoring.get("gain_15_25", 12)
-        breakdown[f"1h趋势+{gain_pct:.1f}%"] = pts
+    # ── B. 池内涨幅（互斥取最高，越早越高） ──
+    if 5 <= gain_pct < 10:
+        pts = scoring.get("gain_5_10", 10)
+        breakdown[f"B.涨幅初期+{gain_pct:.1f}%"] = pts
         score += pts
     elif 10 <= gain_pct < 15:
         pts = scoring.get("gain_10_15", 8)
-        breakdown[f"1h趋势+{gain_pct:.1f}%"] = pts
+        breakdown[f"B.涨幅中期+{gain_pct:.1f}%"] = pts
         score += pts
-    elif 5 <= gain_pct < 10:
-        pts = scoring.get("gain_5_10", 5)
-        breakdown[f"1h趋势+{gain_pct:.1f}%"] = pts
+    elif 15 <= gain_pct < 25:
+        pts = scoring.get("gain_15_25", 7)
+        breakdown[f"B.涨幅强势+{gain_pct:.1f}%"] = pts
         score += pts
-
-    # ── OI变化（分档） ──
-    oi_change = market_data.get("oi_change_pct", 0)
-    if oi_change > 15:
-        pts = scoring.get("oi_up_strong", 10)
-        breakdown[f"OI大涨+{oi_change:.1f}%"] = pts
-        score += pts
-    elif oi_change > 5:
-        pts = scoring.get("oi_up_mild", 5)
-        breakdown[f"OI上涨+{oi_change:.1f}%"] = pts
-        score += pts
-    elif oi_change < -5:
-        pts = scoring.get("oi_down", -5)
-        breakdown[f"OI下跌{oi_change:.1f}%"] = pts
+    elif 25 <= gain_pct < 40:
+        pts = scoring.get("gain_25_40", 5)
+        breakdown[f"B.涨幅过热+{gain_pct:.1f}%"] = pts
         score += pts
 
-    # ── 多空比 ──
-    lsr = market_data.get("long_short_ratio", 1.0)
-    if lsr < 0.8:
-        pts = scoring.get("lsr_short_dominant", 8)
-        breakdown[f"挤空{lsr:.2f}"] = pts
-        score += pts
-
-    # ── 资金费率 ──
-    funding = market_data.get("funding_rate", 0)
-    funding_threshold = scoring.get("funding_extreme_threshold", 0.005)
-    if abs(funding) >= funding_threshold:
-        pts = scoring.get("funding_extreme", 8)
-        direction = "负" if funding < 0 else "正"
-        breakdown[f"费率极端{direction}{funding*100:.3f}%"] = pts
-        score += pts
-
-    # ── 量比（多一档>5x） ──
+    # ── C. 量比（互斥取最高） ──
     volume_ratio = market_data.get("volume_ratio", 1.0)
     if volume_ratio > 5:
         pts = scoring.get("vol_ratio_5x", 18)
-        breakdown[f"量比{volume_ratio:.1f}x"] = pts
+        breakdown[f"C.量比{volume_ratio:.1f}x"] = pts
         score += pts
     elif volume_ratio > 3:
         pts = scoring.get("vol_ratio_3x", 15)
-        breakdown[f"量比{volume_ratio:.1f}x"] = pts
+        breakdown[f"C.量比{volume_ratio:.1f}x"] = pts
         score += pts
     elif volume_ratio > 2:
         pts = scoring.get("vol_ratio_2x", 10)
-        breakdown[f"量比{volume_ratio:.1f}x"] = pts
+        breakdown[f"C.量比{volume_ratio:.1f}x"] = pts
         score += pts
     elif volume_ratio > 1.5:
         pts = scoring.get("vol_ratio_1_5x", 5)
-        breakdown[f"量比{volume_ratio:.1f}x"] = pts
+        breakdown[f"C.量比{volume_ratio:.1f}x"] = pts
         score += pts
     elif volume_ratio < 1:
         pts = scoring.get("vol_ratio_low", -5)
-        breakdown[f"量比{volume_ratio:.1f}x萎缩"] = pts
+        breakdown[f"C.量比{volume_ratio:.1f}x萎缩"] = pts
         score += pts
+
+    # ── D. OI与资金费率（独立可叠加） ──
+    oi_change = market_data.get("oi_change_pct", 0)
+    if oi_change > 30:
+        pts = scoring.get("oi_up_super", 10)
+        breakdown[f"D.OI超涨+{oi_change:.1f}%"] = pts
+        score += pts
+    elif oi_change > 15:
+        pts = scoring.get("oi_up_strong", 8)
+        breakdown[f"D.OI大涨+{oi_change:.1f}%"] = pts
+        score += pts
+    elif oi_change > 5:
+        pts = scoring.get("oi_up_mild", 5)
+        breakdown[f"D.OI上涨+{oi_change:.1f}%"] = pts
+        score += pts
+    elif oi_change < -5:
+        pts = scoring.get("oi_down", -5)
+        breakdown[f"D.OI下跌{oi_change:.1f}%"] = pts
+        score += pts
+
+    lsr = market_data.get("long_short_ratio", 1.0)
+    if lsr < 0.8:
+        pts = scoring.get("lsr_short_dominant", 2)
+        breakdown[f"D.挤空{lsr:.2f}"] = pts
+        score += pts
+
+    funding = market_data.get("funding_rate", 0)
+    funding_threshold = scoring.get("funding_extreme_threshold", 0.0005)
+    if abs(funding) >= funding_threshold:
+        pts = scoring.get("funding_extreme", 3)
+        direction = "负" if funding < 0 else "正"
+        breakdown[f"D.费率{direction}{funding*100:.3f}%"] = pts
+        score += pts
+
+    # ── E. 社交+聪明钱（读缓存） ──
+    try:
+        from news_score import get_social_score, get_smart_money_score
+        ss = get_social_score(symbol)
+        if ss["score"] > 0:
+            breakdown[f"E.{ss['reason']}"] = ss["score"]
+            score += ss["score"]
+
+        sm = get_smart_money_score(symbol)
+        if sm["score"] != 0:
+            breakdown[f"E.{sm['reason']}"] = sm["score"]
+            score += sm["score"]
+    except Exception as e:
+        logger.debug(f"[E因子] {symbol} 异常: {e}")
+
+    # ── F. 链上转账（读缓存） ──
+    try:
+        from chain_score import get_chain_score
+        cs = get_chain_score(symbol)
+        if cs["score"] != 0:
+            breakdown[f"F.{cs['reason']}"] = cs["score"]
+            score += cs["score"]
+    except Exception as e:
+        logger.debug(f"[F因子] {symbol} 异常: {e}")
+
+    # ── G. 公告因子（读缓存） ──
+    try:
+        announce = market_data.get("announce_status", "")
+        if announce == "new_listing":
+            pts = scoring.get("announce_new_listing", 5)
+            breakdown["G.上新交易所"] = pts
+            score += pts
+        elif announce == "delist":
+            pts = scoring.get("announce_delist", -5)
+            breakdown["G.下架公告"] = pts
+            score += pts
+    except Exception as e:
+        logger.debug(f"[G因子] {symbol} 异常: {e}")
 
     return {
         "score": score, "breakdown": breakdown,
-        "vetoed": False, "veto_reason": "", "news": news_result
+        "vetoed": False, "veto_reason": "",
     }
 
 
@@ -589,87 +562,53 @@ def score_signal(symbol: str, gain_pct: float, market_data: dict, cfg: dict) -> 
 
 def analyze(symbol: str, gain_pct: float, market_data: dict, cfg: Optional[dict] = None) -> dict:
     """
-    主分析入口
+    主分析入口 v3.1 — 统一打分，无快速通道
     返回:
-      {"action": "signal_fast", "reason": "利好新闻"}   → 第一阶段快速触发
-      {"action": "signal_fast", "reason": "下架反拉"}   → 下架通道触发
-      {"action": "signal_scored", "score": 45, ...}     → 第二阶段打分触发
+      {"action": "signal_scored", "score": 45, ...}     → 打分达标
       {"action": "hold", ...}                            → 继续观察
-      {"action": "veto", "reason": "利空新闻否决"}       → 否决
+      {"action": "veto", "reason": "AI否决: ..."}        → 否决
     """
     if cfg is None:
         cfg = load_config()
 
     analyzer_cfg = cfg.get("analyzer", {})
 
-    # 手工总开关
     if not analyzer_cfg.get("enabled", True):
         return {"action": "hold", "reason": "analyzer已关闭"}
 
-    # ── 第一阶段：8%快速通道 ──
-    stage1_threshold = analyzer_cfg.get("stage1_gain_pct", 8)
-    if gain_pct >= stage1_threshold and analyzer_cfg.get("stage1_enabled", True):
+    signal_threshold = analyzer_cfg.get("signal_threshold", 38)
 
-        # 下架反拉（独立通道，不受新闻否决影响）
-        if analyzer_cfg.get("delist_enabled", True) and is_delist_target(symbol, cfg):
-            return {
-                "action": "signal_fast",
-                "reason": "下架反拉",
-                "gain_pct": gain_pct,
-                "score": None,
-            }
+    result = score_signal(symbol, gain_pct, market_data, cfg)
 
-        # 新闻快速通道（利空不再否决，只有利好才快速触发）
-        news = fetch_news(symbol, cfg)
-        if news["sentiment"] == "bullish":
-            return {
-                "action": "signal_fast",
-                "reason": f"利好新闻({news['level']})",
-                "gain_pct": gain_pct,
-                "news": news,
-                "score": None,
-            }
+    if result["score"] >= signal_threshold:
+        ai_cfg = _get_ai_config(cfg)
+        ai_decision = None
+        if ai_cfg:
+            ai_decision = ai_final_decision(
+                symbol, gain_pct, result["score"],
+                result["breakdown"], market_data,
+                {}, ai_cfg
+            )
+            if ai_decision and ai_decision["decision"] == "skip":
+                return {
+                    "action": "veto",
+                    "reason": f"AI否决: {ai_decision.get('reason', '')}",
+                    "score": result["score"],
+                    "breakdown": result["breakdown"],
+                    "ai_decision": ai_decision,
+                }
 
-    # ── 第二阶段：打分通道（无涨幅范围限制，由评分体系自行判断） ──
-    signal_threshold = analyzer_cfg.get("signal_threshold", 25)
+        return {
+            "action": "signal_scored",
+            "score": result["score"],
+            "breakdown": result["breakdown"],
+            "gain_pct": gain_pct,
+            "ai_decision": ai_decision,
+        }
 
-    if analyzer_cfg.get("stage2_enabled", True):
-        result = score_signal(symbol, gain_pct, market_data, cfg)
-
-        if result["score"] >= signal_threshold:
-            # ── 位置2：AI最终决策（skip否决，buy/失败放行） ──
-            ai_cfg = _get_ai_config(cfg)
-            ai_decision = None
-            if ai_cfg:
-                ai_decision = ai_final_decision(
-                    symbol, gain_pct, result["score"],
-                    result["breakdown"], market_data,
-                    result.get("news", {}), ai_cfg
-                )
-                if ai_decision and ai_decision["decision"] == "skip":
-                    return {
-                        "action": "veto",
-                        "reason": f"AI否决: {ai_decision.get('reason', '')}",
-                        "score": result["score"],
-                        "breakdown": result["breakdown"],
-                        "news": result.get("news"),
-                        "ai_decision": ai_decision,
-                    }
-
-            return {
-                "action": "signal_scored",
-                "score": result["score"],
-                "breakdown": result["breakdown"],
-                "gain_pct": gain_pct,
-                "news": result.get("news"),
-                "ai_decision": ai_decision,
-            }
-        else:
-            return {
-                "action": "hold",
-                "reason": f"评分{result['score']}分未达{signal_threshold}分",
-                "score": result["score"],
-                "breakdown": result["breakdown"],
-            }
-
-    return {"action": "hold", "reason": f"1h+{gain_pct:.1f}%，等待评分达标"}
+    return {
+        "action": "hold",
+        "reason": f"评分{result['score']}分未达{signal_threshold}分",
+        "score": result["score"],
+        "breakdown": result["breakdown"],
+    }
