@@ -570,6 +570,12 @@ def scan_once(state: dict, tickers: list) -> dict:
         )
 
     # ── 4. 第三层：观察池管理（零成本观察，定期打分） ──
+    # 冷却中的币踢出观察池
+    for _s in list(state["watchpool"].keys()):
+        if _s in state["cooldowns"] or _s in state.get("positions", {}):
+            logger.info(f"[观察池] {_s} 冷却/持仓中，踢出")
+            del state["watchpool"][_s]
+
     for symbol in list(state["watchpool"].keys()):
         pool = state["watchpool"][symbol]
         t = ticker_map.get(symbol)
@@ -663,6 +669,10 @@ def scan_once(state: dict, tickers: list) -> dict:
 
         # ── 信号触发 ──
         if analyze_result["action"] == "signal_scored":
+            # 冷却/持仓中的币不出信号
+            if symbol in state["cooldowns"] or symbol in state.get("positions", {}):
+                logger.info(f"[过滤] {symbol} 冷却/持仓中，跳过信号")
+                continue
             # 24h涨幅过滤（不达标直接跳过，不记录信号、不推送、不显示）
             try:
                 _ticker = requests.get(

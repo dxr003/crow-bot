@@ -233,12 +233,22 @@ def send_status_card(state: dict):
                 pnl = 0
             peak = pos.get("peak_pnl_pct", 0)
             held_h = (now - pos.get("entry_time", now)) / 3600
+            sl_id = pos.get("sl_algo_id", "")
+            tp_id = pos.get("tp_algo_id", "")
+            sl_tag = "SL✅" if sl_id and sl_id != "?" else "SL❌"
+            if tp_id == "trailing_limit":
+                tp_tag = "TP限价✅"
+            elif tp_id and tp_id != "?":
+                tp_tag = "TP原生✅"
+            else:
+                tp_tag = "TP❌"
             lines.append(
                 f"<b>{_coin(sym)}</b> LONG {leverage}x  "
                 f"入场<code>{_fmt_price(entry_p)}</code>  "
                 f"{_pnl_icon(pnl)}<b>{pnl:+.1f}%</b>  "
                 f"峰<code>+{peak:.1f}%</code>  "
-                f"已持仓{held_h:.1f}h"
+                f"已持仓{held_h:.1f}h\n"
+                f"   {sl_tag} {tp_tag}"
             )
         lines.append("</blockquote>")
 
@@ -487,6 +497,7 @@ def send_trade_report(signal: dict, buy_result: dict, analyze_result: dict):
     )
 
     _send(text, chat_id=ADMIN_ID)
+    _send(text, chat_id=BROADCAST_CHAT_ID)
 
 
 def send_health_report(state: dict, filter_log: list):
