@@ -331,42 +331,53 @@ def _execute_auto(symbol: str, price: float, analyze_result: dict, cfg: dict) ->
     except Exception as e:
         logger.warning(f"[buyer] {symbol} 止损挂单异常: {e}")
 
-    # ── 11. 币安原生移动止盈（/fapi/v1/order + quantity，基于实际入场价） ──
-    trailing_cfg = cfg.get("trailing", {})
-    activation_pct = trailing_cfg.get("activation_pct", 50)
-    activate_price = _fix_price(symbol, actual_entry * (1 + activation_pct / 100))
-    callback_rate = 10  # 币安原生最大回撤10%
-
+    # ── 11. 移动止盈 ──
     trailing_order_id = None
-    try:
-        tp_resp = _fapi_order({
-            "symbol": symbol,
-            "side": "SELL",
-            "positionSide": "LONG",
-            "type": "TRAILING_STOP_MARKET",
-            "activationPrice": str(activate_price),
-            "callbackRate": str(callback_rate),
-            "quantity": str(qty),
-        })
-        if tp_resp["status_code"] == 200:
-            trailing_order_id = str(tp_resp["data"].get("orderId", "?"))
-            logger.info(
-                f"[buyer] {symbol} 币安原生移动止盈 "
-                f"激活:{activate_price} 回撤:{callback_rate}% orderId:{trailing_order_id}"
-            )
-        else:
-            logger.warning(f"[buyer] {symbol} 移动止盈挂单失败: {tp_resp['data']}")
-    except Exception as e:
-        logger.warning(f"[buyer] {symbol} 移动止盈挂单异常: {e}")
+    use_custom = cfg.get("custom_trailing_enabled", False)
 
-    # 自建监控（可通过config开关，默认关闭）
-    if cfg.get("custom_trailing_enabled", False):
-        pullback_pct = trailing_cfg.get("pullback_trigger", 25)
+    if use_custom:
+        # 限价单移动止盈（trailing_limit.py）
         try:
-            _register_trailing(symbol, actual_entry, qty, activation_pct, pullback_pct)
-            logger.info(f"[buyer] {symbol} 自建监控已注册（观察模式）")
+            from trailing_limit import register as tl_register
+            tl_register(symbol, actual_entry, qty, side="LONG", leverage=leverage, cfg=cfg)
+            trailing_order_id = "trailing_limit"
+            logger.info(f"[buyer] {symbol} 限价移动止盈已注册")
         except Exception as e:
-            logger.warning(f"[buyer] {symbol} 自建监控注册失败: {e}")
+            logger.warning(f"[buyer] {symbol} 限价移动止盈注册失败: {e}")
+    else:
+        # 币安原生移动止盈（10%回撤上限）
+        trailing_cfg = cfg.get("trailing", {})
+        activation_pct = trailing_cfg.get("activation_pct", 50)
+        activate_price = _fix_price(symbol, actual_entry * (1 + activation_pct / 100))
+        callback_rate = 10
+        try:
+            tp_resp = _fapi_order({
+                "symbol": symbol,
+                "side": "SELL",
+                "positionSide": "LONG",
+                "type": "TRAILING_STOP_MARKET",
+                "activationPrice": str(activate_price),
+                "callbackRate": str(callback_rate),
+                "quantity": str(qty),
+            })
+            if tp_resp["status_code"] == 200:
+                trailing_order_id = str(tp_resp["data"].get("orderId", "?"))
+                logger.info(
+                    f"[buyer] {symbol} 币安原生移动止盈 "
+                    f"激活:{activate_price} 回撤:{callback_rate}% orderId:{trailing_order_id}"
+                )
+            else:
+                logger.warning(f"[buyer] {symbol} 移动止盈挂单失败: {tp_resp['data']}")
+        except Exception as e:
+            logger.warning(f"[buyer] {symbol} 移动止盈挂单异常: {e}")
+
+        if cfg.get("custom_trailing_enabled", False):
+            pullback_pct = trailing_cfg.get("pullback_trigger", 25)
+            try:
+                _register_trailing(symbol, actual_entry, qty, activation_pct, pullback_pct)
+                logger.info(f"[buyer] {symbol} 自建监控已注册（观察模式）")
+            except Exception as e:
+                logger.warning(f"[buyer] {symbol} 自建监控注册失败: {e}")
 
     return {
         "status": "executed",

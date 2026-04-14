@@ -853,14 +853,23 @@ def run():
         _settle_signals(state, now)
 
         # ── 移动止盈检查（币安2仓位） ──
-        try:
-            from bull_trailing import check_all as trailing_check
-            tp_triggered = trailing_check()
-            if tp_triggered:
-                for t in tp_triggered:
-                    logger.info(f"[移动止盈] {t['symbol']} 触发 浮盈+{t['pnl_pct']}% 回撤-{t['drawdown']}%")
-        except Exception as e:
-            logger.warning(f"[移动止盈] 检查异常: {e}")
+        if CFG.get("custom_trailing_enabled", False):
+            try:
+                from trailing_limit import check_all as tl_check
+                tl_results = tl_check(CFG)
+                for t in tl_results:
+                    logger.info(f"[限价止盈] {t['symbol']} 成交 盈亏+{t['pnl_pct']}%")
+            except Exception as e:
+                logger.warning(f"[限价止盈] 检查异常: {e}")
+        else:
+            try:
+                from bull_trailing import check_all as trailing_check
+                tp_triggered = trailing_check()
+                if tp_triggered:
+                    for t in tp_triggered:
+                        logger.info(f"[移动止盈] {t['symbol']} 触发 浮盈+{t['pnl_pct']}% 回撤-{t['drawdown']}%")
+            except Exception as e:
+                logger.warning(f"[移动止盈] 检查异常: {e}")
 
         # ── 仓位生命周期管理 ──
         try:

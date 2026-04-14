@@ -431,13 +431,18 @@ def send_trade_report(signal: dict, buy_result: dict, analyze_result: dict):
         order_id = buy_result.get("order_id", "?")
         sl_ok = buy_result.get("sl_algo_id") not in (None, "", "?")
         sl_tag = "✅已挂" if sl_ok else "⚠️挂载失败"
-        tp_ok = buy_result.get("tp_order_id") not in (None, "", "?")
-        trailing_status = "✅已挂载" if tp_ok else "⚠️挂载失败"
+        tp_id = buy_result.get("tp_order_id", "")
+        if tp_id == "trailing_limit":
+            trailing_status = "✅已注册（限价单 50%激活/40%回撤）"
+        elif tp_id not in (None, "", "?"):
+            trailing_status = "✅已挂载（币安原生 50%激活/10%回撤）"
+        else:
+            trailing_status = "⚠️挂载失败"
 
         exec_block = (
             f"订单ID: {order_id}\n"
             f"止损价: {sl_price}（保证金-30%）{sl_tag}\n"
-            f"移动止盈: {trailing_status}（50%激活/10%回撤 币安原生）"
+            f"移动止盈: {trailing_status}"
         )
     elif status == "skipped":
         exec_icon = "⏭"

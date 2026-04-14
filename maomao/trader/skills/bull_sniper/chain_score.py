@@ -1,20 +1,26 @@
 """
-chain_score.py — E因子：捉妖评分模块 v1.0
-数据源：币安 Web3 Skills API（免费无认证）
+chain_score.py — E因子：捉妖评分模块 v2.0
+数据源：币安 Web3 Skills API query-token-info（免费无认证）
 
 反向逻辑：庄控越重=弹药越足=拉盘越容易=加分
 聪明钱流出=庄家在跑=一票否决
 
-E1 弹药确认（holdersTop10Percent）: 0~+5
-E2 庄家动向（inflow+traders）: -3~+5 / 否决
-E3 造势力度（holders+增长+KYC+热度）: -3~+12
-E4 买卖节奏（countBuy/countSell）: -2~+3
-E5 合约安全（honeypot/riskLevel）: 否决
+E1  弹药确认（top10HoldersPercentage）: 0~+5
+E2a 聪明钱持仓（smartMoneyHolders）: 0~+3
+E2b 币安净流向（volume24hNetBinance）: -2~+2
+E2c 聪明钱流出否决（inflow端点交叉验证）: 否决
+E3a 新钱包占比（newWalletHolders/holders）: 0~+5
+E3b 批量地址（bundlerHolders）: 0~+3
+E3c holders门槛: 0~+5
+E3d 5分钟增长（本地快照）: 0~+3
+E4a 1h买卖比: -2~+3
+E4b 5m加速确认: 0~+2
 
-2026-04-14 v1.0 按顾问方案部署
+2026-04-14 v2.0 按顾问v2方案部署
 """
 import time
 import logging
+import os
 import requests
 from pathlib import Path
 import json
@@ -29,13 +35,40 @@ H_POST = {
     "User-Agent": "binance-web3/2.1 (Skill)",
 }
 
-ALPHA_LIST_URL = "https://www.binance.com/bapi/defi/v1/public/wallet-direct/buw/wallet/cex/alpha/all/token/list"
+SEARCH_URL = "https://web3.binance.com/bapi/defi/v5/public/wallet-direct/buw/wallet/market/token/search/ai"
+DYNAMIC_URL = "https://web3.binance.com/bapi/defi/v4/public/wallet-direct/buw/wallet/market/token/dynamic/info/ai"
 
-_alpha_cache = {"ts": 0, "data": {}}
-ALPHA_TTL = 600
+API_TIMEOUT = 5
 
+# ── 合约地址缓存（内存 + 磁盘） ──
+ALPHA_CACHE_FILE = Path(__file__).parent / "data" / "alpha_cache.json"
+_ca_cache: dict = {"ts": 0, "data": {}}
+CA_CACHE_TTL = 3600
+
+# ── holders快照 ──
 _holders_snapshot: dict = {}
 SNAPSHOT_FILE = Path(__file__).parent / "data" / "holders_snapshot.json"
+
+# ── API失败计数 + 告警 ──
+_fail_count = 0
+_fail_alerted = False
+FAIL_ALERT_THRESHOLD = 3
+
+BOT_TOKEN = os.getenv("PUSH_BOT_TOKEN", "") or os.getenv("BOT_TOKEN", "")
+ADMIN_ID = os.getenv("ADMIN_ID", "509640925")
+
+
+def _tg_alert(text: str):
+    if not BOT_TOKEN:
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            json={"chat_id": ADMIN_ID, "text": text},
+            timeout=5,
+        )
+    except Exception:
+        pass
 
 
 def _load_holders_snapshot():
@@ -57,30 +90,104 @@ def _save_holders_snapshot():
     SNAPSHOT_FILE.write_text(json.dumps(keep, ensure_ascii=False))
 
 
-_load_holders_snapshot()
+def _load_alpha_cache():
+    global _ca_cache
+    if ALPHA_CACHE_FILE.exists():
+        try:
+            disk = json.loads(ALPHA_CACHE_FILE.read_text())
+            _ca_cache["data"] = {k: v.get("address", v) if isinstance(v, dict) else v for k, v in disk.items()}
+            _ca_cache["ts"] = ALPHA_CACHE_FILE.stat().st_mtime
+        except Exception:
+            pass
 
 
-def _get_alpha_map() -> dict:
+def _save_alpha_cache():
+    ALPHA_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
     now = time.time()
-    if now - _alpha_cache["ts"] < ALPHA_TTL and _alpha_cache["data"]:
-        return _alpha_cache["data"]
-    try:
-        resp = requests.get(ALPHA_LIST_URL, headers=H_GET, timeout=10)
-        data = resp.json().get("data", [])
-        if isinstance(data, dict):
-            data = data.get("list", [])
-        mapping = {}
-        for t in data:
-            sym = (t.get("symbol") or "").upper()
-            ca = t.get("contractAddress", "")
-            if sym and ca:
-                mapping[sym] = ca
-        _alpha_cache["ts"] = now
-        _alpha_cache["data"] = mapping
-        return mapping
-    except Exception as e:
-        logger.warning(f"[E因子] Alpha列表获取失败: {e}")
-        return _alpha_cache.get("data", {})
+    out = {}
+    for ticker, addr in _ca_cache["data"].items():
+        out[ticker] = {"address": addr, "chainId": "56", "updated": now}
+    ALPHA_CACHE_FILE.write_text(json.dumps(out, ensure_ascii=False))
+
+
+_load_holders_snapshot()
+_load_alpha_cache()
+
+
+def _api_ok():
+    global _fail_count, _fail_alerted
+    if _fail_alerted:
+        _tg_alert("[E因子] API恢复正常，退出降级模式")
+        logger.info("[E因子v2] API恢复")
+    _fail_count = 0
+    _fail_alerted = False
+
+
+def _api_fail(msg: str):
+    global _fail_count, _fail_alerted
+    _fail_count += 1
+    logger.warning(f"[E因子v2] API失败({_fail_count}): {msg}")
+    if _fail_count >= FAIL_ALERT_THRESHOLD and not _fail_alerted:
+        _fail_alerted = True
+        _tg_alert(f"[E因子告警] API连续{_fail_count}次失败，已降级为纯BCD评分模式")
+
+
+def _search_contract(ticker: str) -> str:
+    now = time.time()
+    if ticker in _ca_cache["data"] and now - _ca_cache["ts"] < CA_CACHE_TTL:
+        return _ca_cache["data"][ticker]
+
+    for attempt in range(2):
+        try:
+            resp = requests.get(SEARCH_URL, params={"keyword": ticker}, headers=H_GET, timeout=API_TIMEOUT)
+            items = resp.json().get("data", [])
+            for item in items:
+                sym = (item.get("symbol") or "").upper()
+                chain = item.get("chainId", "")
+                ca = item.get("contractAddress", "")
+                if sym == ticker and chain == "56" and ca:
+                    _ca_cache["data"][ticker] = ca
+                    _ca_cache["ts"] = now
+                    _save_alpha_cache()
+                    return ca
+            for item in items:
+                sym = (item.get("symbol") or "").upper()
+                ca = item.get("contractAddress", "")
+                if sym == ticker and ca:
+                    _ca_cache["data"][ticker] = ca
+                    _ca_cache["ts"] = now
+                    _save_alpha_cache()
+                    return ca
+            break
+        except Exception as e:
+            if attempt == 0:
+                continue
+            logger.warning(f"[E因子v2] search重试失败: {e}")
+
+    if ticker in _ca_cache["data"]:
+        logger.info(f"[E因子v2] search失败，走本地缓存 {ticker}")
+        return _ca_cache["data"][ticker]
+    return ""
+
+
+def _get_dynamic_data(contract_address: str) -> dict:
+    for attempt in range(2):
+        try:
+            resp = requests.get(
+                DYNAMIC_URL,
+                params={"chainId": "56", "contractAddress": contract_address},
+                headers=H_GET,
+                timeout=API_TIMEOUT,
+            )
+            data = resp.json().get("data") or {}
+            if data:
+                _api_ok()
+                return data
+        except Exception as e:
+            if attempt == 0:
+                continue
+            _api_fail(f"dynamic {e}")
+    return {}
 
 
 def _get_inflow_data(contract_address: str) -> dict:
@@ -90,7 +197,7 @@ def _get_inflow_data(contract_address: str) -> dict:
                 f"{BASE}/tracker/wallet/token/inflow/rank/query/ai",
                 headers=H_POST,
                 json={"chainId": "56", "period": period, "tagType": 2},
-                timeout=10,
+                timeout=API_TIMEOUT,
             )
             data = resp.json().get("data", [])
             for item in data:
@@ -98,85 +205,43 @@ def _get_inflow_data(contract_address: str) -> dict:
                     item["_period"] = period
                     return item
         except Exception as e:
-            logger.debug(f"[E因子] inflow {period} 异常: {e}")
-    return {}
-
-
-def _get_social_data(contract_address: str) -> dict:
-    for chain in ["56", "CT_501"]:
-        try:
-            url = (
-                f"{BASE}/buw/wallet/market/token/pulse/social/hype/"
-                f"rank/leaderboard/ai?chainId={chain}"
-                f"&sentiment=All&socialLanguage=ALL&targetLanguage=en&timeRange=1"
-            )
-            resp = requests.get(url, headers=H_GET, timeout=10)
-            body = resp.json().get("data", {})
-            lst = body.get("leaderBoardList", body.get("list", [])) if isinstance(body, dict) else []
-            for item in lst:
-                meta = item.get("metaInfo") or {}
-                ca = (meta.get("contractAddress") or "").lower()
-                if ca == contract_address.lower():
-                    hi = item.get("socialHypeInfo") or {}
-                    return {
-                        "sentiment": hi.get("sentiment", ""),
-                        "hype": float(hi.get("socialHype", 0)),
-                    }
-        except Exception as e:
-            logger.debug(f"[E因子] social {chain} 异常: {e}")
+            logger.debug(f"[E因子v2] inflow {period} 异常: {e}")
     return {}
 
 
 def get_chain_score(symbol: str, cfg: dict = None) -> dict:
     """
-    E因子主入口 — 捉妖评分
+    E因子v2主入口 — 捉妖评分
     返回: {"score": int, "reason": str, "vetoed": bool, "veto_reason": str, "detail": dict}
     """
     ticker = symbol.replace("USDT", "").replace("BUSD", "").upper()
     detail = {}
+    zero = {"score": 0, "reason": "", "vetoed": False, "veto_reason": "", "detail": {}}
 
-    alpha_map = _get_alpha_map()
-    ca = alpha_map.get(ticker, "")
+    ca = _search_contract(ticker)
     if not ca:
-        logger.info(f"[E因子] {symbol} Alpha列表无合约地址 → 返回0分")
-        return {"score": 0, "reason": "非Alpha币", "vetoed": False, "veto_reason": "", "detail": {}}
+        logger.info(f"[E因子v2] {symbol} 搜索无合约地址 → 返回0分")
+        zero["reason"] = "非Alpha币"
+        return zero
 
     ca_short = f"{ca[:10]}...{ca[-4:]}"
-    log_lines = [f"[E因子] {symbol} | 合约:{ca_short}"]
+    log_lines = [f"[E因子v2] {symbol} | 合约:{ca_short}"]
+
+    dyn = _get_dynamic_data(ca)
+    if not dyn:
+        logger.info(f"[E因子v2] {symbol} dynamic为空(降级) → 返回0分")
+        zero["reason"] = "API降级"
+        return zero
 
     inflow = _get_inflow_data(ca)
-    social = _get_social_data(ca)
 
     score = 0
     reasons = []
     vetoed = False
     veto_reason = ""
 
-    # ── E5 合约安全（先判断，否决优先）──
-    if inflow:
-        risk_codes = inflow.get("tokenRiskCodes") or []
-        risk_level = inflow.get("tokenRiskLevel", 0)
-        if isinstance(risk_level, str):
-            risk_level = int(risk_level) if risk_level.isdigit() else 0
-
-        if "honeypot" in risk_codes:
-            vetoed = True
-            veto_reason = "蜜罐合约"
-        elif risk_level == 3:
-            vetoed = True
-            veto_reason = f"高危合约 level={risk_level}"
-
-        codes_str = ",".join(risk_codes) if risk_codes else "无"
-        log_lines.append(f"E5:level={risk_level},codes=[{codes_str}]{'→否决' if vetoed else '→通过'}")
-        detail["E5_risk_level"] = risk_level
-        detail["E5_risk_codes"] = risk_codes
-
-    if vetoed:
-        logger.info(" | ".join(log_lines))
-        return {"score": 0, "reason": veto_reason, "vetoed": True, "veto_reason": veto_reason, "detail": detail}
-
     # ── E1 弹药确认 ──
-    top10 = float(inflow.get("holdersTop10Percent", 0)) if inflow else 0
+    top10 = float(dyn.get("top10HoldersPercentage", 0))
     if top10 >= 97:
         e1 = 5
     elif top10 >= 93:
@@ -192,124 +257,161 @@ def get_chain_score(symbol: str, cfg: dict = None) -> dict:
     if e1 > 0:
         reasons.append(f"集中{top10:.0f}%+{e1}")
 
-    # ── E2 庄家动向 ──
+    # ── E2a 聪明钱持仓 ──
+    sm_holders = int(dyn.get("smartMoneyHolders", 0))
+    sm_pct = float(dyn.get("smartMoneyHoldingPercent", 0))
+    if sm_holders >= 5 and sm_pct > 0.1:
+        e2a = 3
+    elif sm_holders >= 1 and sm_pct <= 0.1:
+        e2a = 1
+    else:
+        e2a = 0
+    score += e2a
+    detail["E2a_sm_holders"] = sm_holders
+    detail["E2a_sm_pct"] = round(sm_pct, 4)
+    detail["E2a_score"] = e2a
+    log_lines.append(f"E2a:{sm_holders}个/{sm_pct:.3f}%={e2a:+d}")
+    if e2a > 0:
+        reasons.append(f"聪明钱持仓+{e2a}")
+
+    # ── E2b 币安净流向 ──
+    bn_net = float(dyn.get("volume24hNetBinance", 0))
+    if bn_net < -100000:
+        e2b = 2
+    elif bn_net < 0:
+        e2b = 1
+    elif bn_net <= 100000:
+        e2b = 0
+    else:
+        e2b = -2
+    score += e2b
+    detail["E2b_bn_net"] = round(bn_net, 2)
+    detail["E2b_score"] = e2b
+    bn_net_str = f"${bn_net/1000:,.0f}k"
+    log_lines.append(f"E2b:币安净流{bn_net_str}={e2b:+d}")
+    if e2b != 0:
+        reasons.append(f"币安流向{e2b:+d}")
+
+    # ── E2c 聪明钱流出否决（inflow端点交叉验证） ──
     if inflow:
         inf_val = float(inflow.get("inflow", 0))
         traders = int(inflow.get("traders", 0))
         period_used = inflow.get("_period", "?")
-
         if inf_val < 0 and traders >= 2:
             vetoed = True
             veto_reason = f"聪明钱流出${inf_val:,.0f} {traders}地址"
-            e2 = 0
-        elif inf_val < 0 and traders == 1:
-            e2 = -3
-        elif inf_val > 0 and traders >= 3:
-            e2 = 5
-        elif inf_val > 0 and traders >= 1:
-            e2 = 3
-        else:
-            e2 = 0
-
-        score += e2
-        detail["E2_inflow"] = round(inf_val, 2)
-        detail["E2_traders"] = traders
-        detail["E2_score"] = e2
-        tag = "→否决" if vetoed else f"={e2:+d}"
-        log_lines.append(f"E2:inflow={inf_val:,.0f},traders={traders}({period_used}){tag}")
-        if e2 > 0:
-            reasons.append(f"聪明钱+{e2}")
-        elif e2 < 0:
-            reasons.append(f"聪明钱{e2}")
+        detail["E2c_inflow"] = round(inf_val, 2)
+        detail["E2c_traders"] = traders
+        tag = "→否决" if vetoed else "通过"
+        log_lines.append(f"E2c:inflow={inf_val:,.0f},traders={traders}({period_used}){tag}")
+    else:
+        log_lines.append(f"E2c:inflow端点无数据=跳过")
 
     if vetoed:
+        detail["E_total"] = score
         logger.info(" | ".join(log_lines))
         return {"score": score, "reason": veto_reason, "vetoed": True, "veto_reason": veto_reason, "detail": detail}
 
-    # ── E3a 假地址力度 ──
-    holders = int(inflow.get("holders", 0)) if inflow else 0
-    if holders >= 50000:
+    # ── E3a 新钱包占比 ──
+    holders = int(dyn.get("holders", 0))
+    new_wallet = int(dyn.get("newWalletHolders", 0))
+    new_pct = (new_wallet / holders * 100) if holders > 0 else 0
+    if new_pct > 60:
         e3a = 5
-    elif holders >= 30000:
+    elif new_pct > 40:
         e3a = 4
-    elif holders >= 20000:
-        e3a = 3
+    elif new_pct > 20:
+        e3a = 2
     else:
         e3a = 0
     score += e3a
-    detail["E3a_holders"] = holders
+    detail["E3a_new_wallet_pct"] = round(new_pct, 1)
     detail["E3a_score"] = e3a
-    log_lines.append(f"E3a:{holders}={e3a:+d}")
+    log_lines.append(f"E3a:新钱包{new_pct:.1f}%={e3a:+d}")
     if e3a > 0:
-        reasons.append(f"持有{holders}+{e3a}")
+        reasons.append(f"新钱包{new_pct:.0f}%+{e3a}")
 
-    # ── E3b 5分钟增长 ──
-    e3b = 0
-    if ca in _holders_snapshot and holders > 0:
-        prev = _holders_snapshot[ca].get("holders", 0)
-        if holders > prev:
-            e3b = 3
-        log_lines.append(f"E3b:{prev}→{holders}={e3b:+d}")
+    # ── E3b 批量打包地址 ──
+    bundler = int(dyn.get("bundlerHolders", 0))
+    if bundler > 2000:
+        e3b = 3
+    elif bundler > 1000:
+        e3b = 2
+    elif bundler > 500:
+        e3b = 1
     else:
-        log_lines.append(f"E3b:首次=0")
-    if holders > 0:
-        _holders_snapshot[ca] = {"holders": holders, "ts": time.time()}
-        _save_holders_snapshot()
+        e3b = 0
     score += e3b
+    detail["E3b_bundler"] = bundler
     detail["E3b_score"] = e3b
+    log_lines.append(f"E3b:bundler={bundler}={e3b:+d}")
+    if e3b > 0:
+        reasons.append(f"bundler{bundler}+{e3b}")
 
-    # ── E3c KYC占比 ──
-    kyc = int(inflow.get("kycHolders") or 0) if inflow else 0
-    kyc_pct = (kyc / holders * 100) if holders > 0 else 100
-    if kyc_pct < 5:
-        e3c = 2
-    elif kyc_pct <= 20:
-        e3c = 1
+    # ── E3c holders门槛 ──
+    if holders >= 50000:
+        e3c = 5
+    elif holders >= 30000:
+        e3c = 4
+    elif holders >= 20000:
+        e3c = 3
     else:
         e3c = 0
     score += e3c
-    detail["E3c_kyc_pct"] = round(kyc_pct, 1)
+    detail["E3c_holders"] = holders
     detail["E3c_score"] = e3c
-    log_lines.append(f"E3c:KYC{kyc_pct:.1f}%={e3c:+d}")
+    log_lines.append(f"E3c:holders={holders}={e3c:+d}")
+    if e3c > 0:
+        reasons.append(f"持有{holders}+{e3c}")
 
-    # ── E3d 社交热度 ──
-    hype = social.get("hype", 0)
-    sentiment = social.get("sentiment", "")
-    if hype > 1_000_000 and sentiment == "Negative":
-        e3d = -3
-    elif hype < 100_000:
-        e3d = 2
-    elif hype < 500_000:
-        e3d = 1
+    # ── E3d 5分钟增长 ──
+    e3d = 0
+    if ca in _holders_snapshot and holders > 0:
+        prev = _holders_snapshot[ca].get("holders", 0)
+        if holders > prev:
+            e3d = 3
+        log_lines.append(f"E3d:{prev}→{holders}={e3d:+d}")
     else:
-        e3d = 0
+        log_lines.append(f"E3d:首次=0")
+    if holders > 0:
+        _holders_snapshot[ca] = {"holders": holders, "ts": time.time()}
+        _save_holders_snapshot()
     score += e3d
-    detail["E3d_hype"] = hype
-    detail["E3d_sentiment"] = sentiment
     detail["E3d_score"] = e3d
-    hype_str = f"{hype/10000:.0f}万" if hype >= 10000 else str(int(hype))
-    log_lines.append(f"E3d:{hype_str}/{sentiment or '无'}={e3d:+d}")
-    if e3d != 0:
-        reasons.append(f"热度{e3d:+d}")
 
-    # ── E4 买卖节奏 ──
-    buy_cnt = int(inflow.get("countBuy", 0)) if inflow else 0
-    sell_cnt = int(inflow.get("countSell", 0)) if inflow else 0
-    ratio = buy_cnt / sell_cnt if sell_cnt > 0 else 1.0
-    if ratio > 1.5:
-        e4 = 3
-    elif ratio > 1.2:
-        e4 = 2
-    elif ratio >= 0.9:
-        e4 = 0
+    # ── E4a 1h买卖比 ──
+    vol_1h_buy = float(dyn.get("volume1hBuy", 0))
+    vol_1h_sell = float(dyn.get("volume1hSell", 0))
+    ratio_1h = vol_1h_buy / vol_1h_sell if vol_1h_sell > 0 else 1.0
+    if ratio_1h > 1.5:
+        e4a = 3
+    elif ratio_1h > 1.2:
+        e4a = 2
+    elif ratio_1h >= 0.9:
+        e4a = 0
     else:
-        e4 = -2
-    score += e4
-    detail["E4_buy_sell_ratio"] = round(ratio, 2)
-    detail["E4_score"] = e4
-    log_lines.append(f"E4:{ratio:.2f}={e4:+d}")
-    if e4 != 0:
-        reasons.append(f"买卖{e4:+d}")
+        e4a = -2
+    score += e4a
+    detail["E4a_ratio_1h"] = round(ratio_1h, 2)
+    detail["E4a_score"] = e4a
+    log_lines.append(f"E4a:1h买卖{ratio_1h:.2f}={e4a:+d}")
+    if e4a != 0:
+        reasons.append(f"1h买卖{e4a:+d}")
+
+    # ── E4b 5m加速确认 ──
+    vol_5m_buy = float(dyn.get("volume5mBuy", 0))
+    vol_5m_sell = float(dyn.get("volume5mSell", 0))
+    ratio_5m = vol_5m_buy / vol_5m_sell if vol_5m_sell > 0 else 1.0
+    if ratio_5m > 2.0:
+        e4b = 2
+    else:
+        e4b = 0
+    score += e4b
+    detail["E4b_ratio_5m"] = round(ratio_5m, 2)
+    detail["E4b_score"] = e4b
+    log_lines.append(f"E4b:5m买卖{ratio_5m:.2f}={e4b:+d}")
+    if e4b > 0:
+        reasons.append(f"5m加速+{e4b}")
 
     reason = " | ".join(reasons) if reasons else "E因子无加分"
     detail["E_total"] = score
