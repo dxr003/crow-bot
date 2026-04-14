@@ -216,6 +216,32 @@ def send_status_card(state: dict):
     else:
         lines.append("\n👁 <b>当前无观察目标</b>")
 
+    # ── 持仓中 ──
+    positions = state.get("positions", {})
+    if positions:
+        lines.append(f"\n💰 <b>持仓中（{len(positions)}个）</b>")
+        lines.append("<blockquote>")
+        pos_symbols = list(positions.keys())
+        pos_prices = _fetch_prices(pos_symbols)
+        for sym, pos in positions.items():
+            entry_p = pos.get("entry_price", 0)
+            live_p = pos_prices.get(sym, 0)
+            leverage = 5
+            if live_p > 0 and entry_p > 0:
+                pnl = (live_p - entry_p) / entry_p * 100 * leverage
+            else:
+                pnl = 0
+            peak = pos.get("peak_pnl_pct", 0)
+            held_h = (now - pos.get("entry_time", now)) / 3600
+            lines.append(
+                f"<b>{_coin(sym)}</b> LONG {leverage}x  "
+                f"入场<code>{_fmt_price(entry_p)}</code>  "
+                f"{_pnl_icon(pnl)}<b>{pnl:+.1f}%</b>  "
+                f"峰<code>+{peak:.1f}%</code>  "
+                f"已持仓{held_h:.1f}h"
+            )
+        lines.append("</blockquote>")
+
     # ── 信号记录（含实时价格+浮盈） ──
     recent_signals = signals[-10:] if signals else []
     if recent_signals:
@@ -269,6 +295,34 @@ def send_status_card(state: dict):
             lines.append("</blockquote>")
     else:
         lines.append("\n✅ <b>暂无信号记录</b>")
+
+    # ── 历史结算 ──
+    signal_history = state.get("signal_history", [])
+    if signal_history:
+        success = [s for s in signal_history if s.get("status") == "success"]
+        failed  = [s for s in signal_history if s.get("status") == "failed"]
+        expired = [s for s in signal_history if s.get("status") == "expired"]
+
+        lines.append(f"\n📋 <b>信号结算（{len(signal_history)}个）</b>")
+        lines.append("<blockquote>")
+        for label, icon, group in [
+            ("成功", "✅", success),
+            ("失败", "❌", failed),
+            ("过期", "⏰", expired),
+        ]:
+            if group:
+                lines.append(f"{icon} <b>{label}（{len(group)}）</b>")
+                for s in group[-5:]:
+                    entry_p = s.get("entry_price", 0)
+                    exit_p = s.get("exit_price", 0)
+                    pnl = (exit_p - entry_p) / entry_p * 100 if entry_p > 0 else 0
+                    lines.append(
+                        f"  {_coin(s['symbol'])} "
+                        f"入<code>{_fmt_price(entry_p)}</code> → "
+                        f"出<code>{_fmt_price(exit_p)}</code> "
+                        f"<b>{pnl:+.1f}%</b>"
+                    )
+        lines.append("</blockquote>")
 
     # ── 统计 ──
     total_signals = stats.get("signals", 0)
@@ -375,13 +429,15 @@ def send_trade_report(signal: dict, buy_result: dict, analyze_result: dict):
         exec_icon = "✅"
         sl_price = buy_result.get("sl_price", "?")
         order_id = buy_result.get("order_id", "?")
-        trailing = buy_result.get("trailing")
-        trailing_status = "已挂载" if trailing else "挂载失败"
+        sl_ok = buy_result.get("sl_algo_id") not in (None, "", "?")
+        sl_tag = "✅已挂" if sl_ok else "⚠️挂载失败"
+        tp_ok = buy_result.get("tp_order_id") not in (None, "", "?")
+        trailing_status = "✅已挂载" if tp_ok else "⚠️挂载失败"
 
         exec_block = (
             f"订单ID: {order_id}\n"
-            f"止损价: {sl_price}（保证金-15%）\n"
-            f"移动止盈: {trailing_status}（40%激活/25%回撤）"
+            f"止损价: {sl_price}（保证金-30%）{sl_tag}\n"
+            f"移动止盈: {trailing_status}（50%激活/10%回撤 币安原生）"
         )
     elif status == "skipped":
         exec_icon = "⏭"
