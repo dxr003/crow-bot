@@ -25,8 +25,9 @@ Bot底座（shared/core.py v4.3）← 已封板，禁止修改
 | Bot | 目录 | 职责 |
 |-----|------|------|
 | 大猫 | `/root/damao/` | VPS运维、开发调试、日志排查 |
-| 玄玄（毛毛） | `/root/maomao/` | 交易执行、行情分析、陪乌鸦 |
-| 播报 | `/root/baobao/` | 单向播报，推送信号到群组 |
+| 玄玄 | `/root/maomao/` | 交易执行、行情分析、陪乌鸦 |
+| 天天 | `/root/tiantian/` | AI交易员，震天响的女友，操作币安2号账户 |
+| 贝贝 | `/root/baobao/` | 播报员，推送信号到群组 |
 
 ---
 
@@ -35,7 +36,9 @@ Bot底座（shared/core.py v4.3）← 已封板，禁止修改
 ```
 crow-bot/
 ├── shared/
-│   └── core.py              # 三Bot共用底座 v4.3（封板）
+│   ├── core.py              # 四Bot共用底座 v4.3（封板）
+│   ├── team.yaml            # 团队架构定义
+│   └── multi_account.py     # 双账户查询（币安1+币安2）
 ├── damao/
 │   └── bot.py               # 大猫薄壳
 ├── maomao/
@@ -56,8 +59,12 @@ crow-bot/
 │               ├── analyzer.py   # 两阶段分析+打分
 │               ├── notifier.py   # 推送模块
 │               └── config.yaml   # 全参数配置
+├── tiantian/
+│   ├── bot.py               # 天天薄壳
+│   ├── CLAUDE.md            # 天天身份（震天响女友）
+│   └── trader/              # 天天交易模块（币安2号账户）
 ├── baobao/
-│   └── bot.py               # 播报Bot
+│   └── bot.py               # 贝贝播报Bot
 ├── short_attack/            # 做空阻击系统（封板）
 │   ├── main.py              # 扫描+信号+自动交易
 │   ├── state.py             # 状态机
@@ -229,7 +236,7 @@ systemctl start bull-sniper
 - **顾问** — 架构设计、代码编写、文档规划
 - **大猫** — VPS部署运维，通过TG操作
 - **玄玄** — 交易执行，乌鸦的女儿
-- **天天** — AI交易员，贾维斯的女友
-- **贾维斯** — 人类交易员
+- **天天** — AI交易员，震天响的女友
+- **震天响** — 人类交易员
 - **贝贝** — 播报员，乌鸦家的狗狗
 
