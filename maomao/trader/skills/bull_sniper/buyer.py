@@ -294,11 +294,23 @@ def _execute_auto(symbol: str, price: float, analyze_result: dict, cfg: dict) ->
         f"{leverage}x {position_usd}U 订单:{order_id}"
     )
 
-    # ── 9. 挂止��（保证金亏损30%） ──
+    # ── 9. 读实际成交均价（止损/止盈基准） ──
     time.sleep(1)
+    actual_entry = mark
+    try:
+        pos_list = c.get_position_risk(symbol=symbol)
+        for _p in pos_list:
+            if float(_p.get("positionAmt", 0)) > 0:
+                actual_entry = float(_p["entryPrice"])
+                break
+        logger.info(f"[buyer] {symbol} 实际入场价:{actual_entry} (mark:{mark})")
+    except Exception as _e:
+        logger.warning(f"[buyer] {symbol} 读入场价失败,用mark:{mark}: {_e}")
+
+    # ── 10. 挂止损（保证金亏损30%，基于实际入场价） ──
     sl_margin_pct = 30
     sl_price_drop = sl_margin_pct / leverage / 100
-    sl_price = _fix_price(symbol, mark * (1 - sl_price_drop))
+    sl_price = _fix_price(symbol, actual_entry * (1 - sl_price_drop))
 
     sl_order_id = None
     try:
@@ -319,10 +331,10 @@ def _execute_auto(symbol: str, price: float, analyze_result: dict, cfg: dict) ->
     except Exception as e:
         logger.warning(f"[buyer] {symbol} 止损挂单异常: {e}")
 
-    # ── 10. 币安原生移动止盈（/fapi/v1/order + quantity） ──
+    # ── 11. 币安原生移动止盈（/fapi/v1/order + quantity，基于实际入场价） ──
     trailing_cfg = cfg.get("trailing", {})
     activation_pct = trailing_cfg.get("activation_pct", 50)
-    activate_price = _fix_price(symbol, mark * (1 + activation_pct / 100))
+    activate_price = _fix_price(symbol, actual_entry * (1 + activation_pct / 100))
     callback_rate = 10  # 币安原生最大回撤10%
 
     trailing_order_id = None
@@ -351,7 +363,7 @@ def _execute_auto(symbol: str, price: float, analyze_result: dict, cfg: dict) ->
     if cfg.get("custom_trailing_enabled", False):
         pullback_pct = trailing_cfg.get("pullback_trigger", 25)
         try:
-            _register_trailing(symbol, mark, qty, activation_pct, pullback_pct)
+            _register_trailing(symbol, actual_entry, qty, activation_pct, pullback_pct)
             logger.info(f"[buyer] {symbol} 自建监控已注册（观察模式）")
         except Exception as e:
             logger.warning(f"[buyer] {symbol} 自建监控注册失败: {e}")
@@ -359,7 +371,7 @@ def _execute_auto(symbol: str, price: float, analyze_result: dict, cfg: dict) ->
     return {
         "status": "executed",
         "reason": (
-            f"[币安2] 开多 {symbol} {qty} @ ~{mark} "
+            f"[币安2] 开多 {symbol} {qty} @ {actual_entry} "
             f"{leverage}x {position_usd}U 止损:{sl_price} "
             f"移动止盈:币安原生+{activation_pct}%激活/{callback_rate}%回撤"
         ),

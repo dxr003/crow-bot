@@ -129,15 +129,33 @@ def main():
         upnl = bal.get("futures_upnl", 0)
         lines.append(
             f"<b>【{name}】</b> "
-            f"余额 <code>{futures:.2f}U</code>  "
+            f"合约 <code>{futures:.2f}U</code>  "
             f"可用 <code>{avail:.2f}U</code>  "
             f"浮盈 <code>{upnl:+.2f}U</code>"
         )
+        _stable = {"USDT", "USDC", "FDUSD", "BUSD", "DAI", "TUSD"}
+        spot_u = sum(v for a, v in bal.get("spot", {}).items() if a in _stable and v > 0.01)
+        fund_u = sum(v for a, v in bal.get("funding", {}).items() if a in _stable and v > 0.01)
+        if spot_u > 1:
+            lines.append(f"  💰现货 <code>{spot_u:.2f}U</code>")
+        if fund_u > 1:
+            lines.append(f"  💰资金 <code>{fund_u:.2f}U</code>")
 
-    total_futures = sum(b.get("futures", 0) for b in balances if "error" not in b)
-    total_upnl = sum(b.get("futures_upnl", 0) for b in balances if "error" not in b)
-    if len([b for b in balances if "error" not in b]) > 1:
-        lines.append(f"📊 <b>合计</b>  {total_futures:.2f}U  浮盈 {total_upnl:+.2f}U")
+    _stable = {"USDT", "USDC", "FDUSD", "BUSD", "DAI", "TUSD"}
+    ok_bals = [b for b in balances if "error" not in b]
+    total_futures = sum(b.get("futures", 0) for b in ok_bals)
+    total_spot = sum(
+        sum(v for a, v in b.get("spot", {}).items() if a in _stable)
+        for b in ok_bals
+    )
+    total_fund = sum(
+        sum(v for a, v in b.get("funding", {}).items() if a in _stable)
+        for b in ok_bals
+    )
+    total_upnl = sum(b.get("futures_upnl", 0) for b in ok_bals)
+    total_all = total_futures + total_spot + total_fund
+    if len(ok_bals) > 1:
+        lines.append(f"📊 <b>合计</b>  {total_all:.2f}U  浮盈 {total_upnl:+.2f}U")
 
     trailing = trailing_status()
     if trailing != "当前无移动止盈追踪":

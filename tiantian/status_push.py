@@ -33,7 +33,7 @@ def _send(chat_id: str, text: str):
 
 
 def main():
-    from trader.exchange import get_positions, get_mark_price, get_balance
+    from trader.exchange import get_positions, get_mark_price, get_all_balances
 
     positions = get_positions()
     lines = [f"📋 <b>币安2 持仓快照 {time.strftime('%H:%M')}</b>\n"]
@@ -66,8 +66,15 @@ def main():
                 lines.append(f"{symbol.replace('USDT', '')} {side}  入场:{entry:.4f}  浮盈:{upnl:+.2f}U")
 
     try:
-        bal = get_balance()
-        lines.append(f"\n💰 余额:{bal['total']:.2f}U  可用:{bal['available']:.2f}U  浮盈:{bal['upnl']:+.2f}U")
+        bal = get_all_balances()
+        lines.append(f"\n💰 合约:{bal['futures']:.2f}U  可用:{bal['futures_avail']:.2f}U  浮盈:{bal['futures_upnl']:+.2f}U")
+        _stable = {"USDT", "USDC", "FDUSD", "BUSD", "DAI", "TUSD"}
+        spot_u = sum(v for a, v in bal.get("spot", {}).items() if a in _stable and v > 0.01)
+        fund_u = sum(v for a, v in bal.get("funding", {}).items() if a in _stable and v > 0.01)
+        if spot_u > 1:
+            lines.append(f"💰 现货: {spot_u:.2f}U")
+        if fund_u > 1:
+            lines.append(f"💰 资金: {fund_u:.2f}U")
     except Exception:
         pass
 
