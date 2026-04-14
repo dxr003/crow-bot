@@ -663,6 +663,21 @@ def scan_once(state: dict, tickers: list) -> dict:
 
         # ── 信号触发 ──
         if analyze_result["action"] == "signal_scored":
+            # 24h涨幅过滤（不达标直接跳过，不记录信号、不推送、不显示）
+            try:
+                _ticker = requests.get(
+                    f"{FAPI_BASE}/fapi/v1/ticker/24hr",
+                    params={"symbol": symbol}, timeout=5,
+                ).json()
+                _pct_24h = float(_ticker.get("priceChangePercent", 0))
+                _max_24h = CFG.get("max_24h_change_pct", 30)
+                if _pct_24h > _max_24h:
+                    logger.info(f"[过滤] {symbol} 评分{analyze_result.get('score')}分但24h已涨{_pct_24h:.1f}%>{_max_24h}%，不记录不推送")
+                    continue
+            except Exception as _e:
+                logger.warning(f"[24h检查异常] {symbol}: {_e}，保守跳过")
+                continue
+
             signal = {
                 "symbol":       symbol,
                 "time":         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -691,26 +706,11 @@ def scan_once(state: dict, tickers: list) -> dict:
                 f"原因:{signal['reason']} score={signal['score']}"
             )
 
-            # 推送通知
+            # 推送信号通知
             try:
                 send_signal(signal)
             except Exception as e:
                 logger.warning(f"信号推送失败 {symbol}: {e}")
-
-            # 买入前二次检查24h涨幅（双保险）
-            try:
-                _ticker = requests.get(
-                    f"{FAPI_BASE}/fapi/v1/ticker/24hr",
-                    params={"symbol": symbol}, timeout=5,
-                ).json()
-                _pct_24h = float(_ticker.get("priceChangePercent", 0))
-                _max_24h = CFG.get("max_24h_change_pct", 30)
-                if _pct_24h > _max_24h:
-                    logger.info(f"[否决买入] {symbol} 评分{analyze_result.get('score')}分但24h已涨{_pct_24h:.1f}%>{_max_24h}%，只推送不下单")
-                    continue
-            except Exception as _e:
-                logger.warning(f"[买入前24h检查异常] {symbol}: {_e}，保守不买")
-                continue
 
             # 执行买入（下架反拉只推送不下单，SETTLING无法开仓）
             if analyze_result.get("reason") == "下架反拉":
