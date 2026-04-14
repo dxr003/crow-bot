@@ -55,6 +55,13 @@ bull_sniper:
     activation_pct: 90         # 浮盈≥90%触发（v3.1）
     profit_ratio: 0.6          # 加仓60%利润（v3.1）
 
+  # ── E因子（捉妖） ──
+  e_factor:
+    enabled: true
+    api_timeout: 5
+    holders_snapshot: true
+    log_detail: true
+
   # ── 风控 ──
   max_concurrent_positions: 10
   daily_loss_limit_usd: 5000

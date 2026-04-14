@@ -511,30 +511,20 @@ def score_signal(symbol: str, gain_pct: float, market_data: dict, cfg: dict) -> 
         breakdown[f"D.费率{direction}{funding*100:.3f}%"] = pts
         score += pts
 
-    # ── E. 社交+聪明钱（读缓存） ──
-    try:
-        from news_score import get_social_score, get_smart_money_score
-        ss = get_social_score(symbol)
-        if ss["score"] > 0:
-            breakdown[f"E.{ss['reason']}"] = ss["score"]
-            score += ss["score"]
-
-        sm = get_smart_money_score(symbol)
-        if sm["score"] != 0:
-            breakdown[f"E.{sm['reason']}"] = sm["score"]
-            score += sm["score"]
-    except Exception as e:
-        logger.debug(f"[E因子] {symbol} 异常: {e}")
-
-    # ── F. 链上转账（读缓存） ──
+    # ── E. 捉妖因子（链上数据，含否决） ──
     try:
         from chain_score import get_chain_score
-        cs = get_chain_score(symbol)
+        cs = get_chain_score(symbol, cfg)
+        if cs.get("vetoed"):
+            return {
+                "score": score, "breakdown": breakdown,
+                "vetoed": True, "veto_reason": f"E因子否决:{cs['veto_reason']}",
+            }
         if cs["score"] != 0:
-            breakdown[f"F.{cs['reason']}"] = cs["score"]
+            breakdown[f"E.{cs['reason']}"] = cs["score"]
             score += cs["score"]
     except Exception as e:
-        logger.debug(f"[F因子] {symbol} 异常: {e}")
+        logger.warning(f"[E因子] {symbol} 跳过: {e}")
 
     # ── G. 公告因子（读缓存） ──
     try:
@@ -548,7 +538,7 @@ def score_signal(symbol: str, gain_pct: float, market_data: dict, cfg: dict) -> 
             breakdown["G.下架公告"] = pts
             score += pts
     except Exception as e:
-        logger.debug(f"[G因子] {symbol} 异常: {e}")
+        logger.warning(f"[G因子] {symbol} 跳过: {e}")
 
     return {
         "score": score, "breakdown": breakdown,
@@ -579,6 +569,14 @@ def analyze(symbol: str, gain_pct: float, market_data: dict, cfg: Optional[dict]
     signal_threshold = analyzer_cfg.get("signal_threshold", 38)
 
     result = score_signal(symbol, gain_pct, market_data, cfg)
+
+    if result.get("vetoed"):
+        return {
+            "action": "hold",
+            "reason": result.get("veto_reason", "E因子否决"),
+            "score": result["score"],
+            "breakdown": result["breakdown"],
+        }
 
     if result["score"] >= signal_threshold:
         ai_cfg = _get_ai_config(cfg)
