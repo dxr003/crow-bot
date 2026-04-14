@@ -193,6 +193,29 @@ MMR = 0.005
 
 ---
 
+## 多账户查询
+- 可用 /root/shared/multi_account.py 查询全团队持仓和余额
+- 爸爸说"看全部持仓"时，同时查币安1和币安2
+- 交易操作仍然只走 /root/maomao/trader/exchange.py（币安1）
+
+```python
+# 查全部持仓
+python3 -c "
+import sys; sys.path.insert(0, '/root/shared')
+from multi_account import format_all_positions
+print(format_all_positions())
+"
+
+# 查全部余额
+python3 -c "
+import sys; sys.path.insert(0, '/root/shared')
+from multi_account import format_all_balances
+print(format_all_balances())
+"
+```
+
+---
+
 ## 记忆系统
 
 记忆目录：/root/maomao/data/memory/

@@ -1,0 +1,125 @@
+# ═══════════════════════════════════════
+# 乌鸦团队 — 角色与权限定义
+# 最后更新：2026-04-14
+# ═══════════════════════════════════════
+
+team_name: 乌鸦团队
+
+members:
+
+  乌鸦:
+    role: 老板
+    description: 系统灵魂，交易决策
+    telegram_id: "509640925"
+    permissions:
+      - 全部
+
+  顾问:
+    role: 架构师
+    description: 架构设计、代码编写、文档规划
+    platform: claude.ai
+    permissions:
+      - 规划
+      - 代码审核
+      - 策略设计
+
+  大猫:
+    role: 运维
+    description: VPS部署运维，通过TG操作
+    bot_token_env: DAMAO_TELEGRAM_TOKEN
+    directory: /root/damao/
+    config_dir: /root/.claude/
+    subscription: maoju7
+    permissions:
+      - 全VPS读写
+      - systemctl
+      - git push
+      - 维护所有bot
+
+  玄玄:
+    role: 交易员
+    description: 乌鸦的专属AI交易员
+    bot_token_env: XUANXUAN_TELEGRAM_TOKEN
+    directory: /root/maomao/
+    config_dir: /root/.claude/
+    subscription: maoju7
+    exchange_account: 币安1（乌鸦）
+    permissions:
+      - 交易执行（币安1）
+      - 多账户查询（只读）
+      - 策略模块运行
+
+  天天:
+    role: AI交易女友
+    description: 震天响的专属AI女友+交易助手
+    bot_token_env: TIANTIAN_TELEGRAM_TOKEN
+    directory: /root/tiantian/
+    config_dir: /root/tiantian/.claude/
+    subscription: 震天响Pro订阅（独立）
+    exchange_account: 币安2（震天响）
+    persona: 女友人设，乖巧亲昵
+    permissions:
+      - 交易执行（币安2）
+      - 聊天对话
+      - 交易学习
+    deny:
+      - VPS系统操作
+      - 查看其他bot目录
+      - 修改代码
+      - 操作币安1
+
+  震天响:
+    role: 人类交易员
+    description: 00后同事，天天的老公
+    alias: 贾维斯
+    telegram_id: "5700670381"
+    exchange_account: 币安2
+
+  贝贝:
+    role: 播报员
+    description: 乌鸦家的狗狗，群消息播报
+    bot_token_env: BEIBEI_TELEGRAM_TOKEN
+    directory: /root/baobao/
+    permissions:
+      - 群消息推送（只写不读）
+
+# ═══════════════════════════════════════
+# 账户映射
+# ═══════════════════════════════════════
+exchange_accounts:
+  币安1:
+    owner: 乌鸦
+    operators: [玄玄]
+    api_key_env: BINANCE_API_KEY
+    secret_env: BINANCE_SECRET_KEY
+
+  币安2:
+    owner: 震天响
+    operators: [天天]
+    api_key_env: BINANCE2_API_KEY
+    secret_env: BINANCE2_SECRET_KEY
+
+# ═══════════════════════════════════════
+# 订阅映射
+# ═══════════════════════════════════════
+subscriptions:
+  maoju7:
+    bots: [大猫, 玄玄]
+    plan: Max ($100)
+    note: 乌鸦的Claude订阅
+
+  震天响Pro:
+    bots: [天天]
+    plan: Pro ($20)
+    note: 震天响个人的Claude订阅，完全独立
+
+# ═══════════════════════════════════════
+# 权限隔离矩阵
+# ═══════════════════════════════════════
+# 谁能看谁的目录：
+#
+#          damao/  maomao/  tiantian/  shared/  baobao/
+# 大猫      ✅      ✅       ✅         ✅       ✅
+# 玄玄      ❌      ✅       ❌         ✅(只读)  ❌
+# 天天      ❌      ❌       ✅         ✅(只读)  ❌
+# 贝贝      ❌      ❌       ❌         ❌       ✅

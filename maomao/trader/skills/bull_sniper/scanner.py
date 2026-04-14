@@ -8,6 +8,7 @@ bull_sniper scanner.py — 做多阻击扫描器 v3.1
   第二层（同时满足）：OI≥500万U
   观察池：零成本持续评分 → ≥38分推信号+AI决策
 """
+import datetime as _dt
 import json
 import logging
 import time
@@ -355,7 +356,7 @@ def passes_filter(symbol: str, ticker: dict) -> tuple[bool, str]:
 # 启动时黑名单（任意时段>15%排除，2小时后过期可重新进池）
 _startup_blacklist: dict = {}  # {symbol: expire_ts}
 _startup_done: bool = False
-_BLACKLIST_TTL = 7200  # 2小时
+_BLACKLIST_TTL = 1800  # 30分钟（7200→1800）
 
 
 def build_startup_blacklist(tickers: list):
@@ -402,7 +403,9 @@ def load_state() -> dict:
             pass
     return {
         "watchpool":  {},   # {symbol: {entered_at, entry_price, peak_price, cur_price, ...}}
-        "signals":    [],   # 已触发信号记录
+        "signals":    [],   # 活跃信号（待结算）
+        "signal_history": [],  # 已结算信号（成功/失败/过期）
+        "positions":  {},   # {symbol: {entry_price, entry_time, order_id, score, ...}}
         "cooldowns":  {},   # {symbol: expire_ts}
         "filter_log": [],   # 过滤日志，滚动50条
         "stats": {"scans": 0, "pool_entries": 0, "signals": 0},
@@ -411,6 +414,27 @@ def load_state() -> dict:
 
 def save_state(state: dict):
     STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2))
+
+
+SCORE_HISTORY = Path(__file__).parent / "data" / "score_history.jsonl"
+
+
+def _append_score_history(symbol: str, result: dict, market_data: dict):
+    SCORE_HISTORY.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "symbol": symbol,
+        "action": result.get("action"),
+        "score": result.get("score"),
+        "breakdown": result.get("breakdown", {}),
+        "change_1h": market_data.get("change_1h"),
+        "change_5m": market_data.get("change_5m"),
+        "change_1m": market_data.get("change_1m"),
+        "vol_ratio": market_data.get("vol_ratio"),
+        "oi_usdt": market_data.get("oi_usdt"),
+    }
+    with open(SCORE_HISTORY, "a") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 # ══════════════════════════════════════════
@@ -439,6 +463,10 @@ def scan_once(state: dict, tickers: list) -> dict:
         symbol = t["symbol"]
 
         if symbol in state["watchpool"] or symbol in state["cooldowns"]:
+            continue
+        if symbol in state.get("positions", {}):
+            continue
+        if any(s["symbol"] == symbol for s in state.get("signals", [])):
             continue
 
         if symbol in _startup_blacklist and _startup_blacklist[symbol] > now:
@@ -473,12 +501,27 @@ def scan_once(state: dict, tickers: list) -> dict:
 
         triggered = (c1m > burst_1m_th or c3m > burst_3m_th
                      or c5m > burst_5m_th or c15m > burst_15m_th)
+
+        # 第五条：阶梯型慢涨（15m>6%且量比>1.5x）
+        if not triggered and c15m > CFG.get("pool_stair_15m", 6):
+            vr = calc_volume_ratio(symbol)
+            if vr > CFG.get("pool_stair_vol_ratio", 1.5):
+                triggered = True
+                logger.info(f"[进池] {symbol} 阶梯触发: 15m={c15m:.1f}% 量比={vr:.1f}x")
+
         if not triggered:
             continue
 
         oi = get_oi_usdt(symbol)
         if oi < min_oi:
             logger.debug(f"[进池过滤] {symbol} OI {oi/1e6:.1f}M < {min_oi/1e6:.0f}M")
+            continue
+
+        # 24h已涨过滤（防拉完回抽进池）
+        pct_24h = t.get("change_pct", 0)
+        max_24h = CFG.get("max_24h_change_pct", 30)
+        if pct_24h > max_24h:
+            logger.info(f"[否决进池] {symbol} 24h已涨{pct_24h:.1f}% > {max_24h}%，跳过")
             continue
 
         max_pool = CFG.get("watchpool_max", 30)
@@ -490,6 +533,17 @@ def scan_once(state: dict, tickers: list) -> dict:
 
         change_1h = calc_1h_change(symbol)
         ath_data = _load_ath(symbol)
+
+        # 锁定进池时的量比基准（改动4）
+        base_avg_vol = 0
+        try:
+            _klines = get_klines_1m(symbol, 60)
+            if len(_klines) >= 10:
+                _older = [float(k[5]) for k in _klines[:-5]]
+                base_avg_vol = sum(_older) / len(_older) * 5 if _older else 0
+        except Exception:
+            pass
+
         state["watchpool"][symbol] = {
             "entered_at":    now,
             "entry_price":   t["price"],
@@ -502,13 +556,17 @@ def scan_once(state: dict, tickers: list) -> dict:
             "analyzed":      False,
             "last_analyze_price": 0,
             "last_analyze_time":  0,
+            "base_avg_vol":  base_avg_vol,
         }
         state["stats"]["pool_entries"] += 1
         events["new_pool"].append(symbol)
+
+        get_oi_change(symbol)  # 预热OI缓存（改动3）
+
         trigger_info = f"1m={c1m:.1f}% 3m={c3m:.1f}% 5m={c5m:.1f}% 15m={c15m:.1f}%"
         logger.info(
             f"[进池] {symbol} {trigger_info} OI:{oi/1e6:.1f}M "
-            f"1h+{change_1h:.1f}% 价格:{t['price']}"
+            f"1h+{change_1h:.1f}% 价格:{t['price']} 基准量:{base_avg_vol:.0f}"
         )
 
     # ── 4. 第三层：观察池管理（零成本观察，定期打分） ──
@@ -570,6 +628,16 @@ def scan_once(state: dict, tickers: list) -> dict:
         market_data["change_5m"] = change_5m
         market_data["change_1h"] = change_1h
 
+        # 用进池时锁定的量比基准替代滚动基准（改动4b）
+        base_avg_vol = pool.get("base_avg_vol", 0)
+        if base_avg_vol > 0:
+            try:
+                _recent = get_klines_1m(symbol, 5)
+                _rvol = sum(float(k[5]) for k in _recent)
+                market_data["volume_ratio"] = round(_rvol / base_avg_vol, 2)
+            except Exception:
+                pass
+
         logger.info(f"[分析] {symbol} 池内+{gain_since_entry:.1f}% 1h+{change_1h:.1f}% 5m+{change_5m:.1f}% 1m+{change_1m:.1f}%")
         analyze_result = analyze(symbol, gain_since_entry, market_data, cfg=CFG)
         if analyze_result:
@@ -578,11 +646,20 @@ def scan_once(state: dict, tickers: list) -> dict:
         if analyze_result is None:
             continue
 
+        breakdown = analyze_result.get("breakdown", {})
+        bd_str = " ".join(f"{k}={v}" for k, v in breakdown.items()) if breakdown else ""
         logger.info(
             f"[分析结果] {symbol}: {analyze_result['action']} "
             f"{analyze_result.get('reason', '')} "
-            f"score={analyze_result.get('score', '-')}"
+            f"score={analyze_result.get('score', '-')} "
+            f"breakdown=[{bd_str}]"
         )
+
+        # ── 评分日志持久化（不受日志轮转影响） ──
+        try:
+            _append_score_history(symbol, analyze_result, market_data)
+        except Exception:
+            pass
 
         # ── 信号触发 ──
         if analyze_result["action"] == "signal_scored":
@@ -620,6 +697,21 @@ def scan_once(state: dict, tickers: list) -> dict:
             except Exception as e:
                 logger.warning(f"信号推送失败 {symbol}: {e}")
 
+            # 买入前二次检查24h涨幅（双保险）
+            try:
+                _ticker = requests.get(
+                    f"{FAPI_BASE}/fapi/v1/ticker/24hr",
+                    params={"symbol": symbol}, timeout=5,
+                ).json()
+                _pct_24h = float(_ticker.get("priceChangePercent", 0))
+                _max_24h = CFG.get("max_24h_change_pct", 30)
+                if _pct_24h > _max_24h:
+                    logger.info(f"[否决买入] {symbol} 评分{analyze_result.get('score')}分但24h已涨{_pct_24h:.1f}%>{_max_24h}%，只推送不下单")
+                    continue
+            except Exception as _e:
+                logger.warning(f"[买入前24h检查异常] {symbol}: {_e}，保守不买")
+                continue
+
             # 执行买入（下架反拉只推送不下单，SETTLING无法开仓）
             if analyze_result.get("reason") == "下架反拉":
                 logger.info(f"[买入] {symbol} 下架反拉信号，只推送不下单")
@@ -634,6 +726,22 @@ def scan_once(state: dict, tickers: list) -> dict:
                     logger.info(
                         f"[买入] {symbol}: {buy_result['status']} — {buy_result['reason']}"
                     )
+
+                    # 买入成功 → 写入positions
+                    if buy_result["status"] == "executed":
+                        state.setdefault("positions", {})[symbol] = {
+                            "entry_price": cur_price,
+                            "entry_time": now,
+                            "order_id": buy_result.get("order_id"),
+                            "score": analyze_result.get("score"),
+                            "breakdown": analyze_result.get("breakdown", {}),
+                            "status": "holding",
+                            "peak_pnl_pct": 0,
+                            "sl_algo_id": buy_result.get("sl_algo_id"),
+                            "tp_algo_id": buy_result.get("tp_order_id"),
+                        }
+                        logger.info(f"[仓位] {symbol} 已录入positions")
+
                     # 推送成交详情报告给乌鸦
                     try:
                         send_trade_report(signal, buy_result, analyze_result)
@@ -663,6 +771,70 @@ def scan_once(state: dict, tickers: list) -> dict:
 
 
 # ══════════════════════════════════════════
+# 信号生命周期结算
+# ══════════════════════════════════════════
+
+def _settle_signals(state: dict, now: float):
+    """
+    遍历活跃信号，按条件结算到 signal_history：
+    - 涨幅 ≥ 50% → success
+    - 跌幅 ≥ 30%（从入场价回撤） → failed
+    - 超过 24h 未触发以上条件 → expired
+    """
+    if not state.get("signals"):
+        return
+
+    symbols = [s["symbol"] for s in state["signals"]]
+    live_prices = {}
+    try:
+        resp = requests.get("https://fapi.binance.com/fapi/v1/ticker/price", timeout=8)
+        resp.raise_for_status()
+        live_prices = {t["symbol"]: float(t["price"]) for t in resp.json() if t["symbol"] in symbols}
+    except Exception:
+        return
+
+    remaining = []
+    for sig in state["signals"]:
+        symbol = sig["symbol"]
+        entry_price = sig.get("entry_price", 0)
+        live_price = live_prices.get(symbol, 0)
+        sig_time = sig.get("time", "")
+
+        try:
+            sig_ts = datetime.strptime(sig_time, "%Y-%m-%d %H:%M:%S").timestamp()
+        except (ValueError, TypeError):
+            sig_ts = now
+
+        elapsed_h = (now - sig_ts) / 3600
+        settled = None
+
+        if entry_price > 0 and live_price > 0:
+            pnl_pct = (live_price - entry_price) / entry_price * 100
+            if pnl_pct >= 50:
+                settled = "success"
+            elif pnl_pct <= -30:
+                settled = "failed"
+
+        if not settled and elapsed_h >= 24:
+            settled = "expired"
+
+        if settled:
+            sig["status"] = settled
+            sig["settled_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            sig["exit_price"] = live_price
+            state.setdefault("signal_history", []).append(sig)
+            if len(state["signal_history"]) > 50:
+                state["signal_history"] = state["signal_history"][-50:]
+            logger.info(f"[结算] {symbol} → {settled} 入场:{entry_price} 现价:{live_price}")
+        else:
+            remaining.append(sig)
+
+    state["signals"] = remaining
+    if len(remaining) < len(symbols):
+        save_state(state)
+
+
+# ══════════════════════════════════════════
 # 主循环
 # ══════════════════════════════════════════
 
@@ -671,12 +843,35 @@ def run():
     state = load_state()
     last_full_scan    = 0
     last_health_report = 0
+    last_card_hour     = -1
 
     while True:
         now = time.time()
+        current_hour = _dt.datetime.now().hour
 
-        # 每小时整点：群组状态卡片 + 私信健康报告（60秒窗口防漏）
-        if int(now) % 3600 < 60 and now - last_health_report > 300:
+        # ── 信号生命周期结算 ──
+        _settle_signals(state, now)
+
+        # ── 移动止盈检查（币安2仓位） ──
+        try:
+            from bull_trailing import check_all as trailing_check
+            tp_triggered = trailing_check()
+            if tp_triggered:
+                for t in tp_triggered:
+                    logger.info(f"[移动止盈] {t['symbol']} 触发 浮盈+{t['pnl_pct']}% 回撤-{t['drawdown']}%")
+        except Exception as e:
+            logger.warning(f"[移动止盈] 检查异常: {e}")
+
+        # ── 仓位生命周期管理 ──
+        try:
+            from bull_trailing import check_positions
+            if check_positions(state, CFG):
+                save_state(state)
+        except Exception as e:
+            logger.warning(f"[仓位管理] 检查异常: {e}")
+
+        # 每小时整点：群组状态卡片 + 私信健康报告（按小时判断，不依赖扫描频率）
+        if current_hour != last_card_hour:
             try:
                 send_status_card(state)
                 logger.info("[状态卡片] 已推群组")
@@ -688,6 +883,7 @@ def run():
                 state.pop("_oi_cache", None)
                 state["stats"] = {"scans": 0, "pool_entries": 0, "signals": 0}
                 last_health_report = now
+                last_card_hour = current_hour
                 logger.info("[健康报告] 已推送")
             except Exception as e:
                 logger.warning(f"健康报告推送失败: {e}")

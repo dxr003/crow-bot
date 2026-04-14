@@ -2,17 +2,18 @@ bull_sniper:
   enabled: true
   mode: auto                 # auto / alert / off
 
-  # 扫描（60分钟一轮，节能模式）
-  scan_interval_sec: 3600
+  # 扫描（30秒一轮，高频捕捉爆发）
+  scan_interval_sec: 30
   watchpool_max: 30
   watchpool_refresh_sec: 60
 
   # ── 第一步：基础过滤 ──
-  startup_max_change_pct: 15  # 启动时任意时段>15%排除（仅启动时生效）
+  startup_max_change_pct: 50  # 启动时任意时段>50%排除（15→50）
   min_listing_days: 1
   ath_exempt_days: 180
   exclude_daily_vol_below: 20000000
   min_drop_from_ath: 60
+  max_24h_change_pct: 30       # 24h涨>30%不进池+不买入（防拉完回抽）
 
   # ── 进池条件 ──
   # 第一层：瞬时触发（任意一条）
@@ -20,12 +21,15 @@ bull_sniper:
   pool_burst_3m: 8            # 3m涨>8%
   pool_burst_5m: 7            # 5m涨>7%
   pool_burst_15m: 12          # 15m涨>12%
+  # 第五条：阶梯型慢涨
+  pool_stair_15m: 6            # 15m涨>6%
+  pool_stair_vol_ratio: 1.5    # 量比>1.5x
   # 第二层（同时满足）
   min_oi_usdt: 5000000        # OI≥500万U
 
   # ── AI判断 ──
   ai:
-    enabled: true
+    enabled: false
     provider: anthropic
     model: claude-haiku-4-5-20251001
     api_key_env: ANTHROPIC_API_KEY
@@ -40,6 +44,7 @@ bull_sniper:
   min_available_balance: 150   # 可用余额<150U跳过
 
   # ── 移动止盈 ──
+  custom_trailing_enabled: false  # 自建监控开关（true=注册观察，false=纯币安原生）
   trailing:
     activation_pct: 50         # 浮盈≥50%激活（v3.1）
     pullback_trigger: 25
@@ -55,10 +60,12 @@ bull_sniper:
   daily_loss_limit_usd: 5000
   btc_circuit_breaker_pct: 2
 
-  # ── 冷却（v3.1：统一48h） ──
+  # ── 冷却 ──
   cooldown_after_tp_hours: 48
   cooldown_after_sl_hours: 48
+  cooldown_after_timeout_hours: 24  # 超时平仓冷却
   cooldown_after_veto_min: 30
+  position_timeout_hours: 24       # 持仓超时自动平仓
 
   # ── 分析器 ──
   analyzer:
@@ -68,17 +75,17 @@ bull_sniper:
   # ── 评分参数 v3.1 ──
   scoring:
     # A. 价格动能（互斥取最高）
-    burst_1m_threshold: 12     # 1m涨>12%
+    burst_1m_threshold: 8      # 1m涨>8%（12→8）
     burst_1m: 8
-    burst_3m_threshold: 8      # 3m涨>8%
+    burst_3m_threshold: 6      # 3m涨>6%（8→6）
     burst_3m: 7
-    burst_5m_threshold: 7      # 5m涨>7%
+    burst_5m_threshold: 5      # 5m涨>5%（7→5）
     burst_5m: 6
 
     # B. 1h趋势（互斥取最高，越早越高）
-    gain_5_10: 10              # 初期
-    gain_10_15: 8              # 中期
-    gain_15_25: 7              # 强势
+    gain_5_10: 7               # 初期（10→7）
+    gain_10_15: 10             # 中期（8→10）
+    gain_15_25: 8              # 强势（7→8）
     gain_25_40: 5              # 过热
 
     # C. 量比（互斥取最高）
