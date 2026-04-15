@@ -49,7 +49,7 @@ def _tg_send(token: str, chat_id: str, text: str):
         print(f"[notifier] 推送异常: {e}")
 
 
-def _send_xx(text: str):
+def _send_admin(text: str):
     """贝贝→乌鸦私信（不走玄玄token，避免污染对话）"""
     _tg_send(BB_BOT_TOKEN, ADMIN_ID, text)
 
@@ -77,16 +77,16 @@ def route(event: str, text: str, text_group: str = None):
     group_on = _load_notify_cfg().get("group_notify", True)
 
     if event in ("open_success", "open_fail"):
-        _send_xx(text)
+        _send_admin(text)
         _send_tt(text)
         if group_on:
             _send_bb(g)
     elif event == "position_gone":
-        _send_xx(text)
+        _send_admin(text)
         _send_tt(text)
     elif event in ("tp_activated", "tp_closed", "sl_closed", "forced_close",
                    "order_fail"):
-        _send_xx(text)
+        _send_admin(text)
         _send_tt(text)
         if group_on:
             _send_bb(g)
@@ -596,4 +596,4 @@ def send_health_report(state: dict, filter_log: list):
         f"{diag_block}\n"
         f"⚠️ 近期过滤：{filter_count}个币未达标"
     )
-    _send_xx(text)
+    _send_admin(text)
