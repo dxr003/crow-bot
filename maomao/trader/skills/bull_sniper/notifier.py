@@ -1,38 +1,95 @@
 """
-notifier.py — 做多阻击推送模块
-信号触发即时推到群组，健康报告私信乌鸦
+notifier.py — 做多阻击推送模块 v2.0
+统一路由：玄玄(乌鸦私信) / 贝贝(群组) / 天天(震天响)
 """
 import html as html_mod
 import os
 import time
 import requests
+import yaml
 from datetime import datetime
+from pathlib import Path
+from binance.um_futures import UMFutures
 
-BOT_TOKEN         = os.getenv("PUSH_BOT_TOKEN", "") or os.getenv("BOT_TOKEN", "")
-BROADCAST_CHAT_ID = os.getenv("BROADCAST_CHAT_ID", "-1001150897644")
+BB_BOT_TOKEN      = os.getenv("PUSH_BOT_TOKEN", "")
+TT_BOT_TOKEN      = os.getenv("TT_BOT_TOKEN", "")
 ADMIN_ID          = os.getenv("ADMIN_ID", "509640925")
+TT_CHAT_ID        = os.getenv("TT_CHAT_ID", "")
+BROADCAST_CHAT_ID = os.getenv("BROADCAST_CHAT_ID", "-1001150897644")
+
+_cfg_cache = {}
+_cfg_mtime = 0
 
 
-def _send(text: str, chat_id: str = None):
-    """推送消息"""
-    if not BOT_TOKEN:
-        print(f"[notifier] 未配置BOT_TOKEN，跳过推送")
+def _load_notify_cfg():
+    global _cfg_cache, _cfg_mtime
+    cfg_path = Path(__file__).parent / "config.yaml"
+    try:
+        mt = cfg_path.stat().st_mtime
+        if mt != _cfg_mtime:
+            _cfg_cache = yaml.safe_load(cfg_path.read_text()).get("bull_sniper", {})
+            _cfg_mtime = mt
+    except Exception:
+        pass
+    return _cfg_cache
+
+
+def _tg_send(token: str, chat_id: str, text: str):
+    if not token or not chat_id:
         return
-    target = chat_id or BROADCAST_CHAT_ID
     try:
         resp = requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            json={
-                "chat_id":    target,
-                "text":       text,
-                "parse_mode": "HTML",
-            },
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
             timeout=10,
         )
         if resp.status_code != 200:
             print(f"[notifier] 推送失败: {resp.text[:200]}")
     except Exception as e:
         print(f"[notifier] 推送异常: {e}")
+
+
+def _send_xx(text: str):
+    """贝贝→乌鸦私信（不走玄玄token，避免污染对话）"""
+    _tg_send(BB_BOT_TOKEN, ADMIN_ID, text)
+
+
+def _send_bb(text: str):
+    """贝贝→群组（常开）"""
+    _tg_send(BB_BOT_TOKEN, BROADCAST_CHAT_ID, text)
+
+
+def _send_tt(text: str):
+    """天天→震天响"""
+    _tg_send(TT_BOT_TOKEN, TT_CHAT_ID, text)
+
+
+def route(event: str, text: str, text_group: str = None):
+    """
+    统一事件路由（v2.0）
+    open_success/open_fail        → 玄玄 + 天天 + 群组(可关)
+    tp_activated/tp_closed        → 贝贝 + 天天 + 群组(可关)
+    sl_closed/forced_close        → 贝贝 + 天天 + 群组(可关)
+    order_fail                    → 贝贝 + 天天 + 群组(可关)
+    position_gone                 → 贝贝 + 天天（不进群组）
+    """
+    g = text_group or text
+    group_on = _load_notify_cfg().get("group_notify", True)
+
+    if event in ("open_success", "open_fail"):
+        _send_xx(text)
+        _send_tt(text)
+        if group_on:
+            _send_bb(g)
+    elif event == "position_gone":
+        _send_xx(text)
+        _send_tt(text)
+    elif event in ("tp_activated", "tp_closed", "sl_closed", "forced_close",
+                   "order_fail"):
+        _send_xx(text)
+        _send_tt(text)
+        if group_on:
+            _send_bb(g)
 
 
 def _fmt_vol(vol: float) -> str:
@@ -66,6 +123,33 @@ def _fetch_prices(symbols: list) -> dict:
         resp = requests.get("https://fapi.binance.com/fapi/v1/ticker/price", timeout=8)
         resp.raise_for_status()
         return {t["symbol"]: float(t["price"]) for t in resp.json() if t["symbol"] in symbols}
+    except Exception:
+        return {}
+
+
+def _fetch_position_risk(symbols: list) -> dict:
+    """从币安拉真实持仓数据 {symbol: {leverage, amt, mark, upnl, margin}}"""
+    if not symbols:
+        return {}
+    try:
+        key = os.getenv("BN2_API_KEY", "") or os.getenv("BINANCE_API_KEY", "")
+        secret = os.getenv("BN2_API_SECRET", "") or os.getenv("BINANCE_API_SECRET", "")
+        if not key or not secret:
+            return {}
+        client = UMFutures(key=key, secret=secret)
+        data = client.get_position_risk()
+        result = {}
+        for p in data:
+            sym = p.get("symbol", "")
+            if sym in symbols and float(p.get("positionAmt", 0)) != 0:
+                result[sym] = {
+                    "leverage": int(p.get("leverage", 0)),
+                    "amt": abs(float(p["positionAmt"])),
+                    "mark": float(p.get("markPrice", 0)),
+                    "upnl": float(p.get("unRealizedProfit", 0)),
+                    "margin": float(p.get("isolatedWallet", 0)),
+                }
+        return result
     except Exception:
         return {}
 
@@ -121,11 +205,6 @@ def send_signal(signal: dict, watchpool_snapshot: list = None):
         f"📌 距历史高点：<code>-{drop_ath:.1f}%</code>",
         f"⏱ 观察时长：<code>{elapsed:.0f}分钟</code>",
         "</blockquote>",
-        "",
-        "<blockquote>",
-        f"💰 参考入场：20U / 逐仓",
-        f"⚠️ 仅供参考，开多由老大和社区兄弟们自行决定",
-        "</blockquote>",
     ]
 
     # 附加观察池快照
@@ -150,9 +229,11 @@ def send_signal(signal: dict, watchpool_snapshot: list = None):
 
     lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━━")
-    lines.append("开多可以由玄玄自动执行，或由老大和社区兄弟们自行决定")
+    lines.append("开仓由AI自动执行，或由老大社区兄弟自行决策！")
 
-    _send("\n".join(lines))
+    msg = "\n".join(lines)
+    _send_bb(msg)
+    _send_tt(msg)
 
 
 def send_pool_entry(pool_item: dict):
@@ -174,7 +255,7 @@ def send_pool_entry(pool_item: dict):
         f"</blockquote>\n\n"
         f"<i>正在观察，涨到10-18%时推信号</i>"
     )
-    _send(text)
+    _send_bb(text)
 
 
 def send_status_card(state: dict):
@@ -222,11 +303,14 @@ def send_status_card(state: dict):
         lines.append(f"\n💰 <b>持仓中（{len(positions)}个）</b>")
         lines.append("<blockquote>")
         pos_symbols = list(positions.keys())
-        pos_prices = _fetch_prices(pos_symbols)
+        pos_risk = _fetch_position_risk(pos_symbols)
         for sym, pos in positions.items():
             entry_p = pos.get("entry_price", 0)
-            live_p = pos_prices.get(sym, 0)
-            leverage = 5
+            info = pos_risk.get(sym, {})
+            live_p = info.get("mark", 0) or _fetch_prices([sym]).get(sym, 0)
+            leverage = info.get("leverage", 5)
+            upnl = info.get("upnl", 0)
+            amt = info.get("amt", 0)
             if live_p > 0 and entry_p > 0:
                 pnl = (live_p - entry_p) / entry_p * 100 * leverage
             else:
@@ -236,19 +320,18 @@ def send_status_card(state: dict):
             sl_id = pos.get("sl_algo_id", "")
             tp_id = pos.get("tp_algo_id", "")
             sl_tag = "SL✅" if sl_id and sl_id != "?" else "SL❌"
-            if tp_id == "trailing_limit":
-                tp_tag = "TP限价✅"
-            elif tp_id and tp_id != "?":
-                tp_tag = "TP原生✅"
-            else:
-                tp_tag = "TP❌"
+            tp_tag = "TP✅" if tp_id and tp_id != "?" else "TP❌"
+            roll_count = pos.get("roll_count", 0)
+            roll_tag = f"滚仓：已触发{roll_count}次" if roll_count > 0 else "滚仓：未触发"
             lines.append(
-                f"<b>{_coin(sym)}</b> LONG {leverage}x  "
-                f"入场<code>{_fmt_price(entry_p)}</code>  "
-                f"{_pnl_icon(pnl)}<b>{pnl:+.1f}%</b>  "
+                f"<b>{_coin(sym)}</b> LONG {leverage}x\n"
+                f"  入场<code>{_fmt_price(entry_p)}</code> → "
+                f"现价<code>{_fmt_price(live_p)}</code>\n"
+                f"  浮盈{_pnl_icon(pnl)}<b>{pnl:+.1f}%</b>  "
                 f"峰<code>+{peak:.1f}%</code>  "
-                f"已持仓{held_h:.1f}h\n"
-                f"   {sl_tag} {tp_tag}"
+                f"持仓{held_h:.1f}h\n"
+                f"  {roll_tag}\n"
+                f"  {sl_tag}  {tp_tag}"
             )
         lines.append("</blockquote>")
 
@@ -268,7 +351,7 @@ def send_status_card(state: dict):
             if action == "signal_fast":
                 trigger_tag = f"⚡️ 快速通道 — {reason}"
             elif action == "signal_scored":
-                trigger_tag = f"📊 评分通道 — {score}分"
+                trigger_tag = f"🤖 AI决策通道"
             else:
                 trigger_tag = f"📌 {reason}" if reason else "📌 记录"
 
@@ -297,11 +380,6 @@ def send_status_card(state: dict):
             )
             lines.append(f"   {trigger_tag}")
             lines.append(price_line)
-
-            ai_reason = sig.get("ai_reason", "")
-            if ai_reason:
-                lines.append(f"   🤖 {html_mod.escape(ai_reason[:60])}")
-
             lines.append("</blockquote>")
     else:
         lines.append("\n✅ <b>暂无信号记录</b>")
@@ -318,7 +396,7 @@ def send_status_card(state: dict):
         for label, icon, group in [
             ("成功", "✅", success),
             ("失败", "❌", failed),
-            ("过期", "⏰", expired),
+            ("因故平仓", "⏰", expired),
         ]:
             if group:
                 lines.append(f"{icon} <b>{label}（{len(group)}）</b>")
@@ -344,9 +422,11 @@ def send_status_card(state: dict):
         f"扫描 {scans}  雷达 {radar_hits}  进池 {pool_entries}  信号 {total_signals}"
     )
     lines.append("━━━━━━━━━━━━━━━━━━━━")
-    lines.append("开多可以由玄玄自动执行，或由老大和社区兄弟们自行决定")
+    lines.append("开仓由AI自动执行，或由老大社区兄弟自行决策！")
 
-    _send("\n".join(lines))
+    msg = "\n".join(lines)
+    _send_bb(msg)
+    _send_tt(msg)
 
 
 def send_trade_report(signal: dict, buy_result: dict, analyze_result: dict):
@@ -364,74 +444,11 @@ def send_trade_report(signal: dict, buy_result: dict, analyze_result: dict):
     score = signal.get("score")
 
     if action == "signal_fast":
-        channel = f"⚡ 快速通道（8-10%）"
-        trigger = f"触发原因：{reason}"
+        channel = "⚡ 快速通道（8-10%）"
     elif action == "signal_scored":
-        channel = f"📊 评分通道（10-20%）"
-        trigger = f"触发原因：{score}分 ≥ 30分阈值"
+        channel = "🤖 AI决策通道（10-20%）"
     else:
         channel = f"📌 {action}"
-        trigger = f"触发原因：{reason}"
-
-    # ── 分析详情 ──
-    analyze_lines = []
-    analyze = analyze_result or {}
-
-    # 新闻情绪
-    news = analyze.get("news", {})
-    if news:
-        sentiment = news.get("sentiment", "")
-        news_reason = news.get("reason", "")
-        titles = news.get("titles", [])
-        if sentiment:
-            analyze_lines.append(f"📰 新闻情绪：{sentiment}")
-        if news_reason:
-            analyze_lines.append(f"   判断：{html_mod.escape(news_reason[:80])}")
-        for t in titles[:2]:
-            analyze_lines.append(f"   · {html_mod.escape(t[:60])}")
-
-    # 下架检测
-    delist = analyze.get("delist")
-    if delist:
-        analyze_lines.append(f"🚫 下架检测：{html_mod.escape(str(delist)[:60])}")
-
-    # AI最终决策
-    ai_decision = analyze.get("ai_decision", "")
-    ai_full_reason = analyze.get("ai_reason", "") or ai_reason
-    if ai_decision:
-        analyze_lines.append(f"🤖 AI决策：{ai_decision}")
-    if ai_full_reason:
-        analyze_lines.append(f"   理由：{html_mod.escape(ai_full_reason[:100])}")
-
-    # BTC关联
-    btc_1h = analyze.get("btc_1h")
-    if btc_1h is not None:
-        analyze_lines.append(f"₿ BTC 1h：{btc_1h:+.2f}%")
-
-    # 评分明细
-    breakdown = analyze.get("breakdown", {})
-    if breakdown:
-        analyze_lines.append(f"📋 评分明细：")
-        for k, v in breakdown.items():
-            analyze_lines.append(f"   {k}: {v:+d}")
-        if score is not None:
-            analyze_lines.append(f"   总分: {score}")
-
-    analyze_block = "\n".join(analyze_lines) if analyze_lines else "无详细分析数据"
-
-    # ── 市场数据 ──
-    market = analyze.get("market_data", {})
-    market_lines = []
-    if market:
-        if "oi_change_pct" in market:
-            market_lines.append(f"OI变化: {market['oi_change_pct']:+.1f}%")
-        if "long_short_ratio" in market:
-            market_lines.append(f"多空比: {market['long_short_ratio']:.2f}")
-        if "funding_rate" in market:
-            market_lines.append(f"费率: {market['funding_rate']*100:.4f}%")
-        if "volume_ratio" in market:
-            market_lines.append(f"量比: {market['volume_ratio']:.1f}x")
-    market_block = " / ".join(market_lines) if market_lines else "—"
 
     # ── 执行结果 ──
     status = buy_result.get("status", "?")
@@ -443,16 +460,18 @@ def send_trade_report(signal: dict, buy_result: dict, analyze_result: dict):
         sl_tag = "✅已挂" if sl_ok else "⚠️挂载失败"
         tp_id = buy_result.get("tp_order_id", "")
         if tp_id == "trailing_limit":
-            trailing_status = "✅已注册（限价单 50%激活/40%回撤）"
+            trailing_status = "✅已注册（STOP_MARKET 50%激活/40%回撤）"
         elif tp_id not in (None, "", "?"):
             trailing_status = "✅已挂载（币安原生 50%激活/10%回撤）"
         else:
             trailing_status = "⚠️挂载失败"
+        roll_status = buy_result.get("roll_status", "✅已注册（浮盈90%触发，加仓60%）")
 
         exec_block = (
             f"订单ID: {order_id}\n"
             f"止损价: {sl_price}（保证金-30%）{sl_tag}\n"
-            f"移动止盈: {trailing_status}"
+            f"移动止盈: {trailing_status}\n"
+            f"滚仓: {roll_status}"
         )
     elif status == "skipped":
         exec_icon = "⏭"
@@ -461,43 +480,37 @@ def send_trade_report(signal: dict, buy_result: dict, analyze_result: dict):
         exec_icon = "❌"
         exec_block = f"失败：{buy_result.get('reason', '?')}"
 
-    # ── 组装卡片 ──
+    # ── 完整版（玄玄→乌鸦私信 + 天天） ──
     text = (
         f"{exec_icon} <b>做多阻击成交报告 · {sym}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"⏰ {now_str}\n\n"
-
-        f"<b>1️⃣ 触发</b>\n"
-        f"<blockquote>"
-        f"{channel}\n"
-        f"{trigger}\n"
-        f"24h涨幅: +{signal.get('gain_pct', 0)}%\n"
-        f"进池价: {_fmt_price(signal.get('entry_price', 0))}\n"
-        f"触发价: {_fmt_price(signal.get('cur_price', 0))}\n"
-        f"成交量: {_fmt_vol(signal.get('volume_usdt', 0))}\n"
-        f"距ATH: -{signal.get('drop_from_ath', 0):.1f}%\n"
-        f"观察时长: {signal.get('elapsed_min', 0):.0f}分钟"
-        f"</blockquote>\n\n"
-
-        f"<b>2️⃣ 分析过程</b>\n"
-        f"<blockquote>"
-        f"{analyze_block}"
-        f"</blockquote>\n\n"
-
-        f"<b>3️⃣ 市场数据</b>\n"
-        f"<blockquote>"
-        f"{market_block}"
-        f"</blockquote>\n\n"
-
-        f"<b>4️⃣ 执行结果</b>\n"
-        f"<blockquote>"
-        f"{exec_block}"
-        f"</blockquote>\n"
+        f"触发  {channel}\n"
+        f"24h涨幅: +{signal.get('gain_pct', 0)}%  "
+        f"触发价: {_fmt_price(signal.get('cur_price', 0))}\n\n"
+        f"执行结果\n"
+        f"<blockquote>{exec_block}</blockquote>\n"
         f"━━━━━━━━━━━━━━━━━━━━"
     )
 
-    _send(text, chat_id=ADMIN_ID)
-    _send(text, chat_id=BROADCAST_CHAT_ID)
+    # ── 群组精简版 ──
+    text_group = (
+        f"{exec_icon} <b>做多阻击成交报告 · {sym}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"⏰ {now_str}\n\n"
+        f"{channel}  24h涨幅: +{signal.get('gain_pct', 0)}%\n"
+        f"触发价: {_fmt_price(signal.get('cur_price', 0))}\n\n"
+        f"<blockquote>"
+        f"订单ID: {buy_result.get('order_id', '?')}\n"
+        f"止损价: {buy_result.get('sl_price', '?')}（保证金-30%）"
+        f"{'✅已挂' if buy_result.get('sl_algo_id') not in (None, '', '?') else '⚠️挂载失败'}\n"
+        f"移动止盈: {trailing_status if status == 'executed' else '—'}\n"
+        f"滚仓: {roll_status if status == 'executed' else '—'}"
+        f"</blockquote>\n"
+        f"━━━━━━━━━━━━━━━━━━━━"
+    )
+    event = "open_success" if status == "executed" else "open_fail"
+    route(event, text, text_group=text_group)
 
 
 def send_health_report(state: dict, filter_log: list):
@@ -571,24 +584,16 @@ def send_health_report(state: dict, filter_log: list):
     health_icon = "✅" if all_ok else "⚠️"
     diag_block = "\n".join(diag_lines)
 
-    # ── 过滤日志 ──
-    filter_lines = "\n".join(
-        f"  {f['symbol']} {html_mod.escape(f['reason'])}"
-        for f in filter_log[-20:]
-    ) or "  无"
+    filter_count = len(filter_log) if filter_log else 0
 
     text = (
-        f"🔍 做多阻击 · {now_str}\n"
+        f"🔍 做多阻击系统自检 · {now_str}\n"
         f"━━━━━━━━━━━━━━\n"
         f"扫描：{stats.get('scans', 0)}  "
         f"雷达：{stats.get('radar_hits', 0)}  "
         f"进池：{stats.get('pool_entries', 0)}  "
         f"信号：{stats.get('signals', 0)}\n"
-        f"观察池：{pool_count}个币\n"
-        f"\n"
-        f"{health_icon} <b>系统自检</b>\n"
         f"{diag_block}\n"
-        f"\n"
-        f"⚠️ 近期过滤：\n{filter_lines}"
+        f"⚠️ 近期过滤：{filter_count}个币未达标"
     )
-    _send(text, chat_id=ADMIN_ID)
+    _send_xx(text)

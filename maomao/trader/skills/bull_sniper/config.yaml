@@ -1,6 +1,7 @@
 bull_sniper:
   enabled: true
   mode: auto                 # auto / alert / off
+  group_notify: true         # 群组交易通知开关（开仓成功/失败推群组）
 
   # 扫描（30秒一轮，高频捕捉爆发）
   scan_interval_sec: 30

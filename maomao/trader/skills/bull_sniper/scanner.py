@@ -851,9 +851,10 @@ def _settle_signals(state: dict, now: float):
 def run():
     logger.info("=== 做多阻击扫描器 v3.1 启动 ===")
     state = load_state()
-    last_full_scan    = 0
+    last_full_scan     = 0
     last_health_report = 0
     last_card_hour     = -1
+    last_health_hour   = -1
 
     while True:
         now = time.time()
@@ -889,21 +890,26 @@ def run():
         except Exception as e:
             logger.warning(f"[仓位管理] 检查异常: {e}")
 
-        # 每小时整点：群组状态卡片 + 私信健康报告（按小时判断，不依赖扫描频率）
+        # :00 整点：群组状态卡片
         if current_hour != last_card_hour:
             try:
                 send_status_card(state)
+                last_card_hour = current_hour
                 logger.info("[状态卡片] 已推群组")
             except Exception as e:
                 logger.warning(f"状态卡片推送失败: {e}")
+
+        # :02 健康报告（私信乌鸦，与状态卡错开）
+        current_min = _dt.datetime.now().minute
+        if current_min == 2 and current_hour != last_health_hour:
             try:
                 state["_oi_cache"] = _oi_cache
                 send_health_report(state, state.get("filter_log", []))
                 state.pop("_oi_cache", None)
                 state["stats"] = {"scans": 0, "pool_entries": 0, "signals": 0}
                 last_health_report = now
-                last_card_hour = current_hour
-                logger.info("[健康报告] 已推送")
+                last_health_hour = current_hour
+                logger.info("[健康报告] 已推送（:02）")
             except Exception as e:
                 logger.warning(f"健康报告推送失败: {e}")
 

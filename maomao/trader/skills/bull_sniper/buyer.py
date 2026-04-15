@@ -20,6 +20,8 @@ load_dotenv(Path("/root/.qixing_env"))
 
 logger = logging.getLogger("bull_buyer")
 
+from notifier import route as _route
+
 FAPI_BASE = "https://fapi.binance.com"
 
 _client = None
@@ -328,8 +330,14 @@ def _execute_auto(symbol: str, price: float, analyze_result: dict, cfg: dict) ->
             logger.info(f"[buyer] {symbol} 止损 @ {sl_price} algoId:{sl_order_id}")
         else:
             logger.warning(f"[buyer] {symbol} 止损挂单失败: {sl_resp['data']}")
+            coin = symbol.replace("USDT", "")
+            sl_fail_msg = f"❌ <b>{coin} 止损挂单失败</b>\n入场: {actual_entry}\n需人工检查"
+            _route("order_fail", sl_fail_msg)
     except Exception as e:
         logger.warning(f"[buyer] {symbol} 止损挂单异常: {e}")
+        coin = symbol.replace("USDT", "")
+        sl_fail_msg = f"❌ <b>{coin} 止损挂单异常</b>\n{e}\n需人工检查"
+        _route("order_fail", sl_fail_msg)
 
     # ── 11. 移动止盈 ──
     trailing_order_id = None
@@ -344,6 +352,9 @@ def _execute_auto(symbol: str, price: float, analyze_result: dict, cfg: dict) ->
             logger.info(f"[buyer] {symbol} 限价移动止盈已注册")
         except Exception as e:
             logger.warning(f"[buyer] {symbol} 限价移动止盈注册失败: {e}")
+            coin = symbol.replace("USDT", "")
+            tp_fail_msg = f"❌ <b>{coin} 移动止盈注册失败</b>\n{e}\n需人工检查"
+            _route("order_fail", tp_fail_msg)
     else:
         # 币安原生移动止盈（10%回撤上限）
         trailing_cfg = cfg.get("trailing", {})
@@ -368,8 +379,14 @@ def _execute_auto(symbol: str, price: float, analyze_result: dict, cfg: dict) ->
                 )
             else:
                 logger.warning(f"[buyer] {symbol} 移动止盈挂单失败: {tp_resp['data']}")
+                coin = symbol.replace("USDT", "")
+                tp_fail_msg = f"❌ <b>{coin} 币安原生移动止盈挂单失败</b>\n{tp_resp['data']}\n需人工检查"
+                _route("order_fail", tp_fail_msg)
         except Exception as e:
             logger.warning(f"[buyer] {symbol} 移动止盈挂单异常: {e}")
+            coin = symbol.replace("USDT", "")
+            tp_fail_msg = f"❌ <b>{coin} 移动止盈挂单异常</b>\n{e}\n需人工检查"
+            _route("order_fail", tp_fail_msg)
 
         if cfg.get("custom_trailing_enabled", False):
             pullback_pct = trailing_cfg.get("pullback_trigger", 25)
@@ -379,12 +396,17 @@ def _execute_auto(symbol: str, price: float, analyze_result: dict, cfg: dict) ->
             except Exception as e:
                 logger.warning(f"[buyer] {symbol} 自建监控注册失败: {e}")
 
+    if use_custom:
+        tp_desc = "STOP_MARKET移动止盈(50%激活/40%回撤)"
+    else:
+        tp_desc = f"币安原生+{activation_pct}%激活/{callback_rate}%回撤"
+
     return {
         "status": "executed",
         "reason": (
             f"[币安2] 开多 {symbol} {qty} @ {actual_entry} "
             f"{leverage}x {position_usd}U 止损:{sl_price} "
-            f"移动止盈:币安原生+{activation_pct}%激活/{callback_rate}%回撤"
+            f"移动止盈:{tp_desc}"
         ),
         "order_id": order_id,
         "sl_price": sl_price,

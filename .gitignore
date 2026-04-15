@@ -5,3 +5,4 @@ __pycache__/
 *.pyc
 *.log
 node_modules/
+maomao/.env.example

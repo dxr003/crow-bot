@@ -25,23 +25,7 @@ logger = logging.getLogger("bull_sniper.trailing_limit")
 FAPI_BASE = "https://fapi.binance.com"
 STATE_FILE = Path(__file__).parent / "data" / "trailing_limit_state.json"
 
-BOT_TOKEN = os.getenv("PUSH_BOT_TOKEN", "") or os.getenv("BOT_TOKEN", "")
-ADMIN_ID = os.getenv("ADMIN_ID", "509640925")
-BROADCAST_CHAT_ID = os.getenv("BROADCAST_CHAT_ID", "-1001150897644")
-
-
-def _notify(text: str, chat_id: str = None):
-    if not BOT_TOKEN:
-        return
-    target = chat_id or ADMIN_ID
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            json={"chat_id": target, "text": text, "parse_mode": "HTML"},
-            timeout=10,
-        )
-    except Exception:
-        pass
+from notifier import route as _route
 
 
 def _load() -> dict:
@@ -114,9 +98,8 @@ def _cancel_order(symbol: str, order_id: str) -> bool:
     if not order_id:
         return False
     try:
-        r = _bn2_signed("DELETE", "/fapi/v1/order", {
-            "symbol": symbol,
-            "orderId": order_id,
+        r = _bn2_signed("DELETE", "/fapi/v1/algoOrder", {
+            "algoId": order_id,
         })
         return r["status_code"] == 200
     except Exception as e:
@@ -126,20 +109,19 @@ def _cancel_order(symbol: str, order_id: str) -> bool:
 
 def _place_limit_tp(symbol: str, side: str, position_side: str,
                     qty: str, price: str) -> str:
-    """挂限价止盈单，返回orderId或空"""
+    """通过Algo条件单挂STOP_MARKET，价格到达时触发市价平仓"""
     try:
-        r = _bn2_signed("POST", "/fapi/v1/order", {
+        r = _bn2_signed("POST", "/fapi/v1/algoOrder", {
+            "algoType": "CONDITIONAL",
             "symbol": symbol,
             "side": side,
             "positionSide": position_side,
-            "type": "LIMIT",
-            "timeInForce": "GTC",
+            "type": "STOP_MARKET",
+            "triggerPrice": price,
             "quantity": qty,
-            "price": price,
-            "reduceOnly": "true",
         })
         if r["status_code"] == 200:
-            return str(r["data"].get("orderId", ""))
+            return str(r["data"].get("algoId", ""))
         logger.warning(f"[移动止盈] {symbol} 挂单失败: {r['data']}")
     except Exception as e:
         logger.warning(f"[移动止盈] {symbol} 挂单异常: {e}")
@@ -226,12 +208,13 @@ def check_all(cfg: dict = None) -> list:
                     pnl_pct = (entry_price - tp_price) / entry_price * 100 if tp_price > 0 else 0
                 margin_pnl = pnl_pct * leverage
 
-                _notify(
+                tp_msg = (
                     f"✅ <b>移动止盈成交 — {coin}</b>\n"
                     f"入场: {entry_price:.4f}  止盈价: {tp_price:.4f}\n"
                     f"盈利: +{pnl_pct:.1f}%(本金) / +{margin_pnl:.1f}%(含杠杆)\n"
                     f"触发48h冷却"
                 )
+                _route("tp_closed", tp_msg)
                 logger.info(f"[移动止盈] {coin} 成交 盈亏+{margin_pnl:.1f}%")
 
                 results.append({"symbol": symbol, "pnl_pct": round(margin_pnl, 1)})
@@ -251,9 +234,12 @@ def check_all(cfg: dict = None) -> list:
             else:
                 float_pnl = (entry_price - cur_price) / entry_price * 100
 
-            # ── 未激活 ──
+            leverage = entry.get("leverage", 5)
+            margin_pnl = float_pnl * leverage
+
+            # ── 未激活（按保证金收益判断） ──
             if not entry["activated"]:
-                if float_pnl >= activation_pct:
+                if margin_pnl >= activation_pct:
                     entry["activated"] = True
                     entry["activated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
                     entry["peak_price"] = cur_price
@@ -271,20 +257,22 @@ def check_all(cfg: dict = None) -> list:
                     entry["current_order_id"] = oid
                     entry["current_tp_price"] = float(tp_str)
 
-                    _notify(
+                    act_msg = (
                         f"🟢 <b>{coin} 限价移动止盈激活！</b>\n"
-                        f"浮盈 <b>+{float_pnl:.1f}%</b>\n"
+                        f"保证金浮盈 <b>+{margin_pnl:.1f}%</b>（币价+{float_pnl:.1f}%）\n"
                         f"首挂止盈: {tp_str}（回撤{pullback_pct}%）\n"
                         f"orderId: {oid or '挂单失败'}"
                     )
+                    _route("tp_activated", act_msg)
                     logger.info(
-                        f"[移动止盈] {coin} 激活 浮盈+{float_pnl:.1f}% "
+                        f"[移动止盈] {coin} 激活 保证金+{margin_pnl:.1f}% "
                         f"挂单@{tp_str} oid={oid}"
                     )
                 continue
 
-            # ── 已激活：检查是否创新高/新低 ──
+            # ── 已激活：检查是否创新高/新低 或 补挂失败单 ──
             new_peak = False
+            need_repair = not entry.get("current_order_id")
             if is_long and cur_price > peak:
                 new_peak = True
                 peak = cur_price
@@ -292,7 +280,7 @@ def check_all(cfg: dict = None) -> list:
                 new_peak = True
                 peak = cur_price
 
-            if new_peak:
+            if new_peak or need_repair:
                 entry["peak_price"] = peak
                 changed = True
 
@@ -302,7 +290,8 @@ def check_all(cfg: dict = None) -> list:
                 new_tp_val = float(new_tp_str)
 
                 old_tp = entry.get("current_tp_price", 0)
-                should_update = (is_long and new_tp_val > old_tp) or \
+                should_update = need_repair or \
+                                (is_long and new_tp_val > old_tp) or \
                                 (not is_long and (old_tp == 0 or new_tp_val < old_tp))
 
                 if should_update:
@@ -317,7 +306,7 @@ def check_all(cfg: dict = None) -> list:
                     if not oid:
                         oid = _place_limit_tp(symbol, close_side, pos_side, qty_str, new_tp_str)
                         if not oid:
-                            _notify(f"⚠️ {coin} 移动止盈挂单失败，需人工检查")
+                            _route("order_fail", f"⚠️ {coin} 移动止盈挂单失败，需人工检查")
 
                     entry["current_order_id"] = oid
                     entry["current_tp_price"] = new_tp_val
@@ -341,11 +330,11 @@ def check_all(cfg: dict = None) -> list:
 def _calc_tp_price(peak: float, pullback_pct: float,
                    entry_price: float, is_long: bool) -> float:
     if is_long:
-        tp = peak * (1 - pullback_pct / 100)
-        if tp < entry_price:
-            tp = entry_price
+        peak_profit = (peak - entry_price) / entry_price
+        remaining = peak_profit * (1 - pullback_pct / 100)
+        tp = entry_price * (1 + max(remaining, 0))
     else:
-        tp = peak * (1 + pullback_pct / 100)
-        if tp > entry_price:
-            tp = entry_price
+        peak_profit = (entry_price - peak) / entry_price
+        remaining = peak_profit * (1 - pullback_pct / 100)
+        tp = entry_price * (1 - max(remaining, 0))
     return tp

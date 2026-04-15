@@ -5,12 +5,28 @@
 读图走独立 ANTHROPIC_API_KEY，聊天永远走订阅。
 # 底座已固定 v4.3 — 新功能只通过 trader/ 模块挂载，禁止修改此文件
 """
-import os, json, logging, asyncio, time, base64, io
+import os, json, logging, asyncio, time, base64, io, re, html as html_mod
 from pathlib import Path
 from dotenv import load_dotenv
 from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from telegram.constants import ParseMode
+
+
+def _md_to_html(text: str) -> str:
+    """Markdown → TG HTML：代码块、行内代码、粗体、斜体"""
+    # 多行代码块 ```lang\n...\n``` → <pre><code>...</code></pre>
+    def _code_block(m):
+        code = html_mod.escape(m.group(2))
+        return f"<pre><code>{code}</code></pre>"
+    text = re.sub(r"```(\w*)\n(.*?)```", _code_block, text, flags=re.DOTALL)
+    # 行内代码 `...` → <code>...</code>
+    text = re.sub(r"`([^`]+)`", lambda m: f"<code>{html_mod.escape(m.group(1))}</code>", text)
+    # 粗体 **...** → <b>...</b>
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    # 斜体 *...* → <i>...</i>
+    text = re.sub(r"\*(.+?)\*", r"<i>\1</i>", text)
+    return text
 
 MODELS = [
     "claude-sonnet-4-6",
@@ -52,7 +68,8 @@ async def claudecode_gen(prompt, add_dir="/root", bot_dir="damao", model=None):
         step_info["actions"] = []
         cmd = ["claude", "--print", "--verbose",
                "--output-format", "stream-json",
-               "--permission-mode", "acceptEdits",
+               "--permission-mode", "auto",
+               "--continue",
                "--add-dir", add_dir]
         if model:
             cmd.extend(["--model", model])
@@ -168,9 +185,13 @@ async def ask_with_timer(update, gen_coro, model):
         pass
     if not full_text.strip():
         full_text = "（无输出）"
-    chunks = [full_text[i:i+4000] for i in range(0, len(full_text), 4000)]
+    html_text = _md_to_html(full_text)
+    chunks = [html_text[i:i+4000] for i in range(0, len(html_text), 4000)]
     for chunk in chunks:
-        await update.message.reply_text(chunk)
+        try:
+            await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
+        except Exception:
+            await update.message.reply_text(chunk)
 
 
 def create_and_run_bot(env_path, claude_add_dir=None):
@@ -190,6 +211,8 @@ def create_and_run_bot(env_path, claude_add_dir=None):
         _add_dir = claude_add_dir or "/root"
     elif bot_dir == "maomao":
         _add_dir = "/root/maomao"
+    elif bot_dir == "tiantian":
+        _add_dir = "/root/tiantian"
     else:
         _add_dir = claude_add_dir or "/root"
 
@@ -201,6 +224,9 @@ def create_and_run_bot(env_path, claude_add_dir=None):
         return wrapper
 
     async def ask_claude(update, prompt, image_b64=None):
+        from datetime import datetime as _dt
+        now_str = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+        prompt = f"[当前时间: {now_str}] {prompt}"
         state = load_state(bot_dir)
         model = state.get("model", MODELS[0])
         if image_b64:
@@ -215,7 +241,7 @@ def create_and_run_bot(env_path, claude_add_dir=None):
     @admin_only
     async def cmd_start(update, ctx):
         state = load_state(bot_dir)
-        icon = '🐱' if bot_name == '大猫' else '🐦' if bot_name == '玄玄' else '🐾'
+        icon = '🐱' if bot_name == '大猫' else '🐦' if bot_name == '玄玄' else '🐶' if bot_name == '贝贝' else '🐾'
         await update.message.reply_text(
             f"{icon} <b>{bot_name} v4.3</b>\n\n"
             f"模型: <code>{state['model']}</code>\n\n"
@@ -225,11 +251,24 @@ def create_and_run_bot(env_path, claude_add_dir=None):
     @admin_only
     async def cmd_help(update, ctx):
         state = load_state(bot_dir)
+        if bot_dir == "tiantian":
+            await update.message.reply_text(
+                f"<b>{bot_name}命令</b>\n\n"
+                f"模型: <code>{model_short(state['model'])}</code>\n\n"
+                f"/model   — 切换模型\n"
+                f"/status  — Bot状态\n"
+                f"/restart — 重启\n/stop — 关闭\n\n"
+                f"/1 — 查持仓\n/2 — 查余额\n"
+                f"/3 — 现货→合约\n/4 — 合约→现货\n"
+                f"/5 — 现货→资金\n/6 — 资金→现货\n\n"
+                f"<i>发文字 = 问{bot_name}\n发图片 = Vision读图</i>",
+                parse_mode=ParseMode.HTML)
+            return
         await update.message.reply_text(
             f"<b>{bot_name}命令</b>\n\n"
             f"模型: <code>{model_short(state['model'])}</code>\n\n"
             f"/model  — 循环切换模型\n"
-            f"/mode   — 查看状态\n/status — 三Bot服务状态\n"
+            f"/mode   — 查看状态\n/status — 四Bot服务状态\n"
             f"/ping   — 心跳\n/log    — 查看日志\n\n"
             f"<i>发文字 = 问{bot_name}\n发图片 = Vision读图（消耗API额度）</i>",
             parse_mode=ParseMode.HTML)
@@ -251,6 +290,12 @@ def create_and_run_bot(env_path, claude_add_dir=None):
 
     @admin_only
     async def cmd_mode(update, ctx):
+        if bot_dir == "tiantian":
+            state = load_state(bot_dir)
+            await update.message.reply_text(
+                f"<b>{bot_name} 状态</b>\n\n模型: <code>{state['model']}</code>",
+                parse_mode=ParseMode.HTML)
+            return
         import shutil
         state = load_state(bot_dir)
         api_ok = "✅" if anthropic_key else "❌"
@@ -272,8 +317,12 @@ def create_and_run_bot(env_path, claude_add_dir=None):
     @admin_only
     async def cmd_status(update, ctx):
         import subprocess as sp
+        if bot_dir == "tiantian":
+            svcs = ["tiantian"]
+        else:
+            svcs = ["damao", "maomao", "tiantian", "baobao"]
         lines = []
-        for svc in ["damao", "maomao", "baobao"]:
+        for svc in svcs:
             r = sp.run(["systemctl", "is-active", svc], capture_output=True, text=True)
             icon = "✅" if r.stdout.strip() == "active" else "❌"
             lines.append(f"{icon} {svc}: {r.stdout.strip()}")
@@ -283,6 +332,9 @@ def create_and_run_bot(env_path, claude_add_dir=None):
 
     @admin_only
     async def cmd_log(update, ctx):
+        if bot_dir == "tiantian":
+            await update.message.reply_text("⛔ 此命令未开放")
+            return
         try:
             lines = (log_dir / "bot.log").read_text().splitlines()[-50:]
             text = "\n".join(lines) or "（日志为空）"
@@ -296,22 +348,28 @@ def create_and_run_bot(env_path, claude_add_dir=None):
     @admin_only
     async def handle_text(update, ctx):
         user_text = update.message.text
-        if bot_dir == "maomao":
-            import sys
-            sys.path.insert(0, '/root/maomao')
+        if bot_dir in ("maomao", "tiantian"):
+            import sys; sys.path.insert(0, f'/root/{bot_dir}')
             stripped = user_text.strip()
             if stripped in _CONFIRM_WORDS:
                 from trader.preview import pop_latest_pending
                 order = pop_latest_pending()
                 if order is not None:
                     from trader.order import execute
-                    from trader.trade_log import log_trade
                     try:
                         result = execute(order)
-                        log_trade(order=order, result=result)
+                        try:
+                            from trader.trade_log import log_trade
+                            log_trade(order=order, result=result)
+                        except ImportError:
+                            pass
                     except Exception as e:
                         result = f"❌ 执行失败: {e}"
-                        log_trade(order=order, error=str(e))
+                        try:
+                            from trader.trade_log import log_trade
+                            log_trade(order=order, error=str(e))
+                        except ImportError:
+                            pass
                     await update.message.reply_text(result, parse_mode=ParseMode.HTML)
                     return
             elif stripped in _CANCEL_WORDS:
@@ -326,8 +384,11 @@ def create_and_run_bot(env_path, claude_add_dir=None):
                 result_text, uid = trade_result
                 await update.message.reply_text(result_text, parse_mode=ParseMode.HTML)
                 if uid is None:
-                    from trader.trade_log import log_trade
-                    log_trade(raw_text=user_text, result=result_text)
+                    try:
+                        from trader.trade_log import log_trade
+                        log_trade(raw_text=user_text, result=result_text)
+                    except ImportError:
+                        pass
                 if uid is not None:
                     async def _auto_cancel():
                         import asyncio as _asyncio
@@ -374,59 +435,108 @@ def create_and_run_bot(env_path, claude_add_dir=None):
 
     @admin_only
     async def cmd_q_positions(update, ctx):
-        import sys; sys.path.insert(0, '/root/maomao')
-        from trader.exchange import get_positions
+        import sys; sys.path.insert(0, f'/root/{bot_dir}')
         try:
-            positions = get_positions()
-            if not positions:
+            if bot_dir == "maomao":
+                from trader.multi_account import get_all_positions
+                positions = get_all_positions()
+            else:
+                from trader.exchange import get_positions
+                positions = [dict(p, _account="") for p in get_positions()]
+            if not positions or all("_error" in p for p in positions):
                 await update.message.reply_text("📭 当前无持仓")
                 return
             lines = []
+            cur_account = None
             for p in positions:
+                if "_error" in p:
+                    lines.append(f"\n<b>【{p['_account']}】</b> ❌ {p['_error']}")
+                    continue
+                acct = p.get("_account", "")
+                if acct and acct != cur_account:
+                    lines.append(f"\n<b>【{acct}】</b>")
+                    cur_account = acct
                 amt  = float(p['positionAmt'])
                 side = "多" if amt > 0 else "空"
                 entry = float(p['entryPrice'])
                 liq   = float(p.get('liquidationPrice', 0))
                 upnl  = float(p.get('unRealizedProfit', 0))
-                pct   = float(p.get('percentage', 0))
                 lev   = p.get('leverage', '?')
                 mark  = float(p.get('markPrice', 0))
+                margin = float(p.get('isolatedWallet', 0)) or float(p.get('initialMargin', 0))
+                pct = (upnl / margin * 100) if margin > 0 else 0
                 lines.append(
                     f"<b>{p['symbol']}</b> {side} {abs(amt)} @{lev}x\n"
                     f"  入场:{entry:.4f}  标记:{mark:.4f}\n"
                     f"  强平:{liq:.4f}  浮盈:{upnl:+.2f}U ({pct:+.1f}%)"
                 )
-            await update.message.reply_text("\n\n".join(lines), parse_mode=ParseMode.HTML)
+            await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
         except Exception as e:
             await update.message.reply_text(f"❌ 查询失败: {e}")
 
     @admin_only
     async def cmd_q_balances(update, ctx):
-        import sys; sys.path.insert(0, '/root/maomao')
-        from trader.exchange import get_all_balances
+        import sys; sys.path.insert(0, f'/root/{bot_dir}')
         try:
-            b = get_all_balances()
-            lines = ["<b>账户余额</b>\n"]
-            lines.append("<b>合约</b>")
-            lines.append(f"  余额: {b['futures']:.2f} U")
-            lines.append(f"  可用: {b['futures_avail']:.2f} U")
-            lines.append(f"  浮盈: {b['futures_upnl']:+.2f} U")
-            spot = {k: v for k, v in b.get('spot', {}).items() if v >= 1}
-            if spot:
-                lines.append("\n<b>现货</b>")
-                for asset, amt in sorted(spot.items(), key=lambda x: -x[1]):
-                    lines.append(f"  {asset}: {amt:.4f}")
-            funding = {k: v for k, v in b.get('funding', {}).items() if v >= 1}
-            if funding:
-                lines.append("\n<b>资金</b>")
-                for asset, amt in sorted(funding.items(), key=lambda x: -x[1]):
-                    lines.append(f"  {asset}: {amt:.4f}")
+            if bot_dir == "maomao":
+                from trader.multi_account import get_all_balances as get_multi_bal
+                accounts = get_multi_bal()
+                lines = ["<b>全账户余额</b>"]
+                total_all = 0
+                for b in accounts:
+                    if "error" in b:
+                        lines.append(f"\n<b>【{b['name']}】</b> ❌ {b['error']}")
+                        continue
+                    lines.append(f"\n<b>【{b['name']}】</b>")
+                    lines.append(f"  合约: {b['futures']:.2f}U  可用: {b['futures_avail']:.2f}U  浮盈: {b['futures_upnl']:+.2f}U")
+                    total_all += b['futures'] + b['futures_upnl']
+                    spot = {k: v for k, v in b.get('spot', {}).items() if v >= 1}
+                    if spot:
+                        stables = {"USDT", "USDC", "BUSD", "FDUSD"}
+                        for asset, amt in sorted(spot.items(), key=lambda x: -x[1]):
+                            lines.append(f"  现货 {asset}: {amt:.4f}")
+                            if asset in stables:
+                                total_all += amt
+                    funding = b.get('funding', {})
+                    if funding:
+                        stables_f = {"USDT", "USDC", "BUSD", "FDUSD"}
+                        for asset, amt in sorted(funding.items(), key=lambda x: -x[1]):
+                            if amt >= 1:
+                                lines.append(f"  资金 {asset}: {amt:.4f}")
+                                if asset in stables_f:
+                                    total_all += amt
+                lines.append(f"\n<b>合计: {total_all:.2f}U</b> (含稳定币现货)")
+            else:
+                from trader.exchange import get_all_balances
+                b = get_all_balances()
+                total = b['futures'] + b['futures_upnl']
+                stables = {"USDT", "USDC", "BUSD", "FDUSD"}
+                lines = ["<b>账户余额</b>\n"]
+                lines.append("<b>合约</b>")
+                lines.append(f"  余额: {b['futures']:.2f} U")
+                lines.append(f"  可用: {b['futures_avail']:.2f} U")
+                lines.append(f"  浮盈: {b['futures_upnl']:+.2f} U")
+                spot = {k: v for k, v in b.get('spot', {}).items() if v >= 1}
+                if spot:
+                    lines.append("\n<b>现货</b>")
+                    for asset, amt in sorted(spot.items(), key=lambda x: -x[1]):
+                        lines.append(f"  {asset}: {amt:.4f}")
+                        if asset in stables:
+                            total += amt
+                funding = {k: v for k, v in b.get('funding', {}).items() if v >= 1}
+                if funding:
+                    lines.append("\n<b>资金</b>")
+                    for asset, amt in sorted(funding.items(), key=lambda x: -x[1]):
+                        lines.append(f"  {asset}: {amt:.4f}")
+                        if asset in stables:
+                            total += amt
+                lines.append(f"\n<b>合计: {total:.2f}U</b>")
             await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
         except Exception as e:
             await update.message.reply_text(f"❌ 查询失败: {e}")
 
     async def _do_transfer(update, ctx, transfer_type, desc):
-        import sys; sys.path.insert(0, '/root/maomao')
+        import sys; sys.path.insert(0, f'/root/{bot_dir}')
         from trader.exchange import transfer_funds
         if not ctx.args:
             await update.message.reply_text(f"用法: {desc} 后跟金额，例如：/3 100")
@@ -460,7 +570,7 @@ def create_and_run_bot(env_path, claude_add_dir=None):
 
     @admin_only
     async def cmd_trade_log(update, ctx):
-        import sys; sys.path.insert(0, '/root/maomao')
+        import sys; sys.path.insert(0, f'/root/{bot_dir}')
         from trader.trade_log import get_recent, format_for_tg
         n = 20
         if ctx.args:
@@ -471,7 +581,7 @@ def create_and_run_bot(env_path, claude_add_dir=None):
 
     @admin_only
     async def cmd_bot_log(update, ctx):
-        import sys; sys.path.insert(0, '/root/maomao')
+        import sys; sys.path.insert(0, f'/root/{bot_dir}')
         from trader.bot_log import get_recent_bot_events, format_bot_events_tg
         n = 20
         if ctx.args:
@@ -482,7 +592,7 @@ def create_and_run_bot(env_path, claude_add_dir=None):
 
     @admin_only
     async def cmd_sys_log(update, ctx):
-        import sys; sys.path.insert(0, '/root/maomao')
+        import sys; sys.path.insert(0, f'/root/{bot_dir}')
         from trader.bot_log import get_recent_sys_snapshots, format_sys_snapshot_tg
         n = 6
         if ctx.args:
@@ -492,9 +602,9 @@ def create_and_run_bot(env_path, claude_add_dir=None):
         await update.message.reply_text(format_sys_snapshot_tg(entries), parse_mode=ParseMode.HTML)
 
     def _bot_log(event, detail=""):
-        if bot_dir == "maomao":
+        if bot_dir in ("maomao", "tiantian"):
             try:
-                import sys; sys.path.insert(0, '/root/maomao')
+                import sys; sys.path.insert(0, f'/root/{bot_dir}')
                 from trader.bot_log import log_bot_event
                 log_bot_event(event, detail)
             except Exception:
@@ -504,7 +614,7 @@ def create_and_run_bot(env_path, claude_add_dir=None):
         base_cmds = [
             BotCommand("start","状态"), BotCommand("help","帮助"),
             BotCommand("model","切换模型"),
-            BotCommand("mode","查看状态"), BotCommand("status","三Bot服务状态"),
+            BotCommand("mode","查看状态"), BotCommand("status","四Bot服务状态"),
             BotCommand("ping","心跳"), BotCommand("log","查看日志"),
             BotCommand("restart","重启本Bot"), BotCommand("stop","关闭本Bot"),
         ]
@@ -519,6 +629,15 @@ def create_and_run_bot(env_path, claude_add_dir=None):
                 BotCommand("7","交易日志 /7 [条数]"),
                 BotCommand("8","Bot运行事件 /8 [条数]"),
                 BotCommand("9","系统快照 /9 [条数]"),
+            ]
+        elif bot_dir == "tiantian":
+            base_cmds += [
+                BotCommand("1","查询持仓"),
+                BotCommand("2","查询余额"),
+                BotCommand("3","现货→合约 /3 <金额>"),
+                BotCommand("4","合约→现货 /4 <金额>"),
+                BotCommand("5","现货→资金 /5 <金额>"),
+                BotCommand("6","资金→现货 /6 <金额>"),
             ]
         await app.bot.set_my_commands(base_cmds)
         state = load_state(bot_dir)
@@ -542,13 +661,14 @@ def create_and_run_bot(env_path, claude_add_dir=None):
     app.add_handler(CommandHandler("log", cmd_log))
     app.add_handler(CommandHandler("restart", cmd_restart))
     app.add_handler(CommandHandler("stop", cmd_stop_bot))
-    if bot_dir == "maomao":
+    if bot_dir in ("maomao", "tiantian"):
         app.add_handler(CommandHandler("1", cmd_q_positions))
         app.add_handler(CommandHandler("2", cmd_q_balances))
         app.add_handler(CommandHandler("3", cmd_transfer_3))
         app.add_handler(CommandHandler("4", cmd_transfer_4))
         app.add_handler(CommandHandler("5", cmd_transfer_5))
         app.add_handler(CommandHandler("6", cmd_transfer_6))
+    if bot_dir == "maomao":
         app.add_handler(CommandHandler("7", cmd_trade_log))
         app.add_handler(CommandHandler("8", cmd_bot_log))
         app.add_handler(CommandHandler("9", cmd_sys_log))
@@ -560,9 +680,9 @@ def create_and_run_bot(env_path, claude_add_dir=None):
 
     async def _heartbeat(ctx):
         logger.info(f"[heartbeat] {bot_name} alive")
-        if bot_dir == "maomao":
+        if bot_dir in ("maomao", "tiantian"):
             try:
-                import sys; sys.path.insert(0, '/root/maomao')
+                import sys; sys.path.insert(0, f'/root/{bot_dir}')
                 from trader.bot_log import log_sys_snapshot
                 log_sys_snapshot()
             except Exception:
