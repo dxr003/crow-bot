@@ -18,8 +18,9 @@ from datetime import datetime
 from pathlib import Path
 
 from analyzer import analyze
-from notifier import send_signal, send_health_report, send_status_card, send_trade_report
+from notifier import send_signal, send_health_report, send_status_card, send_trade_report, send_pool_entry
 from buyer import execute as buyer_execute
+from reject_tracker import record_exit as _record_reject, update_peaks as _update_reject_peaks
 
 BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
@@ -587,6 +588,17 @@ def scan_once(state: dict, tickers: list) -> dict:
             f"1h+{change_1h:.1f}% 价格:{t['price']} 基准量:{base_avg_vol:.0f}"
         )
 
+        try:
+            send_pool_entry({
+                "symbol": symbol,
+                "change_5m": c5m,
+                "volume_usdt": t["volume_usdt"],
+                "entry_price": t["price"],
+                "drop_from_ath": ath_data["drop_from_ath"],
+            })
+        except Exception as _e:
+            logger.warning(f"进池推送失败 {symbol}: {_e}")
+
     # ── 4. 第三层：观察池管理（零成本观察，定期打分） ──
     # 冷却中的币踢出观察池
     for _s in list(state["watchpool"].keys()):
@@ -617,20 +629,42 @@ def scan_once(state: dict, tickers: list) -> dict:
         change_1h = calc_1h_change(symbol)
         pool["change_1h"] = change_1h
 
-        # ── 退出条件：从峰值回撤>20%或进池后跌>15%，退出释放位置 ──
+        # ── 退出条件 ──
+        _pool_upper = CFG.get("pool_exit_upper_pct", 20)
+        _pool_lower = CFG.get("pool_exit_lower_pct", 5)
+
+        # 涨幅超上限 → 不追高，退出
+        if gain_since_entry > _pool_upper:
+            _record_reject(symbol, "over_20", pool.get("last_score", 0),
+                           cur_price, entry_price, gain_since_entry,
+                           pool.get("last_breakdown", ""))
+            del state["watchpool"][symbol]
+            events["pool_exits"].append({"symbol": symbol, "reason": f"涨幅{gain_since_entry:.1f}%>{_pool_upper}%不追高"})
+            logger.info(f"[退出] {symbol} 涨幅{gain_since_entry:.1f}%>{_pool_upper}%不追高")
+            continue
+
+        # 涨幅跌回下限 → 动力不足，退出
+        if gain_since_entry < _pool_lower:
+            _record_reject(symbol, "under_5", pool.get("last_score", 0),
+                           cur_price, entry_price, gain_since_entry,
+                           pool.get("last_breakdown", ""))
+            del state["watchpool"][symbol]
+            events["pool_exits"].append({"symbol": symbol, "reason": f"涨幅跌回{gain_since_entry:.1f}%<{_pool_lower}%动力不足"})
+            logger.info(f"[退出] {symbol} 涨幅{gain_since_entry:.1f}%<{_pool_lower}%动力不足")
+            continue
+
+        # 峰值回撤>20% → 退出
         peak = pool.get("peak_price", entry_price)
         if peak > 0:
             drawdown = (peak - cur_price) / peak * 100
             if drawdown > 20:
+                _record_reject(symbol, "peak_drawdown", pool.get("last_score", 0),
+                               cur_price, entry_price, gain_since_entry,
+                               pool.get("last_breakdown", ""))
                 del state["watchpool"][symbol]
                 events["pool_exits"].append({"symbol": symbol, "reason": f"峰值回撤{drawdown:.1f}%"})
                 logger.info(f"[退出] {symbol} 峰值回撤{drawdown:.1f}%>20%")
                 continue
-        if gain_since_entry < -15:
-            del state["watchpool"][symbol]
-            events["pool_exits"].append({"symbol": symbol, "reason": f"进池后跌{gain_since_entry:.1f}%"})
-            logger.info(f"[退出] {symbol} 进池后跌{gain_since_entry:.1f}%<-15%")
-            continue
 
         # ── 定期打分：价格变化≥1%就重新打分（无时间冷却） ──
         last_price = pool.get("last_analyze_price", 0)
@@ -700,6 +734,9 @@ def scan_once(state: dict, tickers: list) -> dict:
                 _pct_24h = float(_ticker.get("priceChangePercent", 0))
                 _max_24h = CFG.get("max_24h_change_pct", 30)
                 if _pct_24h > _max_24h:
+                    _record_reject(symbol, "over_20", analyze_result.get("score", 0),
+                                   cur_price, entry_price, gain_since_entry,
+                                   str(analyze_result.get("breakdown", "")))
                     logger.info(f"[过滤] {symbol} 评分{analyze_result.get('score')}分但24h已涨{_pct_24h:.1f}%>{_max_24h}%，不记录不推送")
                     continue
             except Exception as _e:
@@ -784,6 +821,9 @@ def scan_once(state: dict, tickers: list) -> dict:
 
         # ── 利空否决 ──
         elif analyze_result["action"] == "veto":
+            _record_reject(symbol, "veto", analyze_result.get("score", 0),
+                           cur_price, entry_price, gain_since_entry,
+                           str(analyze_result.get("breakdown", "")))
             del state["watchpool"][symbol]
             state["cooldowns"][symbol] = {
                 "expire_at": now + CFG.get("cooldown_after_veto_min", 30) * 60,
@@ -801,6 +841,8 @@ def scan_once(state: dict, tickers: list) -> dict:
             pool["analyzed"] = True
             pool["last_analyze_price"] = cur_price
             pool["last_analyze_time"] = now
+            pool["last_score"] = analyze_result.get("score", 0)
+            pool["last_breakdown"] = str(analyze_result.get("breakdown", ""))
 
     save_state(state)
     return events
@@ -893,9 +935,13 @@ def run():
         if CFG.get("custom_trailing_enabled", False):
             try:
                 from trailing_limit import check_all as tl_check
+                from bull_trailing import _settle_signal
                 tl_results = tl_check(CFG)
                 for t in tl_results:
+                    _settle_signal(state, t["symbol"], "success", 0)
                     logger.info(f"[限价止盈] {t['symbol']} 成交 盈亏+{t['pnl_pct']}%")
+                if tl_results:
+                    save_state(state)
             except Exception as e:
                 logger.warning(f"[限价止盈] 检查异常: {e}")
         else:
@@ -916,7 +962,34 @@ def run():
         except Exception as e:
             logger.warning(f"[仓位管理] 检查异常: {e}")
 
-        # :00 整点：群组状态卡片
+        # 每30秒全市场扫描
+        if now - last_full_scan >= CFG.get("scan_interval_sec", 30):
+            try:
+                tickers = get_all_tickers()
+                # 首次扫描：生成启动黑名单
+                if not _startup_done:
+                    logger.info(f"[启动黑名单] 开始扫描 {len(tickers)} 个合约...")
+                    build_startup_blacklist(tickers)
+                logger.info(f"全市场扫描: {len(tickers)}个合约")
+                events = scan_once(state, tickers)
+
+                # 更新拒绝追踪器峰值
+                try:
+                    _reject_prices = {t["symbol"]: float(t.get("lastPrice", 0)) for t in tickers}
+                    _update_reject_peaks(_reject_prices)
+                except Exception as _e:
+                    logger.debug(f"[拒绝追踪] 更新异常: {_e}")
+
+                if events["new_pool"]:
+                    logger.info(f"新进池: {events['new_pool']}")
+                if events["new_signals"]:
+                    logger.info(f"新信号: {[s['symbol'] for s in events['new_signals']]}")
+
+                last_full_scan = now
+            except Exception as e:
+                logger.error(f"扫描异常: {e}")
+
+        # :00 整点：群组状态卡片（扫描后推送，确保反映最新状态）
         if current_hour != last_card_hour:
             try:
                 send_status_card(state)
@@ -939,31 +1012,16 @@ def run():
             except Exception as e:
                 logger.warning(f"健康报告推送失败: {e}")
 
-        # 每30秒全市场扫描
-        if now - last_full_scan >= CFG.get("scan_interval_sec", 30):
-            try:
-                tickers = get_all_tickers()
-                # 首次扫描：生成启动黑名单
-                if not _startup_done:
-                    logger.info(f"[启动黑名单] 开始扫描 {len(tickers)} 个合约...")
-                    build_startup_blacklist(tickers)
-                logger.info(f"全市场扫描: {len(tickers)}个合约")
-                events = scan_once(state, tickers)
-
-                if events["new_pool"]:
-                    logger.info(f"新进池: {events['new_pool']}")
-                if events["new_signals"]:
-                    logger.info(f"新信号: {[s['symbol'] for s in events['new_signals']]}")
-
-                last_full_scan = now
-            except Exception as e:
-                logger.error(f"扫描异常: {e}")
-
         # 观察池有币时，每10秒刷新
         elif state["watchpool"]:
             try:
                 tickers = get_all_tickers()
                 scan_once(state, tickers)
+                try:
+                    _reject_prices = {t["symbol"]: float(t.get("lastPrice", 0)) for t in tickers}
+                    _update_reject_peaks(_reject_prices)
+                except Exception:
+                    pass
             except Exception as e:
                 logger.error(f"观察池刷新异常: {e}")
 

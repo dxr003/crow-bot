@@ -15,6 +15,8 @@ bull_sniper:
   exclude_daily_vol_below: 20000000
   min_drop_from_ath: 60
   max_24h_change_pct: 30       # 24h涨>30%不进池+不买入（防拉完回抽）
+  pool_exit_upper_pct: 20      # 池内涨幅>20%退出（不追高）
+  pool_exit_lower_pct: 5       # 池内涨幅跌回<5%退出（动力不足）
 
   # ── 进池条件 ──
   # 第一层：瞬时触发（任意一条）
@@ -108,9 +110,9 @@ bull_sniper:
     gain_25_40: 5              # 过热
 
     # C. 量比（互斥取最高）
-    vol_ratio_5x: 18
-    vol_ratio_3x: 15
-    vol_ratio_2x: 10
+    vol_ratio_5x: 10
+    vol_ratio_3x: 7
+    vol_ratio_2x: 6
     vol_ratio_1_5x: 5
     vol_ratio_low: -5
 

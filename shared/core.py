@@ -446,6 +446,34 @@ def create_and_run_bot(env_path, claude_add_dir=None):
             if not positions or all("_error" in p for p in positions):
                 await update.message.reply_text("📭 当前无持仓")
                 return
+            # 查挂单（SL/TP状态）
+            open_orders = {}
+            try:
+                if bot_dir == "maomao":
+                    from trader.multi_account import ACCOUNTS, _load_client
+                    for acct in ACCOUNTS:
+                        try:
+                            cli, _, _ = _load_client(acct)
+                            for o in cli.get_open_orders():
+                                open_orders.setdefault(o["symbol"], []).append(o)
+                        except Exception:
+                            pass
+                else:
+                    from trader.exchange import get_client
+                    for o in get_client().futures_get_open_orders():
+                        open_orders.setdefault(o["symbol"], []).append(o)
+            except Exception:
+                pass
+            # 查自研移动止盈状态
+            tl_state = {}
+            try:
+                import json as _json
+                from pathlib import Path as _Path
+                _tl = _Path("/root/maomao/trader/skills/bull_sniper/data/trailing_limit_state.json")
+                if _tl.exists():
+                    tl_state = _json.loads(_tl.read_text())
+            except Exception:
+                pass
             lines = []
             cur_account = None
             for p in positions:
@@ -456,6 +484,7 @@ def create_and_run_bot(env_path, claude_add_dir=None):
                 if acct and acct != cur_account:
                     lines.append(f"\n<b>【{acct}】</b>")
                     cur_account = acct
+                sym  = p['symbol']
                 amt  = float(p['positionAmt'])
                 side = "多" if amt > 0 else "空"
                 entry = float(p['entryPrice'])
@@ -464,11 +493,29 @@ def create_and_run_bot(env_path, claude_add_dir=None):
                 lev   = p.get('leverage', '?')
                 mark  = float(p.get('markPrice', 0))
                 margin = float(p.get('isolatedWallet', 0)) or float(p.get('initialMargin', 0))
+                notional = abs(amt) * mark
                 pct = (upnl / margin * 100) if margin > 0 else 0
+                pnl_icon = "🟢" if upnl >= 0 else "🔴"
+                liq_str = f"{liq:.4f}" if liq > 0 else "全仓"
+                # SL/TP 状态
+                sl_tag, tp_tag = "SL❌", "TP❌"
+                orders = open_orders.get(sym, [])
+                for o in orders:
+                    ot = o.get("type", "")
+                    sp = o.get("stopPrice", "0")
+                    if ot == "STOP_MARKET":
+                        sl_tag = f"SL✅ {float(sp):.4f}"
+                    elif ot in ("TRAILING_STOP_MARKET", "TAKE_PROFIT_MARKET"):
+                        tp_tag = f"TP✅ 原生"
+                if sym in tl_state:
+                    tp_tag = f"TP✅ 移动止盈"
                 lines.append(
-                    f"<b>{p['symbol']}</b> {side} {abs(amt)} @{lev}x\n"
-                    f"  入场:{entry:.4f}  标记:{mark:.4f}\n"
-                    f"  强平:{liq:.4f}  浮盈:{upnl:+.2f}U ({pct:+.1f}%)"
+                    f"<b>{p['symbol']}</b> {side} {lev}x\n"
+                    f"  持仓: {abs(amt):.4f}  保证金: {margin:.2f}U\n"
+                    f"  入场: {entry:.4f}  现价: {mark:.4f}\n"
+                    f"  强平: {liq_str}  仓位值: {notional:.2f}U\n"
+                    f"  {pnl_icon} 浮盈: {upnl:+.2f}U ({pct:+.1f}%)\n"
+                    f"  {sl_tag}  {tp_tag}"
                 )
             await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
         except Exception as e:
@@ -481,41 +528,55 @@ def create_and_run_bot(env_path, claude_add_dir=None):
             if bot_dir == "maomao":
                 from trader.multi_account import get_all_balances as get_multi_bal
                 accounts = get_multi_bal()
-                lines = ["<b>全账户余额</b>"]
+                lines = ["💰 <b>全账户余额</b>"]
                 total_all = 0
+                stables = {"USDT", "USDC", "BUSD", "FDUSD"}
                 for b in accounts:
                     if "error" in b:
                         lines.append(f"\n<b>【{b['name']}】</b> ❌ {b['error']}")
                         continue
+                    upnl = b['futures_upnl']
+                    equity = b['futures'] + upnl
+                    acct_total = equity
+                    upnl_icon = "🟢" if upnl >= 0 else "🔴"
                     lines.append(f"\n<b>【{b['name']}】</b>")
-                    lines.append(f"  合约: {b['futures']:.2f}U  可用: {b['futures_avail']:.2f}U  浮盈: {b['futures_upnl']:+.2f}U")
-                    total_all += b['futures'] + b['futures_upnl']
+                    lines.append(f"  合约余额: {b['futures']:.2f}U")
+                    lines.append(f"  可用保证金: {b['futures_avail']:.2f}U")
+                    lines.append(f"  {upnl_icon} 浮盈: {upnl:+.2f}U")
+                    lines.append(f"  净值: {equity:.2f}U")
                     spot = {k: v for k, v in b.get('spot', {}).items() if v >= 1}
                     if spot:
-                        stables = {"USDT", "USDC", "BUSD", "FDUSD"}
+                        spot_items = []
                         for asset, amt in sorted(spot.items(), key=lambda x: -x[1]):
-                            lines.append(f"  现货 {asset}: {amt:.4f}")
+                            spot_items.append(f"{asset}:{amt:.4f}")
                             if asset in stables:
-                                total_all += amt
-                    funding = b.get('funding', {})
+                                acct_total += amt
+                        lines.append(f"  现货: {', '.join(spot_items)}")
+                    funding = {k: v for k, v in b.get('funding', {}).items() if v >= 1}
                     if funding:
-                        stables_f = {"USDT", "USDC", "BUSD", "FDUSD"}
+                        fund_items = []
                         for asset, amt in sorted(funding.items(), key=lambda x: -x[1]):
-                            if amt >= 1:
-                                lines.append(f"  资金 {asset}: {amt:.4f}")
-                                if asset in stables_f:
-                                    total_all += amt
-                lines.append(f"\n<b>合计: {total_all:.2f}U</b> (含稳定币现货)")
+                            fund_items.append(f"{asset}:{amt:.4f}")
+                            if asset in stables:
+                                acct_total += amt
+                        lines.append(f"  资金: {', '.join(fund_items)}")
+                    lines.append(f"  <b>小计: {acct_total:.2f}U</b>")
+                    total_all += acct_total
+                lines.append(f"\n━━━━━━━━━━━━━━━━━━━━")
+                lines.append(f"<b>全账户合计: {total_all:.2f}U</b>")
             else:
                 from trader.exchange import get_all_balances
                 b = get_all_balances()
-                total = b['futures'] + b['futures_upnl']
+                upnl = b['futures_upnl']
+                equity = b['futures'] + upnl
+                total = equity
+                upnl_icon = "🟢" if upnl >= 0 else "🔴"
                 stables = {"USDT", "USDC", "BUSD", "FDUSD"}
-                lines = ["<b>账户余额</b>\n"]
-                lines.append("<b>合约</b>")
-                lines.append(f"  余额: {b['futures']:.2f} U")
-                lines.append(f"  可用: {b['futures_avail']:.2f} U")
-                lines.append(f"  浮盈: {b['futures_upnl']:+.2f} U")
+                lines = ["💰 <b>账户余额</b>\n"]
+                lines.append(f"  合约余额: {b['futures']:.2f}U")
+                lines.append(f"  可用保证金: {b['futures_avail']:.2f}U")
+                lines.append(f"  {upnl_icon} 浮盈: {upnl:+.2f}U")
+                lines.append(f"  净值: {equity:.2f}U")
                 spot = {k: v for k, v in b.get('spot', {}).items() if v >= 1}
                 if spot:
                     lines.append("\n<b>现货</b>")
@@ -530,7 +591,8 @@ def create_and_run_bot(env_path, claude_add_dir=None):
                         lines.append(f"  {asset}: {amt:.4f}")
                         if asset in stables:
                             total += amt
-                lines.append(f"\n<b>合计: {total:.2f}U</b>")
+                lines.append(f"\n━━━━━━━━━━━━━━━━━━━━")
+                lines.append(f"<b>合计: {total:.2f}U</b>")
             await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
         except Exception as e:
             await update.message.reply_text(f"❌ 查询失败: {e}")

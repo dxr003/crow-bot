@@ -252,6 +252,28 @@ def check_all() -> list:
     return triggered
 
 
+def _settle_signal(scanner_state: dict, symbol: str, status: str, exit_price: float):
+    """将活跃信号移入 signal_history（仓位关闭时调用）
+    status: tp→success, sl→failed, expired→expired, success→success
+    """
+    status_map = {"tp": "success", "sl": "failed"}
+    mapped = status_map.get(status, status)
+    signals = scanner_state.get("signals", [])
+    remaining = []
+    for sig in signals:
+        if sig["symbol"] == symbol:
+            sig["status"] = mapped
+            sig["exit_price"] = exit_price
+            sig["settled_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            scanner_state.setdefault("signal_history", []).append(sig)
+            if len(scanner_state["signal_history"]) > 50:
+                scanner_state["signal_history"] = scanner_state["signal_history"][-50:]
+            logger.info(f"[结算] {symbol} 信号 → {status} 出场:{exit_price}")
+        else:
+            remaining.append(sig)
+    scanner_state["signals"] = remaining
+
+
 def check_positions(scanner_state: dict, cfg: dict = None) -> bool:
     """
     仓位生命周期管理，由 scanner 主循环每轮调用。
@@ -335,6 +357,7 @@ def check_positions(scanner_state: dict, cfg: dict = None) -> bool:
                 _route(event, close_msg)
                 logger.info(f"[仓位] {coin} {label} 保证金盈亏{margin_pnl:+.1f}% 冷却{cooldown_hours}h")
 
+                _settle_signal(scanner_state, symbol, cooldown_type, mark)
                 del positions[symbol]
                 changed = True
                 continue
@@ -374,6 +397,7 @@ def check_positions(scanner_state: dict, cfg: dict = None) -> bool:
                 _route("forced_close", timeout_msg)
                 logger.info(f"[仓位] {coin} {label} 保证金盈亏{margin_pnl:+.1f}% {close_result}")
 
+                _settle_signal(scanner_state, symbol, "expired", cur_price)
                 del positions[symbol]
                 changed = True
                 continue

@@ -140,6 +140,8 @@ def main():
             lines.append(f"  💰现货 <code>{spot_u:.2f}U</code>")
         if fund_u > 1:
             lines.append(f"  💰资金 <code>{fund_u:.2f}U</code>")
+        acct_total = futures + spot_u + fund_u
+        lines.append(f"  📊 小计: <b>{acct_total:.2f}U</b>")
 
     _stable = {"USDT", "USDC", "FDUSD", "BUSD", "DAI", "TUSD"}
     ok_bals = [b for b in balances if "error" not in b]

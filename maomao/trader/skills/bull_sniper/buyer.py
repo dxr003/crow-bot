@@ -10,6 +10,7 @@ import logging
 import math
 import os
 import time
+from urllib.parse import urlencode
 
 import requests
 from dotenv import load_dotenv
@@ -112,12 +113,12 @@ def _algo_order(params: dict) -> dict:
     secret = os.getenv("BINANCE2_API_SECRET", "")
     ts = int(time.time() * 1000)
     params["timestamp"] = str(ts)
-    query = "&".join(f"{k}={v}" for k, v in params.items())
+    query = urlencode(params)
     sig = hmac.new(secret.encode(), query.encode(), hashlib.sha256).hexdigest()
     resp = requests.post(
         f"{FAPI_BASE}/fapi/v1/algoOrder",
-        params={**params, "signature": sig},
         headers={"X-MBX-APIKEY": key},
+        data=query + "&signature=" + sig,
         timeout=10,
     )
     return {"status_code": resp.status_code, "data": resp.json()}
@@ -129,12 +130,12 @@ def _fapi_order(params: dict) -> dict:
     secret = os.getenv("BINANCE2_API_SECRET", "")
     ts = int(time.time() * 1000)
     params["timestamp"] = str(ts)
-    query = "&".join(f"{k}={v}" for k, v in params.items())
+    query = urlencode(params)
     sig = hmac.new(secret.encode(), query.encode(), hashlib.sha256).hexdigest()
     resp = requests.post(
         f"{FAPI_BASE}/fapi/v1/order",
-        params={**params, "signature": sig},
         headers={"X-MBX-APIKEY": key},
+        data=query + "&signature=" + sig,
         timeout=10,
     )
     return {"status_code": resp.status_code, "data": resp.json()}

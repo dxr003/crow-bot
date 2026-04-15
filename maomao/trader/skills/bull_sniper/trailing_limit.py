@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import time
+from urllib.parse import urlencode
 from pathlib import Path
 
 import requests
@@ -46,16 +47,17 @@ def _bn2_signed(method: str, path: str, params: dict) -> dict:
     key = os.getenv("BINANCE2_API_KEY", "")
     secret = os.getenv("BINANCE2_API_SECRET", "")
     params["timestamp"] = str(int(time.time() * 1000))
-    qs = "&".join(f"{k}={v}" for k, v in params.items())
+    qs = urlencode(params)
     sig = hmac.new(secret.encode(), qs.encode(), hashlib.sha256).hexdigest()
+    body = qs + "&signature=" + sig
     url = f"{FAPI_BASE}{path}"
     headers = {"X-MBX-APIKEY": key}
     if method == "POST":
-        resp = requests.post(url, params=f"{qs}&signature={sig}", headers=headers, timeout=10)
+        resp = requests.post(url, data=body, headers=headers, timeout=10)
     elif method == "DELETE":
-        resp = requests.delete(url, params=f"{qs}&signature={sig}", headers=headers, timeout=10)
+        resp = requests.delete(url, data=body, headers=headers, timeout=10)
     else:
-        resp = requests.get(url, params=f"{qs}&signature={sig}", headers=headers, timeout=10)
+        resp = requests.get(url, params=body, headers=headers, timeout=10)
     return {"status_code": resp.status_code, "data": resp.json()}
 
 
@@ -195,29 +197,40 @@ def check_all(cfg: dict = None) -> list:
             pos = positions.get(symbol)
             is_long = entry["side"] == "LONG"
 
-            # ── 仓位消失：检查是否限价单成交 ──
+            # ── 仓位消失：判断止盈还是止损 ──
             if not pos:
-                order_id = entry.get("current_order_id", "")
-                tp_price = entry.get("current_tp_price", 0)
                 entry_price = entry["entry_price"]
                 leverage = entry.get("leverage", 5)
+                mark = _get_mark_price(symbol) or entry_price
+                tp_price = entry.get("current_tp_price", 0)
 
                 if is_long:
-                    pnl_pct = (tp_price - entry_price) / entry_price * 100 if tp_price > 0 else 0
+                    pnl_pct = (mark - entry_price) / entry_price * 100 if entry_price > 0 else 0
                 else:
-                    pnl_pct = (entry_price - tp_price) / entry_price * 100 if tp_price > 0 else 0
+                    pnl_pct = (entry_price - mark) / entry_price * 100 if entry_price > 0 else 0
                 margin_pnl = pnl_pct * leverage
 
-                tp_msg = (
-                    f"✅ <b>做多阻击成交报告 · {coin}</b>\n"
+                if margin_pnl >= 0:
+                    emoji = "✅"
+                    label = "✅ 止盈成交"
+                    event = "tp_closed"
+                    exit_desc = f"止盈价: {tp_price:.4f}" if tp_price > 0 else f"现价: {mark:.4f}"
+                else:
+                    emoji = "❌"
+                    label = "❌ 触发止损已平仓"
+                    event = "sl_closed"
+                    exit_desc = f"现价: {mark:.4f}"
+
+                close_msg = (
+                    f"{emoji} <b>做多阻击成交报告 · {coin}</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━\n"
-                    f"结果: ✅ 止盈成交\n"
-                    f"入场: {entry_price:.4f}  止盈价: {tp_price:.4f}\n"
-                    f"盈利: +{pnl_pct:.1f}%(本金) / +{margin_pnl:.1f}%(含杠杆)\n"
+                    f"结果: {label}\n"
+                    f"入场: {entry_price:.4f}  {exit_desc}\n"
+                    f"盈亏: {pnl_pct:+.1f}%(本金) / {margin_pnl:+.1f}%(含杠杆)\n"
                     f"冷却: 12小时"
                 )
-                _route("tp_closed", tp_msg)
-                logger.info(f"[移动止盈] {coin} 成交 盈亏+{margin_pnl:.1f}%")
+                _route(event, close_msg)
+                logger.info(f"[移动止盈] {coin} {label} 盈亏{margin_pnl:+.1f}%")
 
                 results.append({"symbol": symbol, "pnl_pct": round(margin_pnl, 1)})
                 del state[symbol]
