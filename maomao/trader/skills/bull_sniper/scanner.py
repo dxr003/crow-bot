@@ -406,7 +406,7 @@ def load_state() -> dict:
         "signals":    [],   # 活跃信号（待结算）
         "signal_history": [],  # 已结算信号（成功/失败/过期）
         "positions":  {},   # {symbol: {entry_price, entry_time, order_id, score, ...}}
-        "cooldowns":  {},   # {symbol: expire_ts}
+        "cooldowns":  {},   # {symbol: {expire_at, type, last_entry_price}}
         "filter_log": [],   # 过滤日志，滚动50条
         "stats": {"scans": 0, "pool_entries": 0, "signals": 0},
     }
@@ -454,8 +454,26 @@ def scan_once(state: dict, tickers: list) -> dict:
 
     state["stats"]["scans"] += 1
 
-    # ── 1. 清理过期冷却 ──
-    state["cooldowns"] = {s: ts for s, ts in state["cooldowns"].items() if ts > now}
+    # ── 1. 清理过期冷却（时间到期 OR 价格回落解除） ──
+    price_release_pct = CFG.get("cooldown_price_release_pct", 80) / 100.0
+    price_release_on_sl = CFG.get("cooldown_price_release_on_sl", False)
+    live_prices = {t["symbol"]: float(t.get("lastPrice", 0)) for t in tickers}
+    surviving_cooldowns = {}
+    for s, cd in state["cooldowns"].items():
+        if isinstance(cd, (int, float)):
+            cd = {"expire_at": cd, "type": "unknown", "last_entry_price": 0}
+        if now >= cd["expire_at"]:
+            logger.info(f"[冷却] {s} 时间到期，解除")
+            continue
+        entry_p = cd.get("last_entry_price", 0)
+        cd_type = cd.get("type", "unknown")
+        if cd_type != "sl" or price_release_on_sl:
+            cur_p = live_prices.get(s, 0)
+            if entry_p > 0 and cur_p > 0 and cur_p <= entry_p * price_release_pct:
+                logger.info(f"[冷却] {s} 价格回落解除 cur={cur_p:.4f} <= entry*{price_release_pct}={entry_p*price_release_pct:.4f}")
+                continue
+        surviving_cooldowns[s] = cd
+    state["cooldowns"] = surviving_cooldowns
 
     # ── 2. 基础过滤 ──
     candidates = []
@@ -707,7 +725,11 @@ def scan_once(state: dict, tickers: list) -> dict:
             }
             state["signals"].append(signal)
             state["stats"]["signals"] += 1
-            state["cooldowns"][symbol] = now + CFG.get("cooldown_after_tp_hours", 48) * 3600
+            state["cooldowns"][symbol] = {
+                "expire_at": now + CFG.get("cooldown_after_tp_hours", 12) * 3600,
+                "type": "tp",
+                "last_entry_price": signal.get("entry_price", 0),
+            }
             del state["watchpool"][symbol]
             events["new_signals"].append(signal)
 
@@ -763,7 +785,11 @@ def scan_once(state: dict, tickers: list) -> dict:
         # ── 利空否决 ──
         elif analyze_result["action"] == "veto":
             del state["watchpool"][symbol]
-            state["cooldowns"][symbol] = now + CFG.get("cooldown_after_veto_min", 30) * 60
+            state["cooldowns"][symbol] = {
+                "expire_at": now + CFG.get("cooldown_after_veto_min", 30) * 60,
+                "type": "veto",
+                "last_entry_price": pool.get("entry_price", 0),
+            }
             events["pool_exits"].append({
                 "symbol": symbol,
                 "reason": f"否决: {analyze_result.get('reason', '')}",

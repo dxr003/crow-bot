@@ -273,9 +273,9 @@ def check_positions(scanner_state: dict, cfg: dict = None) -> bool:
     now = time.time()
     changed = False
     leverage = cfg.get("default_leverage", 5)
-    tp_cooldown = cfg.get("cooldown_after_tp_hours", 48)
-    sl_cooldown = cfg.get("cooldown_after_sl_hours", 48)
-    timeout_cooldown = cfg.get("cooldown_after_timeout_hours", 24)
+    tp_cooldown = cfg.get("cooldown_after_tp_hours", 12)
+    sl_cooldown = cfg.get("cooldown_after_sl_hours", 24)
+    timeout_cooldown = cfg.get("cooldown_after_timeout_hours", 6)
     timeout_hours = cfg.get("position_timeout_hours", 24)
 
     for symbol, pos_info in list(positions.items()):
@@ -309,13 +309,19 @@ def check_positions(scanner_state: dict, cfg: dict = None) -> bool:
                 if margin_pnl >= 0:
                     label, emoji = "✅ 成功", "✅"
                     cooldown_hours = tp_cooldown
+                    cooldown_type = "tp"
                     event = "tp_closed"
                 else:
                     label, emoji = "❌ 失败", "❌"
                     cooldown_hours = sl_cooldown
+                    cooldown_type = "sl"
                     event = "sl_closed"
 
-                scanner_state.setdefault("cooldowns", {})[symbol] = now + cooldown_hours * 3600
+                scanner_state.setdefault("cooldowns", {})[symbol] = {
+                    "expire_at": now + cooldown_hours * 3600,
+                    "type": cooldown_type,
+                    "last_entry_price": entry_price,
+                }
 
                 close_msg = (
                     f"{emoji} <b>仓位结束 — {coin}</b>\n"
@@ -346,7 +352,11 @@ def check_positions(scanner_state: dict, cfg: dict = None) -> bool:
                     pass
                 close_result = _close_position(symbol, bn2_pos["amt"])
 
-                scanner_state.setdefault("cooldowns", {})[symbol] = now + timeout_cooldown * 3600
+                scanner_state.setdefault("cooldowns", {})[symbol] = {
+                    "expire_at": now + timeout_cooldown * 3600,
+                    "type": "timeout",
+                    "last_entry_price": entry_price,
+                }
 
                 timeout_msg = (
                     f"⏰ <b>因故平仓 — {coin}</b>\n"
