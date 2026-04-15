@@ -450,6 +450,55 @@ def send_trade_report(signal: dict, buy_result: dict, analyze_result: dict):
     else:
         channel = f"📌 {action}"
 
+    # ── 分析详情（贝贝完整版用） ──
+    analyze_lines = []
+    analyze = analyze_result or {}
+    news = analyze.get("news", {})
+    if news:
+        sentiment = news.get("sentiment", "")
+        news_reason = news.get("reason", "")
+        titles = news.get("titles", [])
+        if sentiment:
+            analyze_lines.append(f"📰 新闻情绪：{sentiment}")
+        if news_reason:
+            analyze_lines.append(f"   判断：{html_mod.escape(news_reason[:80])}")
+        for t in titles[:2]:
+            analyze_lines.append(f"   · {html_mod.escape(t[:60])}")
+    delist = analyze.get("delist")
+    if delist:
+        analyze_lines.append(f"🚫 下架检测：{html_mod.escape(str(delist)[:60])}")
+    ai_decision = analyze.get("ai_decision", "")
+    ai_full_reason = analyze.get("ai_reason", "") or ai_reason
+    if ai_decision:
+        analyze_lines.append(f"🤖 AI决策：{ai_decision}")
+    if ai_full_reason:
+        analyze_lines.append(f"   理由：{html_mod.escape(ai_full_reason[:100])}")
+    btc_1h = analyze.get("btc_1h")
+    if btc_1h is not None:
+        analyze_lines.append(f"₿ BTC 1h：{btc_1h:+.2f}%")
+    breakdown = analyze.get("breakdown", {})
+    if breakdown:
+        analyze_lines.append(f"📋 评分明细：")
+        for k, v in breakdown.items():
+            analyze_lines.append(f"   {k}: {v:+d}")
+        if score is not None:
+            analyze_lines.append(f"   总分: {score}")
+    analyze_block = "\n".join(analyze_lines) if analyze_lines else "无详细分析数据"
+
+    # ── 市场数据（贝贝完整版用） ──
+    market = analyze.get("market_data", {})
+    market_lines = []
+    if market:
+        if "oi_change_pct" in market:
+            market_lines.append(f"OI变化: {market['oi_change_pct']:+.1f}%")
+        if "long_short_ratio" in market:
+            market_lines.append(f"多空比: {market['long_short_ratio']:.2f}")
+        if "funding_rate" in market:
+            market_lines.append(f"费率: {market['funding_rate']*100:.4f}%")
+        if "volume_ratio" in market:
+            market_lines.append(f"量比: {market['volume_ratio']:.1f}x")
+    market_block = " / ".join(market_lines) if market_lines else "—"
+
     # ── 执行结果 ──
     status = buy_result.get("status", "?")
     if status == "executed":
@@ -480,8 +529,32 @@ def send_trade_report(signal: dict, buy_result: dict, analyze_result: dict):
         exec_icon = "❌"
         exec_block = f"失败：{buy_result.get('reason', '?')}"
 
-    # ── 完整版（玄玄→乌鸦私信 + 天天） ──
-    text = (
+    # ── 贝贝完整版（→乌鸦私信，含1234步骤） ──
+    text_full = (
+        f"{exec_icon} <b>做多阻击成交报告 · {sym}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"⏰ {now_str}\n\n"
+        f"<b>1️⃣ 触发</b>\n"
+        f"<blockquote>"
+        f"{channel}\n"
+        f"24h涨幅: +{signal.get('gain_pct', 0)}%\n"
+        f"进池价: {_fmt_price(signal.get('entry_price', 0))}\n"
+        f"触发价: {_fmt_price(signal.get('cur_price', 0))}\n"
+        f"成交量: {_fmt_vol(signal.get('volume_usdt', 0))}\n"
+        f"距ATH: -{signal.get('drop_from_ath', 0):.1f}%\n"
+        f"观察时长: {signal.get('elapsed_min', 0):.0f}分钟"
+        f"</blockquote>\n\n"
+        f"<b>2️⃣ 分析过程</b>\n"
+        f"<blockquote>{analyze_block}</blockquote>\n\n"
+        f"<b>3️⃣ 市场数据</b>\n"
+        f"<blockquote>{market_block}</blockquote>\n\n"
+        f"<b>4️⃣ 执行结果</b>\n"
+        f"<blockquote>{exec_block}</blockquote>\n"
+        f"━━━━━━━━━━━━━━━━━━━━"
+    )
+
+    # ── 精简版（→天天 + 群组） ──
+    text_simple = (
         f"{exec_icon} <b>做多阻击成交报告 · {sym}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"⏰ {now_str}\n\n"
@@ -493,24 +566,12 @@ def send_trade_report(signal: dict, buy_result: dict, analyze_result: dict):
         f"━━━━━━━━━━━━━━━━━━━━"
     )
 
-    # ── 群组精简版 ──
-    text_group = (
-        f"{exec_icon} <b>做多阻击成交报告 · {sym}</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"⏰ {now_str}\n\n"
-        f"{channel}  24h涨幅: +{signal.get('gain_pct', 0)}%\n"
-        f"触发价: {_fmt_price(signal.get('cur_price', 0))}\n\n"
-        f"<blockquote>"
-        f"订单ID: {buy_result.get('order_id', '?')}\n"
-        f"止损价: {buy_result.get('sl_price', '?')}（保证金-30%）"
-        f"{'✅已挂' if buy_result.get('sl_algo_id') not in (None, '', '?') else '⚠️挂载失败'}\n"
-        f"移动止盈: {trailing_status if status == 'executed' else '—'}\n"
-        f"滚仓: {roll_status if status == 'executed' else '—'}"
-        f"</blockquote>\n"
-        f"━━━━━━━━━━━━━━━━━━━━"
-    )
-    event = "open_success" if status == "executed" else "open_fail"
-    route(event, text, text_group=text_group)
+    # 直接分发，不走route()
+    group_on = _load_notify_cfg().get("group_notify", True)
+    _send_admin(text_full)
+    _send_tt(text_simple)
+    if group_on:
+        _send_bb(text_simple)
 
 
 def send_health_report(state: dict, filter_log: list):

@@ -307,12 +307,14 @@ def check_positions(scanner_state: dict, cfg: dict = None) -> bool:
                 margin_pnl = pnl_pct * leverage
 
                 if margin_pnl >= 0:
-                    label, emoji = "✅ 成功", "✅"
+                    label = "✅ 止盈成交"
+                    emoji = "✅"
                     cooldown_hours = tp_cooldown
                     cooldown_type = "tp"
                     event = "tp_closed"
                 else:
-                    label, emoji = "❌ 失败", "❌"
+                    label = "❌ 触发止损已平仓"
+                    emoji = "❌"
                     cooldown_hours = sl_cooldown
                     cooldown_type = "sl"
                     event = "sl_closed"
@@ -324,7 +326,8 @@ def check_positions(scanner_state: dict, cfg: dict = None) -> bool:
                 }
 
                 close_msg = (
-                    f"{emoji} <b>仓位结束 — {coin}</b>\n"
+                    f"{emoji} <b>做多阻击成交报告 · {coin}</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
                     f"结果: {label}\n"
                     f"入场: {entry_price:.4f}  估算盈亏: {margin_pnl:+.1f}%\n"
                     f"冷却: {cooldown_hours}小时"
@@ -359,7 +362,9 @@ def check_positions(scanner_state: dict, cfg: dict = None) -> bool:
                 }
 
                 timeout_msg = (
-                    f"⏰ <b>因故平仓 — {coin}</b>\n"
+                    f"⏰ <b>做多阻击成交报告 · {coin}</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"结果: ⏰ 因故平仓\n"
                     f"持仓 {hours_held:.1f} 小时未爆发\n"
                     f"入场: {entry_price:.4f}  现价: {cur_price:.4f}\n"
                     f"保证金盈亏: {margin_pnl:+.1f}%\n"

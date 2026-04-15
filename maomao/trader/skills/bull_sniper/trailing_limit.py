@@ -209,10 +209,12 @@ def check_all(cfg: dict = None) -> list:
                 margin_pnl = pnl_pct * leverage
 
                 tp_msg = (
-                    f"✅ <b>移动止盈成交 — {coin}</b>\n"
+                    f"✅ <b>做多阻击成交报告 · {coin}</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"结果: ✅ 止盈成交\n"
                     f"入场: {entry_price:.4f}  止盈价: {tp_price:.4f}\n"
                     f"盈利: +{pnl_pct:.1f}%(本金) / +{margin_pnl:.1f}%(含杠杆)\n"
-                    f"触发48h冷却"
+                    f"冷却: 12小时"
                 )
                 _route("tp_closed", tp_msg)
                 logger.info(f"[移动止盈] {coin} 成交 盈亏+{margin_pnl:.1f}%")
