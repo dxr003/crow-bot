@@ -14,18 +14,74 @@ from telegram.constants import ParseMode
 
 
 def _md_to_html(text: str) -> str:
-    """Markdown → TG HTML：代码块、行内代码、粗体、斜体"""
-    # 多行代码块 ```lang\n...\n``` → <pre><code>...</code></pre>
-    def _code_block(m):
-        code = html_mod.escape(m.group(2))
-        return f"<pre><code>{code}</code></pre>"
-    text = re.sub(r"```(\w*)\n(.*?)```", _code_block, text, flags=re.DOTALL)
-    # 行内代码 `...` → <code>...</code>
-    text = re.sub(r"`([^`]+)`", lambda m: f"<code>{html_mod.escape(m.group(1))}</code>", text)
-    # 粗体 **...** → <b>...</b>
+    """Markdown → TG HTML（完整版）
+    支持：代码块、行内代码、粗体、斜体、删除线、标题、
+          分隔线、表格、有序/无序列表、链接、引用块
+    """
+    # ── 0. 保护区：先把代码块抽出来，防止内部被转换 ──
+    _blocks = []
+    def _save_block(m):
+        _blocks.append(html_mod.escape(m.group(2)))
+        return f"\x00CODEBLOCK{len(_blocks)-1}\x00"
+    text = re.sub(r"```(\w*)\n(.*?)```", _save_block, text, flags=re.DOTALL)
+
+    _inlines = []
+    def _save_inline(m):
+        _inlines.append(html_mod.escape(m.group(1)))
+        return f"\x00CODEINLINE{len(_inlines)-1}\x00"
+    text = re.sub(r"`([^`]+)`", _save_inline, text)
+
+    # ── 1. 表格：| col | col | → 等宽文本 ──
+    def _convert_table(m):
+        lines = m.group(0).strip().split("\n")
+        out = []
+        for line in lines:
+            stripped = line.strip()
+            if re.match(r"^\|[\s\-:|]+\|$", stripped):
+                continue  # 跳过分隔行 |---|---|
+            out.append(stripped)
+        return "<pre>" + "\n".join(out) + "</pre>"
+    text = re.sub(r"(?:^\|.+\|$\n?){2,}", _convert_table, text, flags=re.MULTILINE)
+
+    # ── 2. 标题 ##+ → 粗体（TG不支持原生标题） ──
+    text = re.sub(r"^#{1,6}\s+(.+)$", r"<b>\1</b>", text, flags=re.MULTILINE)
+
+    # ── 3. 分隔线 --- / *** / ___ → 空行 ──
+    text = re.sub(r"^[\s]*[-*_]{3,}[\s]*$", "", text, flags=re.MULTILINE)
+
+    # ── 4. 引用块 > text → 竖线缩进 ──
+    text = re.sub(r"^>\s?(.*)$", r"┃ \1", text, flags=re.MULTILINE)
+
+    # ── 5. 粗斜体 ***text*** → 粗+斜 ──
+    text = re.sub(r"\*\*\*(.+?)\*\*\*", r"<b><i>\1</i></b>", text)
+
+    # ── 6. 粗体 **text** → <b> ──
     text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
-    # 斜体 *...* → <i>...</i>
-    text = re.sub(r"\*(.+?)\*", r"<i>\1</i>", text)
+
+    # ── 7. 斜体 *text* → <i>（不匹配emoji旁的孤立*） ──
+    text = re.sub(r"(?<!\w)\*([^\s*](?:.*?[^\s*])?)\*(?!\w)", r"<i>\1</i>", text)
+
+    # ── 8. 删除线 ~~text~~ → <s> ──
+    text = re.sub(r"~~(.+?)~~", r"<s>\1</s>", text)
+
+    # ── 9. 链接 [text](url) → <a> ──
+    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', text)
+
+    # ── 10. 有序列表美化：数字. → 数字. （保持原样，TG纯文本就行） ──
+    # ── 11. 无序列表：- / * 开头 → • ──
+    text = re.sub(r"^[\s]*[-*]\s+", "• ", text, flags=re.MULTILINE)
+
+    # ── 12. 恢复代码块 ──
+    for i, code in enumerate(_blocks):
+        text = text.replace(f"\x00CODEBLOCK{i}\x00", f"<pre><code>{code}</code></pre>")
+    for i, code in enumerate(_inlines):
+        text = text.replace(f"\x00CODEINLINE{i}\x00", f"<code>{code}</code>")
+
+    # ── 13. HTML特殊字符转义（只转义未被标签包裹的 < > &） ──
+    # 不做全局转义，因为上面已经生成了HTML标签
+    # 只转义残留的裸 & （不属于 &amp; &lt; 等）
+    text = re.sub(r"&(?!amp;|lt;|gt;|quot;|#\d+;)", "&amp;", text)
+
     return text
 
 MODELS = [
@@ -190,8 +246,11 @@ async def ask_with_timer(update, gen_coro, model):
     for chunk in chunks:
         try:
             await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
-        except Exception:
-            await update.message.reply_text(chunk)
+        except Exception as e:
+            logging.getLogger("core").warning(f"HTML解析失败，降级纯文本: {e}")
+            # 剥掉HTML标签，保留可读文本
+            plain = re.sub(r"<[^>]+>", "", chunk)
+            await update.message.reply_text(plain)
 
 
 def create_and_run_bot(env_path, claude_add_dir=None):

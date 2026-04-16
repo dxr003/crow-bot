@@ -5,30 +5,48 @@ bull_sniper:
 
   # 扫描（30秒一轮，高频捕捉爆发）
   scan_interval_sec: 30
-  watchpool_max: 30
+  watchpool_max: 50
   watchpool_refresh_sec: 60
+
+  # ── 大币排除（不适合妖币策略）──
+  exclude_symbols:
+    - BTCUSDT
+    - ETHUSDT
+    - BNBUSDT
+    - SOLUSDT
+    - XRPUSDT
+    - ADAUSDT
+    - DOGEUSDT
+    - TRXUSDT
+    - AVAXUSDT
+    - DOTUSDT
 
   # ── 第一步：基础过滤 ──
   startup_max_change_pct: 50  # 启动时任意时段>50%排除（15→50）
   min_listing_days: 1
   ath_exempt_days: 180
   exclude_daily_vol_below: 20000000
-  min_drop_from_ath: 60
-  max_24h_change_pct: 30       # 24h涨>30%不进池+不买入（防拉完回抽）
-  pool_exit_upper_pct: 20      # 池内涨幅>20%退出（不追高）
-  pool_exit_lower_pct: 5       # 池内涨幅跌回<5%退出（动力不足）
+  min_drop_from_ath: 0            # 取消ATH跌幅限制，进池不花钱，评分把关
+  max_24h_change_pct: 50       # 24h涨>50%不进池+不买入（放宽，30%拦了太多妖币）
+  pool_ttl_hours: 24            # 观察池保留时间（小时），超时未触发信号才退出
 
   # ── 进池条件 ──
   # 第一层：瞬时触发（任意一条）
-  pool_burst_1m: 12           # 1m涨>12%
-  pool_burst_3m: 8            # 3m涨>8%
-  pool_burst_5m: 7            # 5m涨>7%
-  pool_burst_15m: 12          # 15m涨>12%
+  pool_burst_1m: 10           # 1m涨>10%（三选二·爆发）
+  pool_burst_3m: 6            # 3m涨>6%（三选二·爆发）
+  pool_burst_5m: 5            # 5m涨>5%（三选二·爆发）
+  pool_burst_15m: 10          # 15m涨>10%（三选二·爆发）
   # 第五条：阶梯型慢涨
-  pool_stair_15m: 6            # 15m涨>6%
+  pool_stair_15m: 5            # 15m涨>5%（原6，降1）
   pool_stair_vol_ratio: 1.5    # 量比>1.5x
+  # 第六条：量比异常（大币已被市值排除，不需要涨幅并排）
+  pool_vol_ratio_min: 2.0      # 量比≥2x（三选二）
+  # ── 市值排除 ──
+  mcap_exclude_top: 60         # CoinGecko市值前60名自动排除，24小时刷新
+  # 第七条：聪明钱买入
+  pool_smart_money_min_score: 4  # 聪明钱评分≥4进池（buy=4, 多地址=6, 大额=10）
   # 第二层（同时满足）
-  min_oi_usdt: 5000000        # OI≥500万U
+  min_oi_usdt: 3000000        # OI≥300万U
 
   # ── AI判断 ──
   ai:
@@ -82,10 +100,10 @@ bull_sniper:
   # ── 冷却 ──
   cooldown_after_tp_hours: 12
   cooldown_after_sl_hours: 24
-  cooldown_after_timeout_hours: 6
+  cooldown_after_timeout_hours: 0      # 超时退出不设冷却，符合条件直接重新进池
   cooldown_after_veto_min: 30
-  cooldown_price_release_pct: 80        # 当前价≤入场价×80%解除冷却
-  cooldown_price_release_on_sl: false   # 止损冷却不受价格解除影响
+  cooldown_price_release_pct: 100       # 当前价≤入场价就解除冷却（回到入场价以下=新机会）
+  cooldown_price_release_on_sl: true    # 止损冷却也受价格解除（跌回来就是机会）
   position_timeout_hours: 24       # 持仓超时自动平仓
 
   # ── 分析器 ──
@@ -93,62 +111,53 @@ bull_sniper:
     enabled: true
     signal_threshold: 28       # v2阈值（E因子满分+31）
 
-  # ── 评分参数 v3.1 ──
+  # ── 评分参数 v3.2（基于1417条实战数据优化） ──
   scoring:
-    # A. 价格动能（互斥取最高）
-    burst_1m_threshold: 8      # 1m涨>8%（12→8）
+    # A. 价格动能（互斥取最高，v3.2降门槛）
+    burst_1m_threshold: 6      # 1m涨>6%（v3.2: 8→6）
     burst_1m: 8
-    burst_3m_threshold: 6      # 3m涨>6%（8→6）
+    burst_3m_threshold: 4      # 3m涨>4%（v3.2: 6→4）
     burst_3m: 7
-    burst_5m_threshold: 5      # 5m涨>5%（7→5）
+    burst_5m_threshold: 3      # 5m涨>3%（v3.2: 5→3）
     burst_5m: 6
 
-    # B. 1h趋势（互斥取最高，越早越高）
-    gain_5_10: 7               # 初期（10→7）
-    gain_10_15: 10             # 中期（8→10）
-    gain_15_25: 8              # 强势（7→8）
-    gain_25_40: 5              # 过热
+    # B. 池内涨幅（互斥取最高，v3.2加低档+拓甜蜜区）
+    gain_2_5: 4                # 萌芽2-5%（v3.2新增）
+    gain_5_10: 7               # 初期5-8%
+    gain_10_15: 10             # 甜蜜区8-18%（v3.2拓宽）
+    gain_15_25: 8              # 强势18-30%
+    gain_25_40: 5              # 过热30-40%
+    gain_40_plus: 2            # 极端>40%（v3.2新增）
 
-    # C. 量比（互斥取最高）
+    # C. 量比（互斥取最高，v3.2减轻惩罚+填补空白）
     vol_ratio_5x: 10
     vol_ratio_3x: 7
     vol_ratio_2x: 6
     vol_ratio_1_5x: 5
-    vol_ratio_low: -5
+    vol_ratio_1x: 2            # 1-1.5x正常（v3.2新增）
+    vol_ratio_low: -1           # 萎缩<1x（v3.2: -5→-1）
 
-    # D. OI与资金费率（独立可叠加）
-    oi_up_mild: 5              # 5-15%
-    oi_up_strong: 8            # 15-30%
-    oi_up_super: 10            # >30%
-    oi_down: -5                # <-5%
+    # D. OI（v3.2: 比较窗口5分钟→1小时，降门槛）
+    oi_up_mild: 3              # 0.5-5%（v3.2: 门槛从5%降到0.5%）
+    oi_up_strong: 5            # 5-20%（v3.2: 8→5）
+    oi_up_super: 8             # >20%（v3.2: 门槛从30%降到20%）
+    oi_down: -3                # <-5%（v3.2: -5→-3）
+
+    # D. 多空比+费率
     lsr_short_dominant: 2      # 多空比<0.8
     funding_extreme_threshold: 0.0005  # 0.05%
     funding_extreme: 3
+    # 费率波动幅度（v3.2新增，看变化不看刻度）
+    funding_swing_low: 2       # 1h波动>0.02%
+    funding_swing_high: 4      # 1h波动>0.05%（替代+2）
 
-    # E. 社交+聪明钱（读缓存）
-    social_positive: 2
-    social_burst: 5            # 替代+2
-    social_burst_threshold: 100000  # 热度>10万
-    smart_money_buy: 4         # direction=buy+status=valid
-    smart_money_multi: 6       # smartMoneyCount≥3（替代+4）
+    # E. 由chain_score.py的E因子实现（最高+31，含否决）
+    # 以下参数保留用于进池路径参考，评分走chain_score
+    smart_money_buy: 4
+    smart_money_multi: 6
     smart_money_multi_threshold: 3
-    smart_money_large: 10      # totalTokenValue≥$5万（替代+6）
+    smart_money_large: 10
     smart_money_large_threshold: 50000
-    smart_money_reduce: -10    # Smart Money Remove Holdings
-    smart_money_wash: -8       # Insider Wash Trading
-
-    # F. 链上转账（读缓存）
-    chain_large_threshold: 200000     # $20万
-    chain_large: 5                    # ≥1笔>$20万
-    chain_whale_threshold: 1000000    # $100万
-    chain_whale: 15                   # ≥1笔>$100万（叠加+5）
-    chain_dense_count: 3              # ≥3笔>$20万
-    chain_dense: 10                   # 密集独立叠加
-    # 实时部分（后期加）
-    chain_realtime_large_threshold: 200000
-    chain_realtime_large: 10
-    chain_realtime_whale_threshold: 500000
-    chain_realtime_whale: 15          # 替代+10
 
     # G. 公告因子
     announce_new_listing: 5    # 新增合约

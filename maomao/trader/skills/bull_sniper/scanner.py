@@ -21,6 +21,7 @@ from analyzer import analyze
 from notifier import send_signal, send_health_report, send_status_card, send_trade_report, send_pool_entry
 from buyer import execute as buyer_execute
 from reject_tracker import record_exit as _record_reject, update_peaks as _update_reject_peaks
+from news_score import get_smart_money_score
 
 BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
@@ -92,6 +93,35 @@ def _refresh_trading_symbols() -> set:
     except Exception as e:
         logger.warning(f"[交易状态] exchangeInfo获取失败: {e}")
     return _trading_symbols
+
+
+# ── 市值排名排除（CoinGecko） ──
+_mcap_exclude: set = set()
+_mcap_exclude_ts: float = 0
+
+def _refresh_mcap_exclude() -> set:
+    """CoinGecko拉市值前N名，1小时缓存"""
+    global _mcap_exclude, _mcap_exclude_ts
+    now = time.time()
+    if _mcap_exclude and now - _mcap_exclude_ts < 86400:  # 24小时刷新一次
+        return _mcap_exclude
+    top_n = CFG.get("mcap_exclude_top", 50)
+    try:
+        resp = requests.get(
+            "https://api.coingecko.com/api/v3/coins/markets",
+            params={"vs_currency": "usd", "order": "market_cap_desc",
+                    "per_page": top_n, "page": 1},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        symbols = {c["symbol"].upper() + "USDT" for c in resp.json()}
+        _mcap_exclude.clear()
+        _mcap_exclude.update(symbols)
+        _mcap_exclude_ts = now
+        logger.info(f"[市值排除] 刷新完毕，排除前{top_n}名 ({len(symbols)}个)")
+    except Exception as e:
+        logger.warning(f"[市值排除] CoinGecko获取失败: {e}，使用旧缓存")
+    return _mcap_exclude
 
 
 def get_all_tickers() -> list:
@@ -252,7 +282,7 @@ def get_oi_usdt(symbol: str) -> float:
 _oi_cache: dict = {}  # {symbol: {"value": float, "time": float}}
 
 def get_oi_change(symbol: str) -> float:
-    """获取OI变化百分比（当前OI vs 缓存的前值，缓存5分钟刷新）"""
+    """获取OI变化百分比（当前OI vs 1小时前基准，v3.2改窗口）"""
     global _oi_cache
     now = time.time()
     try:
@@ -268,23 +298,42 @@ def get_oi_change(symbol: str) -> float:
         return 0.0
 
     prev = _oi_cache.get(symbol)
-    if prev is None or now - prev["time"] >= 300:
-        # 首次或缓存过期，存当前值作为基准，返回0
+    if prev is None:
+        # 首次：存基准，返回0
         _oi_cache[symbol] = {"value": cur_oi, "time": now}
-        if prev is None:
-            return 0.0
-        # 有旧值，计算变化后更新缓存
-        old_oi = prev["value"]
-        _oi_cache[symbol] = {"value": cur_oi, "time": now}
-        if old_oi <= 0:
-            return 0.0
-        return round((cur_oi - old_oi) / old_oi * 100, 2)
+        return 0.0
 
-    # 缓存未过期，用缓存值计算变化
     old_oi = prev["value"]
+    # 1小时刷新基准（v3.2: 300→3600）
+    if now - prev["time"] >= 3600:
+        _oi_cache[symbol] = {"value": cur_oi, "time": now}
+
     if old_oi <= 0:
         return 0.0
     return round((cur_oi - old_oi) / old_oi * 100, 2)
+
+
+# ── 费率历史追踪（v3.2新增，计算波动幅度） ──
+_funding_history: dict = {}  # {symbol: [{"rate": float, "time": float}, ...]}
+
+def record_funding_rate(symbol: str, rate: float):
+    """记录费率历史，保留1小时内数据"""
+    now = time.time()
+    if symbol not in _funding_history:
+        _funding_history[symbol] = []
+    _funding_history[symbol].append({"rate": rate, "time": now})
+    # 清理1小时前的数据
+    _funding_history[symbol] = [
+        r for r in _funding_history[symbol] if now - r["time"] < 3600
+    ]
+
+def get_funding_swing(symbol: str) -> float:
+    """获取1小时内费率波动幅度（最大值-最小值）"""
+    history = _funding_history.get(symbol, [])
+    if len(history) < 2:
+        return 0.0
+    rates = [r["rate"] for r in history]
+    return max(rates) - min(rates)
 
 
 def get_lsr(symbol: str) -> float:
@@ -334,11 +383,15 @@ def calc_volume_ratio(symbol: str) -> float:
 
 
 def fetch_market_data(symbol: str, cfg: dict = None) -> dict:
-    """拉取打分所需市场数据（含G因子公告状态）"""
+    """拉取打分所需市场数据（含G因子公告状态+v3.2费率波动）"""
+    funding = get_funding_rate(symbol)
+    # 记录费率历史用于波动计算（v3.2）
+    record_funding_rate(symbol, funding)
     data = {
         "oi_change_pct":    get_oi_change(symbol),
         "long_short_ratio": get_lsr(symbol),
-        "funding_rate":     get_funding_rate(symbol),
+        "funding_rate":     funding,
+        "funding_swing":    get_funding_swing(symbol),
         "volume_ratio":     calc_volume_ratio(symbol),
     }
     try:
@@ -530,6 +583,10 @@ def scan_once(state: dict, tickers: list) -> dict:
             continue
         if any(s["symbol"] == symbol for s in state.get("signals", [])):
             continue
+        if symbol in CFG.get("exclude_symbols", []):
+            continue
+        if symbol in _refresh_mcap_exclude():
+            continue
 
         if symbol in _startup_blacklist and _startup_blacklist[symbol] > now:
             continue
@@ -546,12 +603,12 @@ def scan_once(state: dict, tickers: list) -> dict:
 
         candidates.append(t)
 
-    # ── 3. 进池：瞬时触发(任一) + OI≥500万 ──
-    burst_1m_th = CFG.get("pool_burst_1m", 12)
-    burst_3m_th = CFG.get("pool_burst_3m", 8)
-    burst_5m_th = CFG.get("pool_burst_5m", 7)
-    burst_15m_th = CFG.get("pool_burst_15m", 12)
-    min_oi = CFG.get("min_oi_usdt", 5000000)
+    # ── 3. 进池：三选二（爆发/量比/聪明钱）+ OI≥300万 ──
+    burst_1m_th = CFG.get("pool_burst_1m", 10)
+    burst_3m_th = CFG.get("pool_burst_3m", 6)
+    burst_5m_th = CFG.get("pool_burst_5m", 5)
+    burst_15m_th = CFG.get("pool_burst_15m", 10)
+    min_oi = CFG.get("min_oi_usdt", 3000000)
 
     for t in candidates:
         symbol = t["symbol"]
@@ -561,18 +618,42 @@ def scan_once(state: dict, tickers: list) -> dict:
         c5m = calc_5m_change(symbol)
         c15m = calc_15m_change(symbol)
 
-        triggered = (c1m > burst_1m_th or c3m > burst_3m_th
-                     or c5m > burst_5m_th or c15m > burst_15m_th)
+        # ── 三选二：爆发 / 量比 / 聪明钱 ──
+        cond_burst = (c1m > burst_1m_th or c3m > burst_3m_th
+                      or c5m > burst_5m_th or c15m > burst_15m_th)
+        # 阶梯慢涨也算爆发满足
+        if not cond_burst and c15m > CFG.get("pool_stair_15m", 5):
+            vr_stair = calc_volume_ratio(symbol)
+            if vr_stair > CFG.get("pool_stair_vol_ratio", 1.5):
+                cond_burst = True
 
-        # 第五条：阶梯型慢涨（15m>6%且量比>1.5x）
-        if not triggered and c15m > CFG.get("pool_stair_15m", 6):
-            vr = calc_volume_ratio(symbol)
-            if vr > CFG.get("pool_stair_vol_ratio", 1.5):
-                triggered = True
-                logger.info(f"[进池] {symbol} 阶梯触发: 15m={c15m:.1f}% 量比={vr:.1f}x")
+        _vr = calc_volume_ratio(symbol)
+        cond_vol = (_vr >= CFG.get("pool_vol_ratio_min", 2.0))
 
-        if not triggered:
+        cond_smart = False
+        _sm_reason = ""
+        try:
+            _sm = get_smart_money_score(symbol)
+            _sm_min = CFG.get("pool_smart_money_min_score", 4)
+            if _sm["score"] >= _sm_min:
+                cond_smart = True
+                _sm_reason = _sm["reason"]
+        except Exception:
+            pass
+
+        conditions = []
+        if cond_burst:  conditions.append("burst")
+        if cond_vol:    conditions.append("vol_ratio")
+        if cond_smart:  conditions.append("smart_money")
+
+        if len(conditions) < 2:
             continue
+
+        # entry_reason = 所有满足的条件
+        entry_reason = "+".join(conditions)
+        logger.info(f"[进池] {symbol} 三选二触发: {entry_reason} "
+                     f"(1m={c1m:.1f}% 3m={c3m:.1f}% 5m={c5m:.1f}% 15m={c15m:.1f}% "
+                     f"量比={_vr:.1f}x 聪明钱={_sm_reason or 'N/A'})")
 
         oi = get_oi_usdt(symbol)
         if oi < min_oi:
@@ -619,6 +700,7 @@ def scan_once(state: dict, tickers: list) -> dict:
             "last_analyze_price": 0,
             "last_analyze_time":  0,
             "base_avg_vol":  base_avg_vol,
+            "entry_reason":  entry_reason,
         }
         state["stats"]["pool_entries"] += 1
         events["new_pool"].append(symbol)
@@ -627,7 +709,7 @@ def scan_once(state: dict, tickers: list) -> dict:
 
         trigger_info = f"1m={c1m:.1f}% 3m={c3m:.1f}% 5m={c5m:.1f}% 15m={c15m:.1f}%"
         logger.info(
-            f"[进池] {symbol} {trigger_info} OI:{oi/1e6:.1f}M "
+            f"[进池] {symbol} [{entry_reason}] {trigger_info} OI:{oi/1e6:.1f}M "
             f"1h+{change_1h:.1f}% 价格:{t['price']} 基准量:{base_avg_vol:.0f}"
         )
 
@@ -672,42 +754,19 @@ def scan_once(state: dict, tickers: list) -> dict:
         change_1h = calc_1h_change(symbol)
         pool["change_1h"] = change_1h
 
-        # ── 退出条件 ──
-        _pool_upper = CFG.get("pool_exit_upper_pct", 20)
-        _pool_lower = CFG.get("pool_exit_lower_pct", 5)
-
-        # 涨幅超上限 → 不追高，退出
-        if gain_since_entry > _pool_upper:
-            _record_reject(symbol, "over_20", pool.get("last_score", 0),
+        # ── 退出条件：仅24小时超时 ──
+        _pool_ttl_h = CFG.get("pool_ttl_hours", 24)
+        if elapsed_min > _pool_ttl_h * 60:
+            _record_reject(symbol, "timeout_24h", pool.get("last_score", 0),
                            cur_price, entry_price, gain_since_entry,
                            pool.get("last_breakdown", ""))
             del state["watchpool"][symbol]
-            events["pool_exits"].append({"symbol": symbol, "reason": f"涨幅{gain_since_entry:.1f}%>{_pool_upper}%不追高"})
-            logger.info(f"[退出] {symbol} 涨幅{gain_since_entry:.1f}%>{_pool_upper}%不追高")
+            events["pool_exits"].append({"symbol": symbol, "reason": f"观察{_pool_ttl_h}h未触发信号，超时退出"})
+            logger.info(f"[退出] {symbol} 观察{elapsed_min:.0f}分钟>{_pool_ttl_h}h，超时退出")
             continue
 
-        # 涨幅跌回下限 → 动力不足，退出
-        if gain_since_entry < _pool_lower:
-            _record_reject(symbol, "under_5", pool.get("last_score", 0),
-                           cur_price, entry_price, gain_since_entry,
-                           pool.get("last_breakdown", ""))
-            del state["watchpool"][symbol]
-            events["pool_exits"].append({"symbol": symbol, "reason": f"涨幅跌回{gain_since_entry:.1f}%<{_pool_lower}%动力不足"})
-            logger.info(f"[退出] {symbol} 涨幅{gain_since_entry:.1f}%<{_pool_lower}%动力不足")
-            continue
-
-        # 峰值回撤>20% → 退出
+        # 更新峰值（保留追踪，不作为退出条件）
         peak = pool.get("peak_price", entry_price)
-        if peak > 0:
-            drawdown = (peak - cur_price) / peak * 100
-            if drawdown > 20:
-                _record_reject(symbol, "peak_drawdown", pool.get("last_score", 0),
-                               cur_price, entry_price, gain_since_entry,
-                               pool.get("last_breakdown", ""))
-                del state["watchpool"][symbol]
-                events["pool_exits"].append({"symbol": symbol, "reason": f"峰值回撤{drawdown:.1f}%"})
-                logger.info(f"[退出] {symbol} 峰值回撤{drawdown:.1f}%>20%")
-                continue
 
         # ── 定期打分：价格变化≥1%就重新打分（无时间冷却） ──
         last_price = pool.get("last_analyze_price", 0)
@@ -868,11 +927,7 @@ def scan_once(state: dict, tickers: list) -> dict:
                            cur_price, entry_price, gain_since_entry,
                            str(analyze_result.get("breakdown", "")))
             del state["watchpool"][symbol]
-            state["cooldowns"][symbol] = {
-                "expire_at": now + CFG.get("cooldown_after_veto_min", 30) * 60,
-                "type": "veto",
-                "last_entry_price": pool.get("entry_price", 0),
-            }
+            # 不设冷却，退出后仍可重新进池
             events["pool_exits"].append({
                 "symbol": symbol,
                 "reason": f"否决: {analyze_result.get('reason', '')}",
@@ -1035,11 +1090,13 @@ def run():
             except Exception as e:
                 logger.error(f"扫描异常: {e}")
 
-        # :00 整点：群组状态卡片（扫描后推送，确保反映最新状态）
-        if current_hour != last_card_hour:
+        # 每30分钟推群组状态卡片（:00和:30）
+        current_min = _dt.datetime.now().minute
+        _card_slot = current_hour * 2 + (1 if current_min >= 30 else 0)
+        if _card_slot != last_card_hour:
             try:
                 send_status_card(state)
-                last_card_hour = current_hour
+                last_card_hour = _card_slot
                 logger.info("[状态卡片] 已推群组")
             except Exception as e:
                 logger.warning(f"状态卡片推送失败: {e}")

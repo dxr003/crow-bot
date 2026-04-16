@@ -408,21 +408,22 @@ def is_delist_target(symbol: str, cfg: dict) -> bool:
 
 def score_signal(symbol: str, gain_pct: float, market_data: dict, cfg: dict) -> dict:
     """
-    综合打分 v3.1（7因子：动能+趋势+量比+OI费率+社交聪明钱+链上+公告）
-    A-C互斥取最高，D独立叠加，E社交/聪明钱各自互斥，F叠加规则见文档，G独立
+    综合打分 v3.2（7因子：动能+趋势+量比+OI费率+社交聪明钱+链上+公告）
+    A-C互斥取最高，D独立叠加，E链上含否决，G独立
+    v3.2: A降门槛 B加低档拓甜蜜区 C减轻惩罚 D修OI窗口+加费率波动
     """
     scoring = cfg.get("scoring", {})
     breakdown = {}
     score = 0
 
-    # ── A. 价格动能（互斥取最高） ──
+    # ── A. 价格动能（互斥取最高，v3.2降门槛） ──
     change_1m = market_data.get("change_1m", 0)
     change_3m = market_data.get("change_3m", 0)
     change_5m = market_data.get("change_5m", 0)
 
-    burst_1m_th = scoring.get("burst_1m_threshold", 12)
-    burst_3m_th = scoring.get("burst_3m_threshold", 8)
-    burst_5m_th = scoring.get("burst_5m_threshold", 7)
+    burst_1m_th = scoring.get("burst_1m_threshold", 6)
+    burst_3m_th = scoring.get("burst_3m_threshold", 4)
+    burst_5m_th = scoring.get("burst_5m_threshold", 3)
 
     if change_1m > burst_1m_th:
         pts = scoring.get("burst_1m", 8)
@@ -437,63 +438,75 @@ def score_signal(symbol: str, gain_pct: float, market_data: dict, cfg: dict) -> 
         breakdown[f"A.5m爆发+{change_5m:.1f}%"] = pts
         score += pts
 
-    # ── B. 池内涨幅（互斥取最高，越早越高） ──
-    if 5 <= gain_pct < 10:
-        pts = scoring.get("gain_5_10", 10)
+    # ── B. 池内涨幅（互斥取最高，v3.2加低档+拓甜蜜区） ──
+    if 2 <= gain_pct < 5:
+        pts = scoring.get("gain_2_5", 4)
+        breakdown[f"B.涨幅萌芽+{gain_pct:.1f}%"] = pts
+        score += pts
+    elif 5 <= gain_pct < 8:
+        pts = scoring.get("gain_5_10", 7)
         breakdown[f"B.涨幅初期+{gain_pct:.1f}%"] = pts
         score += pts
-    elif 10 <= gain_pct < 15:
-        pts = scoring.get("gain_10_15", 8)
-        breakdown[f"B.涨幅中期+{gain_pct:.1f}%"] = pts
+    elif 8 <= gain_pct < 18:
+        pts = scoring.get("gain_10_15", 10)
+        breakdown[f"B.涨幅甜蜜+{gain_pct:.1f}%"] = pts
         score += pts
-    elif 15 <= gain_pct < 25:
-        pts = scoring.get("gain_15_25", 7)
+    elif 18 <= gain_pct < 30:
+        pts = scoring.get("gain_15_25", 8)
         breakdown[f"B.涨幅强势+{gain_pct:.1f}%"] = pts
         score += pts
-    elif 25 <= gain_pct < 40:
+    elif 30 <= gain_pct < 40:
         pts = scoring.get("gain_25_40", 5)
         breakdown[f"B.涨幅过热+{gain_pct:.1f}%"] = pts
         score += pts
+    elif gain_pct >= 40:
+        pts = scoring.get("gain_40_plus", 2)
+        breakdown[f"B.涨幅极端+{gain_pct:.1f}%"] = pts
+        score += pts
 
-    # ── C. 量比（互斥取最高） ──
+    # ── C. 量比（互斥取最高，v3.2减轻惩罚+填补空白） ──
     volume_ratio = market_data.get("volume_ratio", 1.0)
     if volume_ratio > 5:
-        pts = scoring.get("vol_ratio_5x", 18)
+        pts = scoring.get("vol_ratio_5x", 10)
         breakdown[f"C.量比{volume_ratio:.1f}x"] = pts
         score += pts
     elif volume_ratio > 3:
-        pts = scoring.get("vol_ratio_3x", 15)
+        pts = scoring.get("vol_ratio_3x", 7)
         breakdown[f"C.量比{volume_ratio:.1f}x"] = pts
         score += pts
     elif volume_ratio > 2:
-        pts = scoring.get("vol_ratio_2x", 10)
+        pts = scoring.get("vol_ratio_2x", 6)
         breakdown[f"C.量比{volume_ratio:.1f}x"] = pts
         score += pts
     elif volume_ratio > 1.5:
         pts = scoring.get("vol_ratio_1_5x", 5)
         breakdown[f"C.量比{volume_ratio:.1f}x"] = pts
         score += pts
-    elif volume_ratio < 1:
-        pts = scoring.get("vol_ratio_low", -5)
+    elif volume_ratio >= 1:
+        pts = scoring.get("vol_ratio_1x", 2)
+        breakdown[f"C.量比{volume_ratio:.1f}x"] = pts
+        score += pts
+    else:
+        pts = scoring.get("vol_ratio_low", -1)
         breakdown[f"C.量比{volume_ratio:.1f}x萎缩"] = pts
         score += pts
 
-    # ── D. OI与资金费率（独立可叠加） ──
+    # ── D. OI与资金费率（独立可叠加，v3.2改OI窗口+降门槛+加费率波动） ──
     oi_change = market_data.get("oi_change_pct", 0)
-    if oi_change > 30:
-        pts = scoring.get("oi_up_super", 10)
+    if oi_change > 20:
+        pts = scoring.get("oi_up_super", 8)
         breakdown[f"D.OI超涨+{oi_change:.1f}%"] = pts
         score += pts
-    elif oi_change > 15:
-        pts = scoring.get("oi_up_strong", 8)
+    elif oi_change > 5:
+        pts = scoring.get("oi_up_strong", 5)
         breakdown[f"D.OI大涨+{oi_change:.1f}%"] = pts
         score += pts
-    elif oi_change > 5:
-        pts = scoring.get("oi_up_mild", 5)
+    elif oi_change > 0.5:
+        pts = scoring.get("oi_up_mild", 3)
         breakdown[f"D.OI上涨+{oi_change:.1f}%"] = pts
         score += pts
     elif oi_change < -5:
-        pts = scoring.get("oi_down", -5)
+        pts = scoring.get("oi_down", -3)
         breakdown[f"D.OI下跌{oi_change:.1f}%"] = pts
         score += pts
 
@@ -509,6 +522,17 @@ def score_signal(symbol: str, gain_pct: float, market_data: dict, cfg: dict) -> 
         pts = scoring.get("funding_extreme", 3)
         direction = "负" if funding < 0 else "正"
         breakdown[f"D.费率{direction}{funding*100:.3f}%"] = pts
+        score += pts
+
+    # 费率波动幅度（v3.2新增）
+    funding_swing = market_data.get("funding_swing", 0)
+    if funding_swing >= 0.0005:
+        pts = scoring.get("funding_swing_high", 4)
+        breakdown[f"D.费率波动{funding_swing*100:.3f}%"] = pts
+        score += pts
+    elif funding_swing >= 0.0002:
+        pts = scoring.get("funding_swing_low", 2)
+        breakdown[f"D.费率波动{funding_swing*100:.3f}%"] = pts
         score += pts
 
     # ── E. 捉妖因子（链上数据，含否决） ──
