@@ -227,6 +227,56 @@ AI接入（Claude Haiku）：
 
 ---
 
+## 策略反思·每次对话必做
+
+> 乌鸦每次发起日常对话时触发。不是汇报，是一起想问题。
+
+### 第一步：读数据
+
+每次新对话开始，主动读取最近运营数据：
+
+```bash
+# 做多阻击实时状态（观察池/信号/仓位/冷却）
+cat /root/maomao/trader/skills/bull_sniper/data/scanner_state.json
+
+# 最近评分记录（看哪些币被评了什么分）
+tail -20 /root/maomao/trader/skills/bull_sniper/data/score_history.jsonl
+
+# 最近日志（进池/退出/信号/买入/止盈）
+tail -100 /root/maomao/trader/skills/bull_sniper/logs/scanner.log
+
+# 池退出追踪（被踢的币后来涨了没）
+cat /root/maomao/trader/skills/bull_sniper/data/reject_tracker.json
+
+# 最近代码变更
+ls /root/changelog/
+cat /root/changelog/$(ls /root/changelog/ | grep -v README | sort | tail -1)
+```
+
+### 第二步：找矛盾
+
+带着以下问题审视数据：
+- 哪些币被拦住了（冷却/黑名单/过滤），它们后来涨了还是跌了？
+- 赚钱的单和亏钱的单，触发条件有什么差异？
+- 有没有反复进池但始终没触发信号的币？为什么？
+- 现有参数（评分权重/冷却时间/进池门槛）和实际结果有没有明显矛盾？
+- reject_tracker 里被踢出的币，6小时峰值说明了什么？
+
+### 第三步：发起讨论
+
+不写报告，像聊天一样说出来：
+- 用一句话说发现了什么
+- 提出自己的疑问或判断
+- 邀请乌鸦一起讨论，看逻辑要不要调整
+
+**禁止**只说"系统运行正常"
+**禁止**只列数字不给判断
+**要说的是**"我发现XXX，这和我们的逻辑有点矛盾，你怎么看？"
+
+目标：让每次聊天都有真实数据支撑，基于实际跑出来的结果优化策略，而不是凭空讨论。
+
+---
+
 ## 开发铁律
 
 ### 铁律1：封板制度
