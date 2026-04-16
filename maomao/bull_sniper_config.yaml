@@ -8,12 +8,25 @@ bull_sniper:
   watchpool_max: 30
   watchpool_refresh_sec: 60
 
+  # ── 大币排除（不适合妖币策略）──
+  exclude_symbols:
+    - BTCUSDT
+    - ETHUSDT
+    - BNBUSDT
+    - SOLUSDT
+    - XRPUSDT
+    - ADAUSDT
+    - DOGEUSDT
+    - TRXUSDT
+    - AVAXUSDT
+    - DOTUSDT
+
   # ── 第一步：基础过滤 ──
   startup_max_change_pct: 50  # 启动时任意时段>50%排除（15→50）
   min_listing_days: 1
   ath_exempt_days: 180
   exclude_daily_vol_below: 20000000
-  min_drop_from_ath: 60
+  min_drop_from_ath: 0            # 取消ATH跌幅限制，进池不花钱，评分把关
   max_24h_change_pct: 30       # 24h涨>30%不进池+不买入（防拉完回抽）
   pool_ttl_hours: 24            # 观察池保留时间（小时），超时未触发信号才退出
 
@@ -26,6 +39,12 @@ bull_sniper:
   # 第五条：阶梯型慢涨
   pool_stair_15m: 5            # 15m涨>5%（原6，降1）
   pool_stair_vol_ratio: 1.5    # 量比>1.5x
+  # 第六条：量比异常（大币已被市值排除，不需要涨幅并排）
+  pool_vol_ratio_min: 3.0      # 量比≥3x
+  # ── 市值排除 ──
+  mcap_exclude_top: 50         # CoinGecko市值前50名自动排除，1小时刷新
+  # 第七条：聪明钱买入
+  pool_smart_money_min_score: 4  # 聪明钱评分≥4进池（buy=4, 多地址=6, 大额=10）
   # 第二层（同时满足）
   min_oi_usdt: 5000000        # OI≥500万U
 
