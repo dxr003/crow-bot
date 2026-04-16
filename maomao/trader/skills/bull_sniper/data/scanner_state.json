@@ -1,0 +1,617 @@
+{
+  "watchpool": {},
+  "signals": [],
+  "cooldowns": {
+    "ENJUSDT": {
+      "expire_at": 1776353400.358432,
+      "type": "unknown",
+      "last_entry_price": 0
+    },
+    "STOUSDT": {
+      "expire_at": 1776356657.2304795,
+      "type": "unknown",
+      "last_entry_price": 0
+    },
+    "RAVEUSDT": {
+      "expire_at": 1776361231.27673,
+      "type": "unknown",
+      "last_entry_price": 0
+    },
+    "ARIAUSDT": {
+      "expire_at": 1776363404.845449,
+      "type": "unknown",
+      "last_entry_price": 0
+    },
+    "BLESSUSDT": {
+      "expire_at": 1776388010.0059674,
+      "type": "unknown",
+      "last_entry_price": 0
+    },
+    "MYXUSDT": {
+      "expire_at": 1776401592.6564167,
+      "type": "unknown",
+      "last_entry_price": 0
+    },
+    "REDUSDT": {
+      "expire_at": 1776411479.620711,
+      "type": "unknown",
+      "last_entry_price": 0
+    },
+    "BIOUSDT": {
+      "expire_at": 1776332143.6495008,
+      "type": "sl",
+      "last_entry_price": 0.02342
+    },
+    "BASEDUSDT": {
+      "expire_at": 1776328657.6731784,
+      "type": "tp",
+      "last_entry_price": 0.08281
+    },
+    "AIOTUSDT": {
+      "expire_at": 1776362069.6496737,
+      "type": "sl",
+      "last_entry_price": 0.0642
+    }
+  },
+  "filter_log": [
+    {
+      "symbol": "BROCCOLIF3BUSDT",
+      "reason": "成交额1.4M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "IDUSDT",
+      "reason": "成交额2.4M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "CARVUSDT",
+      "reason": "成交额0.6M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "ZKUSDT",
+      "reason": "成交额7.4M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "ARCUSDT",
+      "reason": "成交额19.5M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "VVVUSDT",
+      "reason": "距ATH跌21.3%<60%",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "AIXBTUSDT",
+      "reason": "成交额7.7M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "DRIFTUSDT",
+      "reason": "成交额6.2M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "FOGOUSDT",
+      "reason": "成交额2.4M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "1000XECUSDT",
+      "reason": "成交额0.6M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "KNCUSDT",
+      "reason": "成交额1.7M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "CUSDT",
+      "reason": "成交额11.1M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "TAIKOUSDT",
+      "reason": "成交额0.4M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "AZTECUSDT",
+      "reason": "成交额4.3M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "KSMUSDT",
+      "reason": "成交额1.9M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "HYPERUSDT",
+      "reason": "成交额6.8M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "GRASSUSDT",
+      "reason": "成交额4.8M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "NATGASUSDT",
+      "reason": "成交额14.3M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "XPDUSDT",
+      "reason": "成交额3.0M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "XVGUSDT",
+      "reason": "成交额2.3M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "AIOUSDT",
+      "reason": "成交额3.6M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "SLPUSDT",
+      "reason": "成交额0.5M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "VANAUSDT",
+      "reason": "成交额1.4M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "ILVUSDT",
+      "reason": "成交额2.0M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "ZECUSDT",
+      "reason": "距ATH跌56.0%<60%",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "FORMUSDT",
+      "reason": "成交额4.3M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "VANRYUSDT",
+      "reason": "成交额1.3M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "KAVAUSDT",
+      "reason": "成交额1.3M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "SEIUSDT",
+      "reason": "成交额14.6M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "THETAUSDT",
+      "reason": "成交额10.1M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "1000CHEEMSUSDT",
+      "reason": "成交额1.4M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "INITUSDT",
+      "reason": "成交额2.4M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "NFPUSDT",
+      "reason": "成交额0.9M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "SPKUSDT",
+      "reason": "成交额1.1M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "AUSDT",
+      "reason": "成交额2.1M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "SNXUSDT",
+      "reason": "成交额7.7M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "REZUSDT",
+      "reason": "成交额2.0M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "GTCUSDT",
+      "reason": "成交额1.2M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "ESPORTSUSDT",
+      "reason": "成交额0.9M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "XMRUSDT",
+      "reason": "距ATH跌57.1%<60%",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "XPTUSDT",
+      "reason": "成交额7.8M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "ALLOUSDT",
+      "reason": "成交额1.5M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "THEUSDT",
+      "reason": "成交额2.3M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "ESPUSDT",
+      "reason": "成交额3.7M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "SAHARAUSDT",
+      "reason": "成交额5.0M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "1000000MOGUSDT",
+      "reason": "成交额1.3M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "XTZUSDT",
+      "reason": "成交额6.9M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "NVDAUSDT",
+      "reason": "成交额11.8M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "GOOGLUSDT",
+      "reason": "成交额5.5M<20M",
+      "time": "12:55:15"
+    },
+    {
+      "symbol": "HFTUSDT",
+      "reason": "成交额1.7M<20M",
+      "time": "12:55:15"
+    }
+  ],
+  "stats": {
+    "scans": 97,
+    "pool_entries": 1,
+    "signals": 0
+  },
+  "signal_history": [
+    {
+      "symbol": "GIGGLEUSDT",
+      "time": "2026-04-13 09:57:56",
+      "entry_price": 33.28,
+      "cur_price": 33.28,
+      "gain_pct": 0.0,
+      "volume_usdt": 34937685.1534,
+      "drop_from_ath": 89.9,
+      "elapsed_min": 0.0,
+      "action": "signal_scored",
+      "reason": "",
+      "score": 45,
+      "ai_reason": "",
+      "change_1h": 6.1,
+      "oi_usdt": 11538738.603,
+      "vol_ratio": 3.81,
+      "status": "expired",
+      "settled_at": "2026-04-14 11:47:35",
+      "exit_price": 38.27
+    },
+    {
+      "symbol": "MYXUSDT",
+      "time": "2026-04-14 15:02:37",
+      "entry_price": 0.5294,
+      "cur_price": 0.5736,
+      "gain_pct": 8.3,
+      "volume_usdt": 175927476.0614,
+      "drop_from_ath": 97.4,
+      "elapsed_min": 57.2,
+      "action": "signal_scored",
+      "reason": "",
+      "score": 25,
+      "ai_reason": "",
+      "change_1h": 14.1,
+      "oi_usdt": 17482800.7449,
+      "vol_ratio": 0,
+      "status": "failed",
+      "settled_at": "2026-04-14 16:15:58",
+      "exit_price": 0.3615
+    },
+    {
+      "symbol": "RAVEUSDT",
+      "time": "2026-04-14 11:52:37",
+      "entry_price": 8.17682,
+      "cur_price": 8.85751,
+      "gain_pct": 8.3,
+      "volume_usdt": 4183301238.02567,
+      "drop_from_ath": 3.7,
+      "elapsed_min": 243.2,
+      "action": "signal_scored",
+      "reason": "",
+      "score": 25,
+      "ai_reason": "",
+      "change_1h": 13.6,
+      "oi_usdt": 67750858.896,
+      "vol_ratio": 0,
+      "status": "success",
+      "settled_at": "2026-04-14 16:55:35",
+      "exit_price": 12.39403
+    },
+    {
+      "symbol": "ARIAUSDT",
+      "time": "2026-04-15 01:56:42",
+      "entry_price": 0.1068,
+      "cur_price": 0.1215,
+      "gain_pct": 13.8,
+      "volume_usdt": 408346058.84732,
+      "drop_from_ath": 90.0,
+      "elapsed_min": 3.5,
+      "action": "signal_scored",
+      "reason": "",
+      "score": 28,
+      "ai_reason": "",
+      "change_1h": -34.7,
+      "oi_usdt": 8497595.6937,
+      "vol_ratio": 0,
+      "status": "success",
+      "settled_at": "2026-04-15 02:15:01",
+      "exit_price": 0.1773
+    },
+    {
+      "symbol": "RAVEUSDT",
+      "time": "2026-04-15 00:52:31",
+      "entry_price": 11.76993,
+      "cur_price": 11.76993,
+      "gain_pct": 0.0,
+      "volume_usdt": 3785470944.35813,
+      "drop_from_ath": 10.1,
+      "elapsed_min": 0.0,
+      "action": "signal_scored",
+      "reason": "",
+      "score": 47,
+      "ai_reason": "",
+      "change_1h": -7.1,
+      "oi_usdt": 73453394.11783999,
+      "vol_ratio": 0,
+      "status": "success",
+      "settled_at": "2026-04-15 08:49:04",
+      "exit_price": 17.70776
+    },
+    {
+      "symbol": "BLESSUSDT",
+      "time": "2026-04-15 07:51:47",
+      "entry_price": 0.017814,
+      "cur_price": 0.019677,
+      "gain_pct": 10.5,
+      "volume_usdt": 520699123.120239,
+      "drop_from_ath": 93.1,
+      "elapsed_min": 232.5,
+      "action": "signal_scored",
+      "reason": "",
+      "score": 39,
+      "ai_reason": "",
+      "change_1h": 8.2,
+      "oi_usdt": 7503884.088672,
+      "vol_ratio": 0,
+      "status": "success",
+      "settled_at": "2026-04-15 10:08:05",
+      "exit_price": 0.026772
+    },
+    {
+      "symbol": "ENJUSDT",
+      "time": "2026-04-14 23:30:38",
+      "entry_price": 0.04929,
+      "cur_price": 0.05257,
+      "gain_pct": 6.7,
+      "volume_usdt": 208263421.53431,
+      "drop_from_ath": 97.6,
+      "elapsed_min": 6.6,
+      "action": "signal_scored",
+      "reason": "",
+      "score": 34,
+      "ai_reason": "",
+      "change_1h": 10.3,
+      "oi_usdt": 15879202.7163,
+      "vol_ratio": 0,
+      "status": "success",
+      "exit_price": 0.06557,
+      "settled_at": "2026-04-15 18:41:31"
+    },
+    {
+      "symbol": "STOUSDT",
+      "time": "2026-04-15 00:05:13",
+      "entry_price": 0.12791,
+      "cur_price": 0.12791,
+      "gain_pct": 0.0,
+      "volume_usdt": 49083388.59541,
+      "drop_from_ath": 93.6,
+      "elapsed_min": 0.0,
+      "action": "signal_scored",
+      "reason": "",
+      "score": 29,
+      "ai_reason": "",
+      "change_1h": 7.7,
+      "oi_usdt": 13654501.673770001,
+      "vol_ratio": 0,
+      "status": "failed",
+      "exit_price": 0.12046,
+      "settled_at": "2026-04-15 18:41:31"
+    },
+    {
+      "symbol": "MYXUSDT",
+      "time": "2026-04-15 12:31:17",
+      "entry_price": 0.3111,
+      "cur_price": 0.3186,
+      "gain_pct": 2.4,
+      "volume_usdt": 404282183.0525,
+      "drop_from_ath": 98.5,
+      "elapsed_min": 261.8,
+      "action": "signal_scored",
+      "reason": "",
+      "score": 33,
+      "ai_reason": "",
+      "change_1h": 4.9,
+      "oi_usdt": 11737378.75,
+      "vol_ratio": 0,
+      "status": "success",
+      "exit_price": 0.3252,
+      "settled_at": "2026-04-15 18:41:31"
+    },
+    {
+      "symbol": "REDUSDT",
+      "time": "2026-04-15 14:54:48",
+      "entry_price": 0.1639,
+      "cur_price": 0.1758,
+      "gain_pct": 7.3,
+      "volume_usdt": 36045469.1188,
+      "drop_from_ath": 83.5,
+      "elapsed_min": 12.6,
+      "action": "signal_scored",
+      "reason": "",
+      "score": 33,
+      "ai_reason": "",
+      "change_1h": 17.8,
+      "oi_usdt": 5995715.2752,
+      "vol_ratio": 0,
+      "status": "failed",
+      "exit_price": 0.158,
+      "settled_at": "2026-04-15 18:41:31"
+    },
+    {
+      "symbol": "BIOUSDT",
+      "time": "2026-04-15 17:29:56",
+      "entry_price": 0.02293,
+      "cur_price": 0.02342,
+      "gain_pct": 2.1,
+      "volume_usdt": 35963989.60099,
+      "drop_from_ath": 97.7,
+      "elapsed_min": 6.2,
+      "action": "signal_scored",
+      "reason": "",
+      "score": 32,
+      "ai_reason": "",
+      "change_1h": 13.8,
+      "oi_usdt": 6801376.79074,
+      "vol_ratio": 0,
+      "status": "success",
+      "exit_price": 0.02485,
+      "settled_at": "2026-04-15 18:41:31"
+    },
+    {
+      "symbol": "币安人生USDT",
+      "time": "2026-04-15 18:09:01",
+      "entry_price": 0.28618,
+      "cur_price": 0.30469,
+      "gain_pct": 6.5,
+      "volume_usdt": 963444299.70056,
+      "drop_from_ath": 37.8,
+      "elapsed_min": 32.7,
+      "action": "signal_scored",
+      "reason": "",
+      "score": 32,
+      "ai_reason": "",
+      "change_1h": 8.2,
+      "oi_usdt": 41224136.66636,
+      "vol_ratio": 0,
+      "status": "success",
+      "exit_price": 0,
+      "settled_at": "2026-04-15 20:41:18"
+    },
+    {
+      "symbol": "SIRENUSDT",
+      "time": "2026-04-15 18:29:53",
+      "entry_price": 0.67117,
+      "cur_price": 0.7455,
+      "gain_pct": 11.1,
+      "volume_usdt": 88336181.00198,
+      "drop_from_ath": 86.0,
+      "elapsed_min": 974.3,
+      "action": "signal_scored",
+      "reason": "",
+      "score": 28,
+      "ai_reason": "",
+      "change_1h": 10.6,
+      "oi_usdt": 15988074.16096,
+      "vol_ratio": 0,
+      "status": "success",
+      "exit_price": 0,
+      "settled_at": "2026-04-15 22:26:29"
+    },
+    {
+      "symbol": "AIOTUSDT",
+      "time": "2026-04-16 01:12:08",
+      "entry_price": 0.0642,
+      "cur_price": 0.0642,
+      "gain_pct": 0.0,
+      "volume_usdt": 24258679.8772,
+      "drop_from_ath": 97.2,
+      "elapsed_min": 0.0,
+      "action": "signal_scored",
+      "reason": "",
+      "score": 33,
+      "ai_reason": "",
+      "change_1h": 10.8,
+      "oi_usdt": 6754241.07826,
+      "vol_ratio": 0,
+      "status": "success",
+      "exit_price": 0,
+      "settled_at": "2026-04-16 01:54:29"
+    },
+    {
+      "symbol": "BASEDUSDT",
+      "time": "2026-04-15 23:15:21",
+      "entry_price": 0.07804,
+      "cur_price": 0.08281,
+      "gain_pct": 6.1,
+      "volume_usdt": 80642767.77284,
+      "drop_from_ath": 56.1,
+      "elapsed_min": 1006.8,
+      "action": "signal_scored",
+      "reason": "",
+      "score": 34,
+      "ai_reason": "",
+      "change_1h": 5.1,
+      "oi_usdt": 5567904.28233,
+      "vol_ratio": 0,
+      "status": "success",
+      "exit_price": 0,
+      "settled_at": "2026-04-16 04:37:37"
+    }
+  ],
+  "positions": {},
+  "settled": []
+}
