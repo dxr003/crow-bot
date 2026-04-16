@@ -48,25 +48,68 @@ def load_config() -> dict:
         return yaml.safe_load(f)["bull_sniper"]
 
 CFG = load_config()
+_cfg_mtime = (BASE_DIR / "config.yaml").stat().st_mtime
+
+def _hot_reload_config():
+    """检查config.yaml是否被修改，有变化就热重载"""
+    global CFG, _cfg_mtime
+    try:
+        mt = (BASE_DIR / "config.yaml").stat().st_mtime
+        if mt != _cfg_mtime:
+            CFG = load_config()
+            _cfg_mtime = mt
+            logger.info(f"[热重载] config.yaml 已更新，参数已生效")
+    except Exception:
+        pass
 
 FAPI_BASE = "https://fapi.binance.com"
+
+# 合约交易状态缓存（排除 SETTLING / 下架币）
+_trading_symbols: set = set()
+_trading_symbols_ts: float = 0
 
 
 # ══════════════════════════════════════════
 # 币安API
 # ══════════════════════════════════════════
 
+def _refresh_trading_symbols() -> set:
+    """从 exchangeInfo 获取当前 TRADING 状态的合约，10分钟缓存"""
+    global _trading_symbols, _trading_symbols_ts
+    now = time.time()
+    if _trading_symbols and now - _trading_symbols_ts < 600:
+        return _trading_symbols
+    try:
+        resp = requests.get(f"{FAPI_BASE}/fapi/v1/exchangeInfo", timeout=15)
+        resp.raise_for_status()
+        symbols = set()
+        for s in resp.json().get("symbols", []):
+            if s.get("status") == "TRADING" and s["symbol"].endswith("USDT"):
+                symbols.add(s["symbol"])
+        _trading_symbols = symbols
+        _trading_symbols_ts = now
+        logger.info(f"[交易状态] 刷新完毕，{len(symbols)}个TRADING合约")
+    except Exception as e:
+        logger.warning(f"[交易状态] exchangeInfo获取失败: {e}")
+    return _trading_symbols
+
+
 def get_all_tickers() -> list:
-    """获取全市场合约24h行情"""
+    """获取全市场合约24h行情（自动排除非TRADING状态币）"""
+    trading = _refresh_trading_symbols()
     resp = requests.get(f"{FAPI_BASE}/fapi/v1/ticker/24hr", timeout=10)
     resp.raise_for_status()
     tickers = []
     for t in resp.json():
-        if not t["symbol"].endswith("USDT"):
+        sym = t["symbol"]
+        if not sym.endswith("USDT"):
+            continue
+        # 排除 SETTLING / 下架 / 非TRADING状态
+        if trading and sym not in trading:
             continue
         try:
             tickers.append({
-                "symbol":      t["symbol"],
+                "symbol":      sym,
                 "price":       float(t["lastPrice"]),
                 "change_pct":  float(t["priceChangePercent"]),
                 "volume_usdt": float(t["quoteVolume"]),
@@ -927,6 +970,9 @@ def run():
     while True:
         now = time.time()
         current_hour = _dt.datetime.now().hour
+
+        # ── 配置热重载 ──
+        _hot_reload_config()
 
         # ── 信号生命周期结算 ──
         _settle_signals(state, now)

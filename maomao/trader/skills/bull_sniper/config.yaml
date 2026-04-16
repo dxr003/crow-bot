@@ -40,7 +40,7 @@ bull_sniper:
     final_decision: true       # AI最终买入决策
 
   # ── 仓位 ──
-  position_usd: 50
+  position_usd: 100
   default_leverage: 5
   max_position_usd: 50000
   max_slippage_pct: 2          # 滑点>2%放弃（v3.1简化）
