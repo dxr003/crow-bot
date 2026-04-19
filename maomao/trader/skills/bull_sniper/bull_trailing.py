@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 """
-bull_trailing.py — 做多阻击仓位生命周期管理（币安2专用）
+bull_trailing.py — 做多阻击仓位生命周期管理（多账户）
 由 scanner 主循环每轮调用。
 
 职责：
-  1. check_all() — 移动止盈观察模式（25%回撤通知，不平仓）
-  2. check_positions() — 仓位生命周期管理：
+  1. check_all(cfg) — 移动止盈观察模式（25%回撤通知，不平仓）
+  2. check_positions(scanner_state, cfg) — 仓位生命周期管理：
      a. 仓位消失检测 → 标记止盈/止损 → 冷却48h
      b. 超时平仓（24h未爆发）→ 市价平 → 冷却24h
      c. 正常持仓 → 更新峰值浮盈
+
+多账户说明（2026-04-19）：
+  - 底层 HTTP 函数接 (acct_name, key_env, secret_env) 三元组
+  - check_all 读 cfg["accounts"] 聚合各账户持仓（观察，symbol级）
+  - check_positions 按 pos_info["accounts"] 列表逐账户动作
+  - 旧 pos_info 缺 accounts 字段时回退到 ["币安2"]（向后兼容）
 """
 import hashlib
 import hmac
@@ -16,6 +22,7 @@ import json
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 from pathlib import Path
@@ -27,6 +34,7 @@ logger = logging.getLogger("bull_trailing")
 
 FAPI_BASE = "https://fapi.binance.com"
 STATE_FILE = Path("/root/maomao/trader/skills/bull_sniper/data/trailing_state.json")
+LEGACY_FALLBACK_ACCT = "币安2"
 
 from notifier import route as _route
 
@@ -45,11 +53,29 @@ def _save(state: dict):
     STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False))
 
 
-def _get_bn2_positions() -> dict:
-    """拉币安2所有多头持仓 {symbol: {amt, entryPrice, markPrice}}"""
-    key = os.getenv("BINANCE2_API_KEY", "")
-    secret = os.getenv("BINANCE2_API_SECRET", "")
-    if not key:
+def _iter_accounts(cfg: dict):
+    """yield (acct_name, key_env, secret_env) for each enabled account."""
+    accounts = (cfg or {}).get("accounts") or {}
+    if not accounts:
+        # 向后兼容：没配置 accounts 时走 币安2
+        yield LEGACY_FALLBACK_ACCT, "BINANCE2_API_KEY", "BINANCE2_API_SECRET"
+        return
+    for name, c in accounts.items():
+        if not c.get("enabled"):
+            continue
+        key_env = c.get("api_key_env", "")
+        secret_env = c.get("secret_env", "")
+        if not key_env or not secret_env:
+            continue
+        yield name, key_env, secret_env
+
+
+def _get_positions(acct_name: str, key_env: str, secret_env: str) -> dict:
+    """拉指定账户的多头持仓 {symbol: {amt, entryPrice, markPrice}}"""
+    key = os.getenv(key_env, "")
+    secret = os.getenv(secret_env, "")
+    if not key or not secret:
+        logger.warning(f"[trailing] {acct_name} 缺少 {key_env}/{secret_env}")
         return {}
     from binance.um_futures import UMFutures
     c = UMFutures(key=key, secret=secret)
@@ -65,6 +91,32 @@ def _get_bn2_positions() -> dict:
     return result
 
 
+def _fetch_all_positions_parallel(cfg: dict):
+    """并行拉所有启用账户的持仓。返回 (acct_positions, acct_creds)。
+    acct_positions[acct] = {sym: pos}（成功）或 None（拉取失败，本轮不做决策）。"""
+    acct_creds: dict = {}
+    triples = []
+    for acct, key_env, secret_env in _iter_accounts(cfg):
+        acct_creds[acct] = (key_env, secret_env)
+        triples.append((acct, key_env, secret_env))
+    if not triples:
+        return {}, acct_creds
+
+    def _worker(t):
+        acct, k, s = t
+        try:
+            return acct, _get_positions(acct, k, s)
+        except Exception as e:
+            logger.warning(f"[trailing] {acct} 拉持仓异常: {e}")
+            return acct, None
+
+    acct_positions: dict = {}
+    with ThreadPoolExecutor(max_workers=min(len(triples), 4)) as ex:
+        for acct, pos in ex.map(_worker, triples):
+            acct_positions[acct] = pos
+    return acct_positions, acct_creds
+
+
 def _get_mark_price(symbol: str) -> float:
     try:
         resp = requests.get(
@@ -76,10 +128,13 @@ def _get_mark_price(symbol: str) -> float:
         return 0
 
 
-def _close_position(symbol: str, qty: float) -> str:
-    """市价平多（币安2，双向持仓 SELL+LONG）"""
-    key = os.getenv("BINANCE2_API_KEY", "")
-    secret = os.getenv("BINANCE2_API_SECRET", "")
+def _close_position(acct_name: str, key_env: str, secret_env: str,
+                    symbol: str, qty: float) -> str:
+    """市价平多（双向持仓 SELL+LONG）"""
+    key = os.getenv(key_env, "")
+    secret = os.getenv(secret_env, "")
+    if not key or not secret:
+        return f"[{acct_name}]缺少密钥"
     ts = int(time.time() * 1000)
     params = {
         "symbol": symbol,
@@ -99,16 +154,18 @@ def _close_position(symbol: str, qty: float) -> str:
     )
     if resp.status_code == 200:
         oid = resp.json().get("orderId", "?")
-        return f"平仓成功 orderId:{oid}"
-    return f"平仓失败: {resp.text[:200]}"
+        return f"[{acct_name}]平仓成功 orderId:{oid}"
+    return f"[{acct_name}]平仓失败: {resp.text[:200]}"
 
 
-def _cancel_algo_by_id(algo_id) -> bool:
+def _cancel_algo_by_id(acct_name: str, key_env: str, secret_env: str, algo_id) -> bool:
     """按 algoId 撤单，成功返回 True"""
     if not algo_id:
         return False
-    key = os.getenv("BINANCE2_API_KEY", "")
-    secret = os.getenv("BINANCE2_API_SECRET", "")
+    key = os.getenv(key_env, "")
+    secret = os.getenv(secret_env, "")
+    if not key or not secret:
+        return False
     ts = int(time.time() * 1000)
     qs = f"algoId={algo_id}&timestamp={ts}"
     sig = hmac.new(secret.encode(), qs.encode(), hashlib.sha256).hexdigest()
@@ -121,55 +178,52 @@ def _cancel_algo_by_id(algo_id) -> bool:
     return resp.status_code == 200
 
 
-def _cancel_algo_orders(symbol: str):
-    """撤销该币所有algo条件单（止损等）"""
-    key = os.getenv("BINANCE2_API_KEY", "")
-    secret = os.getenv("BINANCE2_API_SECRET", "")
-    ts = int(time.time() * 1000)
-
-    qs = f"timestamp={ts}"
-    sig = hmac.new(secret.encode(), qs.encode(), hashlib.sha256).hexdigest()
-    resp = requests.get(
-        "https://api.binance.com/sapi/v1/algo/futures/openOrders",
-        params=f"{qs}&signature={sig}",
-        headers={"X-MBX-APIKEY": key},
-        timeout=10,
-    )
-    if resp.status_code != 200:
+def _cancel_all_algo(accts_creds: dict, symbol: str, sl_id, tp_id):
+    """按 id 精确撤 SL/TP。撤不掉只记日志，绝不走全撤——
+    避免误撤用户通过玄玄/其他渠道对同一 symbol 挂的 SL/TP（feedback_never_cancel_sl_tp）。
+    """
+    if not (sl_id or tp_id):
+        logger.warning(f"[撤单] {symbol} 无 sl_algo_id/tp_algo_id，跳过撤单（防误撤用户挂单）")
         return
-
-    for o in resp.json().get("orders", []):
-        if o.get("symbol") == symbol:
-            algo_id = o.get("algoId")
-            if not algo_id:
+    for acct, (key_env, secret_env) in accts_creds.items():
+        for label, aid in (("SL", sl_id), ("TP", tp_id)):
+            if not aid:
                 continue
-            ts2 = int(time.time() * 1000)
-            qs2 = f"algoId={algo_id}&timestamp={ts2}"
-            sig2 = hmac.new(secret.encode(), qs2.encode(), hashlib.sha256).hexdigest()
-            requests.delete(
-                f"{FAPI_BASE}/fapi/v1/algoOrder",
-                params=f"{qs2}&signature={sig2}",
-                headers={"X-MBX-APIKEY": key},
-                timeout=10,
-            )
+            try:
+                ok = _cancel_algo_by_id(acct, key_env, secret_env, aid)
+                if not ok:
+                    logger.warning(f"[撤单] {acct} {symbol} {label} id={aid} 撤失败，残留留给币安过期处理")
+            except Exception as e:
+                logger.warning(f"[撤单] {acct} {symbol} {label} id={aid} 异常: {e}")
 
 
-def check_all() -> list:
+def check_all(cfg: dict = None) -> list:
     """
     检查所有追踪仓位，满足条件只发通知不平仓（观察模式）。
     实际平仓由币安原生10%回撤负责。由 scanner 主循环每轮调用。
+    多账户：聚合各账户持仓，任一账户仍有仓即视为活跃（symbol级观察）。
     """
+    cfg = cfg or {}
     state = _load()
     if not state:
         return []
 
-    positions = _get_bn2_positions()
+    # 聚合各账户持仓（观察模式只看symbol，不区分账户）
+    acct_positions, _ = _fetch_all_positions_parallel(cfg)
+    combined = {}  # {symbol: pos}
+    for acct, pos in acct_positions.items():
+        if not pos:
+            continue
+        for sym, p in pos.items():
+            if sym not in combined:
+                combined[sym] = p
+
     triggered = []
     changed = False
 
     for symbol, entry in list(state.items()):
         try:
-            pos = positions.get(symbol)
+            pos = combined.get(symbol)
             if not pos:
                 del state[symbol]
                 changed = True
@@ -279,7 +333,7 @@ def check_positions(scanner_state: dict, cfg: dict = None) -> bool:
     """
     仓位生命周期管理，由 scanner 主循环每轮调用。
     直接操作 scanner_state["positions"] 和 scanner_state["cooldowns"]。
-    读写失败跳过本轮，下轮再来。
+    多账户：按 pos_info["accounts"] 逐账户检查仓位状态。
     返回 True 表示 state 有变更需要保存。
     """
     positions = scanner_state.get("positions", {})
@@ -287,10 +341,12 @@ def check_positions(scanner_state: dict, cfg: dict = None) -> bool:
         return False
 
     cfg = cfg or {}
-    try:
-        bn2_positions = _get_bn2_positions()
-    except Exception as e:
-        logger.warning(f"[仓位] 拉币安2持仓失败，跳过本轮: {e}")
+
+    # 并行预取每个启用账户的持仓 + 凭据映射
+    acct_positions, acct_creds = _fetch_all_positions_parallel(cfg)
+
+    if not acct_creds:
+        logger.warning("[仓位] 无启用账户，跳过")
         return False
 
     now = time.time()
@@ -306,24 +362,40 @@ def check_positions(scanner_state: dict, cfg: dict = None) -> bool:
             coin = symbol.replace("USDT", "")
             entry_price = pos_info["entry_price"]
             entry_time = pos_info["entry_time"]
-            bn2_pos = bn2_positions.get(symbol)
+            accts = pos_info.get("accounts") or [LEGACY_FALLBACK_ACCT]
 
-            # ── 4a. 仓位消失 = 被止盈或止损平掉 ──
-            if not bn2_pos:
-                # 撤残留 algo 挂单：先按 id 精确撤，失败则兜底全撤
+            # 只检查该仓位登记过的 + 当前启用的账户
+            active_accts = [a for a in accts if a in acct_creds]
+            if not active_accts:
+                logger.warning(f"[仓位] {coin} 登记账户{accts}均未启用，跳过")
+                continue
+
+            # 判别每账户的仓位状态
+            live_by_acct = {}   # acct -> pos dict（仍有仓）
+            gone_accts = []
+            unknown = False
+            for acct in active_accts:
+                p = acct_positions.get(acct)
+                if p is None:
+                    unknown = True
+                    continue
+                bn_pos = p.get(symbol)
+                if bn_pos:
+                    live_by_acct[acct] = bn_pos
+                else:
+                    gone_accts.append(acct)
+
+            if unknown:
+                # 有账户拉失败，本轮不做决策（避免误判平仓）
+                continue
+
+            # ── 4a. 所有账户仓位都消失 → 结算 ──
+            if not live_by_acct:
                 sl_id = pos_info.get("sl_algo_id")
                 tp_id = pos_info.get("tp_algo_id")
-                try:
-                    ok1 = _cancel_algo_by_id(sl_id)
-                    ok2 = _cancel_algo_by_id(tp_id)
-                    if not (ok1 and ok2):
-                        _cancel_algo_orders(symbol)
-                except Exception:
-                    try:
-                        _cancel_algo_orders(symbol)
-                    except Exception:
-                        pass
-                logger.info(f"[仓位] {coin} 消失，已撤残留挂单 sl={sl_id} tp={tp_id}")
+                creds_subset = {a: acct_creds[a] for a in active_accts}
+                _cancel_all_algo(creds_subset, symbol, sl_id, tp_id)
+                logger.info(f"[仓位] {coin} 全账户消失，已撤残留挂单 sl={sl_id} tp={tp_id}")
 
                 mark = _get_mark_price(symbol) or entry_price
                 pnl_pct = (mark - entry_price) / entry_price * 100
@@ -352,32 +424,41 @@ def check_positions(scanner_state: dict, cfg: dict = None) -> bool:
                     f"{emoji} <b>交易阻击成交报告 · {coin}</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━\n"
                     f"结果: {label}\n"
+                    f"账户: {','.join(active_accts)}\n"
                     f"入场: {entry_price:.4f}  估算盈亏: {margin_pnl:+.1f}%\n"
                     f"冷却: {cooldown_hours}小时"
                 )
                 _route(event, close_msg)
-                logger.info(f"[仓位] {coin} {label} 保证金盈亏{margin_pnl:+.1f}% 冷却{cooldown_hours}h")
+                logger.info(f"[仓位] {coin} {label} 账户{active_accts} 保证金盈亏{margin_pnl:+.1f}% 冷却{cooldown_hours}h")
 
                 _settle_signal(scanner_state, symbol, cooldown_type, mark)
                 del positions[symbol]
                 changed = True
                 continue
 
-            # 当前价和浮盈
-            cur_price = bn2_pos["mark_price"]
+            # 当前价和浮盈（用首个仍有仓账户的markPrice）
+            first_live_acct = next(iter(live_by_acct))
+            first_live_pos = live_by_acct[first_live_acct]
+            cur_price = first_live_pos["mark_price"]
             pnl_pct = (cur_price - entry_price) / entry_price * 100
             margin_pnl = pnl_pct * leverage
 
             # ── 4b. 超时平仓 ──
             hours_held = (now - entry_time) / 3600
             if hours_held >= timeout_hours:
-                logger.info(f"[仓位] {coin} 持仓{hours_held:.1f}h超时，执行平仓")
+                logger.info(f"[仓位] {coin} 持仓{hours_held:.1f}h超时，执行平仓 账户{list(live_by_acct.keys())}")
 
-                try:
-                    _cancel_algo_orders(symbol)
-                except Exception:
-                    pass
-                close_result = _close_position(symbol, bn2_pos["amt"])
+                # 先按 id 精确撤 SL/TP，再平仓（绝不全撤，防误伤用户同币挂单）
+                sl_id = pos_info.get("sl_algo_id")
+                tp_id = pos_info.get("tp_algo_id")
+                creds_subset = {a: acct_creds[a] for a in live_by_acct.keys()}
+                _cancel_all_algo(creds_subset, symbol, sl_id, tp_id)
+
+                close_results = []
+                for acct, bn_pos in live_by_acct.items():
+                    key_env, secret_env = acct_creds[acct]
+                    res = _close_position(acct, key_env, secret_env, symbol, bn_pos["amt"])
+                    close_results.append(res)
 
                 scanner_state.setdefault("cooldowns", {})[symbol] = {
                     "expire_at": now + timeout_cooldown * 3600,
@@ -392,11 +473,11 @@ def check_positions(scanner_state: dict, cfg: dict = None) -> bool:
                     f"持仓 {hours_held:.1f} 小时未爆发\n"
                     f"入场: {entry_price:.4f}  现价: {cur_price:.4f}\n"
                     f"保证金盈亏: {margin_pnl:+.1f}%\n"
-                    f"{close_result}\n"
+                    f"{chr(10).join(close_results)}\n"
                     f"冷却: {timeout_cooldown}小时"
                 )
                 _route("forced_close", timeout_msg)
-                logger.info(f"[仓位] {coin} {label} 保证金盈亏{margin_pnl:+.1f}% {close_result}")
+                logger.info(f"[仓位] {coin} 超时平仓 保证金盈亏{margin_pnl:+.1f}% {close_results}")
 
                 _settle_signal(scanner_state, symbol, "expired", cur_price)
                 del positions[symbol]
