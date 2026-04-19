@@ -1,11 +1,22 @@
 bull_sniper:
   enabled: true
-  mode: auto                 # auto / alert / off
+  mode: alert                 # auto / alert / off（2026-04-18 15:31 爸爸：币安2 开启自动执行）
   group_notify: true         # 群组交易通知开关（开仓成功/失败推群组）
+
+  # ── 多账户执行（信号触发时并发执行，各账户独立） ──
+  accounts:
+    币安1:
+      enabled: false            # 接好但关着，乌鸦打开才会执行
+      api_key_env: BINANCE_API_KEY
+      secret_env: BINANCE_SECRET_KEY
+    币安2:
+      enabled: true
+      api_key_env: BINANCE2_API_KEY
+      secret_env: BINANCE2_API_SECRET
 
   # 扫描（30秒一轮，高频捕捉爆发）
   scan_interval_sec: 30
-  watchpool_max: 50
+  watchpool_max: 30              # 2026-04-19 v3.4 50→30（恢复04-13赚钱期池容量）
   watchpool_refresh_sec: 60
 
   # ── 大币排除（不适合妖币策略）──
@@ -21,14 +32,17 @@ bull_sniper:
     - AVAXUSDT
     - DOTUSDT
 
-  # ── 第一步：基础过滤 ──
-  startup_max_change_pct: 50  # 启动时任意时段>50%排除（15→50）
-  min_listing_days: 1
+  # ── 第一步：基础过滤（2026-04-18 v3.6 三硬顶收紧）──
+  startup_max_change_pct: 30  # 任意时段>30%排除（v3.6 50→30）
+  min_listing_days: 2
   ath_exempt_days: 180
-  exclude_daily_vol_below: 20000000
-  min_drop_from_ath: 0            # 取消ATH跌幅限制，进池不花钱，评分把关
-  max_24h_change_pct: 50       # 24h涨>50%不进池+不买入（放宽，30%拦了太多妖币）
+  exclude_daily_vol_below: 20000000   # 2026-04-19 1000万→2000万（恢复04-13赚钱期门槛）
+  min_oi_startup: 5000000             # v3.6 新增：OI<500万U启动硬排除（死亡区400-800万一刀切）
+  min_drop_from_ath: 60            # 2026-04-19 0→60（恢复04-13"未腰斩不碰"前置过滤）
+  max_24h_change_pct: 25       # 2026-04-18 v3.4 50→25（凌晨13单全炸，回退只接早期币不追高）
   pool_ttl_hours: 24            # 观察池保留时间（小时），超时未触发信号才退出
+  pool_freeze_gain_pct: 20       # 2026-04-18 v3.4 新增：池内涨幅>20%冻结评分（不踢出，继续跟踪）
+  pool_unfreeze_gain_pct: 10     # 2026-04-18 v3.4 新增：回落≤10%解冻，10-20%缓冲带防震荡
 
   # ── 进池条件 ──
   # 第一层：瞬时触发（任意一条）
@@ -42,11 +56,11 @@ bull_sniper:
   # 第六条：量比异常（大币已被市值排除，不需要涨幅并排）
   pool_vol_ratio_min: 2.0      # 量比≥2x（三选二）
   # ── 市值排除 ──
-  mcap_exclude_top: 60         # CoinGecko市值前60名自动排除，24小时刷新
+  mcap_exclude_top: 100        # CoinGecko市值前100名自动排除，24小时刷新（2026-04-17 60→100）
   # 第七条：聪明钱买入
   pool_smart_money_min_score: 4  # 聪明钱评分≥4进池（buy=4, 多地址=6, 大额=10）
-  # 第二层（同时满足）
-  min_oi_usdt: 3000000        # OI≥300万U
+  # OI 门槛已上移到启动过滤层（min_oi_startup），此处不再有第二层
+  oi_compare_period: "15m"    # OI评分对比窗口（5m/15m/30m/1h/2h/4h）
 
   # ── AI判断 ──
   ai:
@@ -58,7 +72,7 @@ bull_sniper:
     final_decision: true       # AI最终买入决策
 
   # ── 仓位 ──
-  position_usd: 100
+  position_usd: 50
   default_leverage: 5
   max_position_usd: 50000
   max_slippage_pct: 2          # 滑点>2%放弃（v3.1简化）
@@ -66,12 +80,13 @@ bull_sniper:
 
   # ── 移动止盈 ──
   custom_trailing_enabled: true   # true=限价单移动止盈，false=币安原生
+  # ── 以下 trailing 段为死配置，custom_trailing_enabled=true 时不启用，实际跑 trailing_limit ──
   trailing:
-    activation_pct: 50         # 浮盈≥50%激活（v3.1）
+    activation_pct: 60         # 浮盈≥60%激活
     pullback_trigger: 25
     tolerance: 3
   trailing_limit:
-    activation_profit_pct: 50  # 浮盈≥50%激活
+    activation_profit_pct: 60  # 浮盈≥60%激活
     pullback_pct: 40           # 回撤40%止盈
     poll_interval_sec: 30
     safety_above_entry: true   # 止盈价不低于开仓价
@@ -100,42 +115,55 @@ bull_sniper:
   # ── 冷却 ──
   cooldown_after_tp_hours: 12
   cooldown_after_sl_hours: 24
-  cooldown_after_timeout_hours: 0      # 超时退出不设冷却，符合条件直接重新进池
+  cooldown_after_timeout_hours: 6      # 2026-04-18 v3.4 0→6（超时币不再反复进出消耗扫描）
   cooldown_after_veto_min: 30
-  cooldown_price_release_pct: 100       # 当前价≤入场价就解除冷却（回到入场价以下=新机会）
-  cooldown_price_release_on_sl: true    # 止损冷却也受价格解除（跌回来就是机会）
+  cooldown_price_release_pct: 0         # 2026-04-18 v3.4 100→0（关掉价格解除，避免止损后循环买入）
+  cooldown_price_release_on_sl: false   # 2026-04-18 v3.4 true→false（止损冷却不受价格解除）
   position_timeout_hours: 24       # 持仓超时自动平仓
 
   # ── 分析器 ──
   analyzer:
     enabled: true
-    signal_threshold: 28       # v2阈值（E因子满分+31）
+    signal_threshold: 25       # 2026-04-19 30→25（恢复04-13赚钱期阈值，配合 A/B 升门槛）
 
-  # ── 评分参数 v3.2（基于1417条实战数据优化） ──
+  # ── 回落过滤器 ──
+  # 评分过线后的最后一道防线：1m 翻阴直接跳过本轮
+  signal_reject_1m_below: -1         # 1m 涨幅 < -1% 判定为回落中，跳过
+
+  # ── C 维度 v4.0 闸门（2026-04-19 替换量比倍数）──
+  # 量比倍数对冷币基线敏感+是"已爆发"滞后指标；改用"加速度+买占比"三轴
+  # 短期加速度=后2m均买入/前3m均买入  中期加速度=后5m均买入/前10m均买入
+  # 闸门任一不过 → C维度=0分（不影响其他维度）
+  c_buy_ratio_gate: 0.55              # 买占比<55% → 砸盘/多空对打
+  c_min_back_2m_usdt: 200000          # 最近2分钟主动买入<20万U → 冷清
+
+  # ── 评分参数 v3.7（2026-04-19 恢复 04-13 赚钱期 A/B 设计：A=方向门闩 B=早期卡位）──
   scoring:
-    # A. 价格动能（互斥取最高，v3.2降门槛）
-    burst_1m_threshold: 6      # 1m涨>6%（v3.2: 8→6）
+    # A. 价格动能（互斥取最高）—— 高门槛当方向过滤器，下跌波动反抽达不到即过滤
+    burst_1m_threshold: 12     # 1m涨>12%（2026-04-19 恢复 04-13 值，5→12）
     burst_1m: 8
-    burst_3m_threshold: 4      # 3m涨>4%（v3.2: 6→4）
+    burst_3m_threshold: 8      # 3m涨>8%（2026-04-19 恢复 04-13 值，4→8）
     burst_3m: 7
-    burst_5m_threshold: 3      # 5m涨>3%（v3.2: 5→3）
+    burst_5m_threshold: 7      # 5m涨>7%（2026-04-19 恢复 04-13 值，3→7）
     burst_5m: 6
 
-    # B. 池内涨幅（互斥取最高，v3.2加低档+拓甜蜜区）
-    gain_2_5: 4                # 萌芽2-5%（v3.2新增）
-    gain_5_10: 7               # 初期5-8%
-    gain_10_15: 10             # 甜蜜区8-18%（v3.2拓宽）
-    gain_15_25: 8              # 强势18-30%
-    gain_25_40: 5              # 过热30-40%
-    gain_40_plus: 2            # 极端>40%（v3.2新增）
+    # B. 池内涨幅（互斥取最高）—— 早期卡位最高分，追高降分，鼓励早进不追尾
+    gain_5_10: 10              # 初期5-10%：最高分（2026-04-19 恢复 04-13 设计）
+    gain_10_15: 8              # 中期10-15%（9→8，回 04-13）
+    gain_15_25: 7              # 强势15-25%（8→7，回 04-13）
+    gain_25_40: 5              # 过热25-40%（保留）
+    # 删除 gain_2_5 和 gain_40_plus：追低/追高的两个邀请函，关掉
 
-    # C. 量比（互斥取最高，v3.2减轻惩罚+填补空白）
-    vol_ratio_5x: 10
-    vol_ratio_3x: 7
-    vol_ratio_2x: 6
-    vol_ratio_1_5x: 5
-    vol_ratio_1x: 2            # 1-1.5x正常（v3.2新增）
-    vol_ratio_low: -1           # 萎缩<1x（v3.2: -5→-1）
+    # C. 动能加速度 v4.0（2026-04-19 替换量比倍数）
+    # 互斥取最高档；前置闸门见 c_buy_ratio_gate / c_min_back_2m_usdt
+    c_dual_super:  10          # 短≥3x 且 中≥3x        双共振爆发
+    c_near_dual:   8           # 一边≥3x另一边≥2x      接近双共振
+    c_dual_strong: 7           # 短≥2x 且 中≥2x        双共振强势
+    c_one_super:   5           # 任一≥3x                单维度爆发（闪电/慢涨）
+    c_mixed:       4           # 一边≥2x另一边≥1.5x    短强中温/短温中强
+    c_mild:        2           # 任一≥1.5x              温和启动
+    c_flat:        0           # 1-1.5x之间             平稳
+    c_decay:       0           # 任一<1x 衰减（v4.0: -3→0，signal_reject_1m_below 已做最后防线，避免双重惩罚）
 
     # D. OI（v3.2: 比较窗口5分钟→1小时，降门槛）
     oi_up_mild: 3              # 0.5-5%（v3.2: 门槛从5%降到0.5%）
@@ -162,3 +190,11 @@ bull_sniper:
     # G. 公告因子
     announce_new_listing: 5    # 新增合约
     announce_delist: -5        # 下架/SETTLING
+
+    # E因子小币抖动减震（v3.3，-2太重改-1）
+    e2b_binance_outflow_penalty: -1   # 币安净流出惩罚
+    e4a_sell_dominant_penalty: -1     # 1h卖方主导惩罚
+    e2c_smart_exit_penalty: -1        # 聪明钱流出惩罚（原一票否决改扣分）
+
+    # H. Alpha币加分（v3.3新增，搜到合约=二元+2）
+    h_alpha_bonus: 2

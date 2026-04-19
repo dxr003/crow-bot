@@ -438,58 +438,88 @@ def score_signal(symbol: str, gain_pct: float, market_data: dict, cfg: dict) -> 
         breakdown[f"A.5m爆发+{change_5m:.1f}%"] = pts
         score += pts
 
-    # ── B. 池内涨幅（互斥取最高，v3.2加低档+拓甜蜜区） ──
-    if 2 <= gain_pct < 5:
-        pts = scoring.get("gain_2_5", 4)
-        breakdown[f"B.涨幅萌芽+{gain_pct:.1f}%"] = pts
-        score += pts
-    elif 5 <= gain_pct < 8:
-        pts = scoring.get("gain_5_10", 7)
+    # ── B. 池内涨幅（互斥取最高）—— 2026-04-19 恢复 04-13 赚钱期设计：早期卡位最高分，追高降分 ──
+    if 5 <= gain_pct < 10:
+        pts = scoring.get("gain_5_10", 10)
         breakdown[f"B.涨幅初期+{gain_pct:.1f}%"] = pts
         score += pts
-    elif 8 <= gain_pct < 18:
-        pts = scoring.get("gain_10_15", 10)
-        breakdown[f"B.涨幅甜蜜+{gain_pct:.1f}%"] = pts
+    elif 10 <= gain_pct < 15:
+        pts = scoring.get("gain_10_15", 8)
+        breakdown[f"B.涨幅中期+{gain_pct:.1f}%"] = pts
         score += pts
-    elif 18 <= gain_pct < 30:
-        pts = scoring.get("gain_15_25", 8)
+    elif 15 <= gain_pct < 25:
+        pts = scoring.get("gain_15_25", 7)
         breakdown[f"B.涨幅强势+{gain_pct:.1f}%"] = pts
         score += pts
-    elif 30 <= gain_pct < 40:
+    elif 25 <= gain_pct < 40:
         pts = scoring.get("gain_25_40", 5)
         breakdown[f"B.涨幅过热+{gain_pct:.1f}%"] = pts
         score += pts
-    elif gain_pct >= 40:
-        pts = scoring.get("gain_40_plus", 2)
-        breakdown[f"B.涨幅极端+{gain_pct:.1f}%"] = pts
-        score += pts
+    # gain_pct < 5 或 >= 40: B=0（追低/追高拒绝加分）
 
-    # ── C. 量比（互斥取最高，v3.2减轻惩罚+填补空白） ──
-    volume_ratio = market_data.get("volume_ratio", 1.0)
-    if volume_ratio > 5:
-        pts = scoring.get("vol_ratio_5x", 10)
-        breakdown[f"C.量比{volume_ratio:.1f}x"] = pts
-        score += pts
-    elif volume_ratio > 3:
-        pts = scoring.get("vol_ratio_3x", 7)
-        breakdown[f"C.量比{volume_ratio:.1f}x"] = pts
-        score += pts
-    elif volume_ratio > 2:
-        pts = scoring.get("vol_ratio_2x", 6)
-        breakdown[f"C.量比{volume_ratio:.1f}x"] = pts
-        score += pts
-    elif volume_ratio > 1.5:
-        pts = scoring.get("vol_ratio_1_5x", 5)
-        breakdown[f"C.量比{volume_ratio:.1f}x"] = pts
-        score += pts
-    elif volume_ratio >= 1:
-        pts = scoring.get("vol_ratio_1x", 2)
-        breakdown[f"C.量比{volume_ratio:.1f}x"] = pts
-        score += pts
+    # ── C. 动能加速度 v4.0（2026-04-19 替换量比倍数） ──
+    # 数据：short_accel(2m vs 3m前)、mid_accel(5m vs 10m前)、buy_ratio_5m、back_2m_buy_usdt
+    # 前置闸门：买占比<55% 或 最近2m买入<20万U → C=0（砸盘/冷币否决）
+    # 评分：互斥取最高档
+    short_accel = market_data.get("short_accel", 1.0)
+    mid_accel = market_data.get("mid_accel", 1.0)
+    buy_ratio = market_data.get("buy_ratio_5m", 0.0)
+    back_2m_buy = market_data.get("back_2m_buy_usdt", 0.0)
+
+    # 从 cfg 读闸门（v4.0 修复：原先 from scanner import CFG 造成循环引用+热重载失效）
+    _br_gate = cfg.get("c_buy_ratio_gate", 0.55)
+    _b2m_floor = cfg.get("c_min_back_2m_usdt", 200000)
+
+    pts = 0
+    c_tag = ""
+    # 闸门1：买占比（差5%以内标[险过]，方便人工评估）
+    if buy_ratio < _br_gate:
+        pts = 0
+        _close = "[险过]" if buy_ratio >= _br_gate - 0.05 else ""
+        c_tag = f"C.买占比{buy_ratio*100:.0f}%<{_br_gate*100:.0f}%闸门否{_close}"
+    # 闸门2：绝对量底线（差25%以内标[险过]）
+    elif back_2m_buy < _b2m_floor:
+        pts = 0
+        _close = "[险过]" if back_2m_buy >= _b2m_floor * 0.75 else ""
+        c_tag = f"C.后2m买{back_2m_buy/10000:.0f}万<{_b2m_floor/10000:.0f}万闸门否{_close}"
+    # 衰减（任一<1x）
+    elif short_accel < 1.0 or mid_accel < 1.0:
+        pts = scoring.get("c_decay", -3)
+        c_tag = f"C.衰减(短{short_accel:.1f}x/中{mid_accel:.1f}x)"
+    # 双共振爆发
+    elif short_accel >= 3 and mid_accel >= 3:
+        pts = scoring.get("c_dual_super", 10)
+        c_tag = f"C.双共振爆发(短{short_accel:.1f}x/中{mid_accel:.1f}x)"
+    # 接近双共振（一边≥3x 另一边≥2x）
+    elif (short_accel >= 3 and mid_accel >= 2) or (short_accel >= 2 and mid_accel >= 3):
+        pts = scoring.get("c_near_dual", 8)
+        c_tag = f"C.接近双共振(短{short_accel:.1f}x/中{mid_accel:.1f}x)"
+    # 双共振强势
+    elif short_accel >= 2 and mid_accel >= 2:
+        pts = scoring.get("c_dual_strong", 7)
+        c_tag = f"C.双共振强势(短{short_accel:.1f}x/中{mid_accel:.1f}x)"
+    # 单维度爆发（任一≥3x）
+    elif short_accel >= 3:
+        pts = scoring.get("c_one_super", 5)
+        c_tag = f"C.闪电爆发(短{short_accel:.1f}x)"
+    elif mid_accel >= 3:
+        pts = scoring.get("c_one_super", 5)
+        c_tag = f"C.阶梯慢涨(中{mid_accel:.1f}x)"
+    # 短强中温 / 短温中强
+    elif (short_accel >= 2 and mid_accel >= 1.5) or (short_accel >= 1.5 and mid_accel >= 2):
+        pts = scoring.get("c_mixed", 4)
+        c_tag = f"C.短强中温/短温中强(短{short_accel:.1f}x/中{mid_accel:.1f}x)"
+    # 温和启动（任一≥1.5x）
+    elif short_accel >= 1.5 or mid_accel >= 1.5:
+        pts = scoring.get("c_mild", 2)
+        c_tag = f"C.温和启动(短{short_accel:.1f}x/中{mid_accel:.1f}x)"
+    # 平稳
     else:
-        pts = scoring.get("vol_ratio_low", -1)
-        breakdown[f"C.量比{volume_ratio:.1f}x萎缩"] = pts
-        score += pts
+        pts = scoring.get("c_flat", 0)
+        c_tag = f"C.平稳(短{short_accel:.1f}x/中{mid_accel:.1f}x)"
+
+    breakdown[c_tag] = pts
+    score += pts
 
     # ── D. OI与资金费率（独立可叠加，v3.2改OI窗口+降门槛+加费率波动） ──
     oi_change = market_data.get("oi_change_pct", 0)

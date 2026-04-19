@@ -1,5 +1,5 @@
 """
-notifier.py — 做多阻击推送模块 v2.0
+notifier.py — 交易阻击推送模块 v2.0
 统一路由：玄玄(乌鸦私信) / 贝贝(群组) / 天天(震天响)
 """
 import html as html_mod
@@ -111,6 +111,13 @@ def _fmt_elapsed(ts: float) -> str:
     return f"{elapsed // 3600}h{(elapsed % 3600) // 60}m"
 
 
+def _fmt_enter_time(ts: float) -> str:
+    """timestamp → 北京时间 HH:MM"""
+    from datetime import timezone, timedelta
+    dt = datetime.fromtimestamp(ts, tz=timezone(timedelta(hours=8)))
+    return dt.strftime("%H:%M")
+
+
 def _coin(symbol: str) -> str:
     return symbol.replace("USDT", "").replace("usdt", "")
 
@@ -192,7 +199,7 @@ def send_signal(signal: dict, watchpool_snapshot: list = None):
     elapsed = signal.get("elapsed_min", 0)
 
     lines = [
-        f"⚡️ <b>小刃做多阻击信号预警 · {time.strftime('%m-%d %H:%M')}</b>",
+        f"⚡️ <b>小刃 · 交易阻击信号预警 · {time.strftime('%m-%d %H:%M')}</b>",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
         f"🔥 <b>做多信号 — {_coin(symbol)}</b>",
@@ -209,27 +216,40 @@ def send_signal(signal: dict, watchpool_snapshot: list = None):
 
     # 附加观察池快照
     if watchpool_snapshot:
+        sorted_snap = sorted(watchpool_snapshot, key=lambda x: x.get("entered_at", 0))
         lines.append("")
-        lines.append(f"👁 <b>观察待做多信号（{len(watchpool_snapshot)}个）</b>")
+        lines.append(f"👁 <b>观察中（{len(sorted_snap)}个）</b>")
         lines.append("<blockquote>")
-        for wp in watchpool_snapshot:
+        for idx, wp in enumerate(sorted_snap, 1):
             gain_since = wp.get("gain_since_entry", 0)
-            peak_gain = wp.get("peak_gain_pct", 0)
+            _ep = wp.get("entry_price", 0)
+            _pp = wp.get("peak_price", _ep)
+            peak_gain = (_pp - _ep) / _ep * 100 if _ep > 0 else 0
+            enter_t = _fmt_enter_time(wp["entered_at"])
             wp_elapsed = _fmt_elapsed(wp["entered_at"])
             sign = "+" if gain_since >= 0 else ""
+            score = wp.get("last_score")
+            score_tag = f"  评分<code>{score}</code>" if score is not None else ""
+            sep = "\n" if idx > 1 else ""
             lines.append(
-                f"<b>{_coin(wp['symbol'])}</b>  "
+                f"{sep}<b>#{idx} {_coin(wp['symbol'])}</b>  "
                 f"池内<code>{sign}{gain_since:.1f}%</code>  "
                 f"峰<code>+{peak_gain:.1f}%</code>  "
-                f"现价<code>{_fmt_price(wp.get('cur_price', wp['entry_price']))}</code>  "
-                f"量<code>{_fmt_vol(wp.get('volume_usdt', 0))}</code>  "
-                f"{wp_elapsed}"
+                f"<code>{_fmt_price(wp.get('cur_price', wp['entry_price']))}</code>\n"
+                f"   {enter_t}发现 · 量<code>{_fmt_vol(wp.get('volume_usdt', 0))}</code> · "
+                f"{wp_elapsed}{score_tag}"
             )
         lines.append("</blockquote>")
 
     lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━━")
-    lines.append("开仓由AI自动执行，或由老大社区兄弟自行决策！")
+    _mode = str(_load_notify_cfg().get("mode", "off")).lower()
+    if _mode == "auto":
+        lines.append("📡 当前 <b>自动开仓模式</b> · 信号触发即下单")
+    elif _mode == "alert":
+        lines.append("🔔 当前 <b>告警模式</b> · 仅推送不下单")
+    else:
+        lines.append("👁 当前 <b>纯观察模式</b> · 仅记录评分，不下单")
 
     msg = "\n".join(lines)
     _send_bb(msg)
@@ -244,7 +264,7 @@ def send_pool_entry(pool_item: dict):
     drop_ath = pool_item.get("drop_from_ath", 0)
 
     text = (
-        f"👁 <b>小刃做多阻击 · 新目标进入观察</b>\n\n"
+        f"👁 <b>小刃 · 交易阻击 · 新目标进入观察</b>\n\n"
         f"<blockquote>"
         f"🪙 代币：<b>{_coin(symbol)}</b>\n"
         f"📈 5分钟涨幅：<code>+{change_5m:.1f}%</code>\n"
@@ -253,7 +273,7 @@ def send_pool_entry(pool_item: dict):
         f"📌 距高点：<code>-{drop_ath:.1f}%</code>\n"
         f"⏱ 开始观察：{time.strftime('%H:%M:%S')}"
         f"</blockquote>\n\n"
-        f"<i>正在观察，涨到10-18%时推信号</i>"
+        f"<i>观察中，等待AI决策符合条件时推信号</i>"
     )
     _send_bb(text)
 
@@ -269,29 +289,37 @@ def send_status_card(state: dict):
     stats = state.get("stats", {})
 
     lines = [
-        f"⚡️ <b>小刃做多阻击信号预警 · {time.strftime('%m-%d %H:%M')}</b>",
+        f"⚡️ <b>小刃 · 交易阻击信号预警 · {time.strftime('%m-%d %H:%M')}</b>",
         "━━━━━━━━━━━━━━━━━━━━",
     ]
 
     # ── 观察池 ──
     if watchpool:
-        lines.append(f"\n👁 <b>观察待做多信号（{len(watchpool)}个）</b>")
+        # 按进池时间排序
+        sorted_wp = sorted(watchpool.items(), key=lambda x: x[1].get("entered_at", 0))
+        lines.append(f"\n👁 <b>观察中（{len(sorted_wp)}个）</b>")
         lines.append("<blockquote>")
-        for symbol, wp in watchpool.items():
+        for idx, (symbol, wp) in enumerate(sorted_wp, 1):
             entry_price = wp["entry_price"]
             cur_price = wp.get("cur_price", entry_price)
             peak_price = wp.get("peak_price", entry_price)
             gain_pct = (cur_price - entry_price) / entry_price * 100 if entry_price > 0 else 0
             peak_pct = (peak_price - entry_price) / entry_price * 100 if entry_price > 0 else 0
+            sign = "+" if gain_pct >= 0 else ""
+            enter_t = _fmt_enter_time(wp["entered_at"])
             wp_elapsed = _fmt_elapsed(wp["entered_at"])
             vol = wp.get("volume_usdt", 0)
+            score = wp.get("last_score")
+            score_tag = f"  评分<code>{score}</code>" if score is not None else ""
+            frozen_tag = "❄️ " if wp.get("frozen") else ""
+            sep = "\n" if idx > 1 else ""
             lines.append(
-                f"<b>{_coin(symbol)}</b>  "
-                f"进池<code>+{gain_pct:.1f}%</code>  "
+                f"{sep}<b>#{idx} {frozen_tag}{_coin(symbol)}</b>  "
+                f"池内<code>{sign}{gain_pct:.1f}%</code>  "
                 f"峰<code>+{peak_pct:.1f}%</code>  "
-                f"现价<code>{_fmt_price(cur_price)}</code>  "
-                f"量<code>{_fmt_vol(vol)}</code>  "
-                f"{wp_elapsed}"
+                f"<code>{_fmt_price(cur_price)}</code>\n"
+                f"   {enter_t}发现 · 量<code>{_fmt_vol(vol)}</code> · "
+                f"{wp_elapsed}{score_tag}"
             )
         lines.append("</blockquote>")
     else:
@@ -336,7 +364,7 @@ def send_status_card(state: dict):
         lines.append("</blockquote>")
 
     # ── 信号记录（含实时价格+浮盈） ──
-    recent_signals = signals[-10:] if signals else []
+    recent_signals = list(signals) if signals else []
     if recent_signals:
         # 批量拉实时价格
         sig_symbols = [s["symbol"] for s in recent_signals]
@@ -382,47 +410,67 @@ def send_status_card(state: dict):
             lines.append(price_line)
             lines.append("</blockquote>")
     else:
-        lines.append("\n✅ <b>暂无信号记录</b>")
+        lines.append("\n✅ <b>暂无触发信号</b>")
 
-    # ── 历史结算 ──
+    # ── 历史结算（区分真实成交 vs 虚拟成绩） ──
     signal_history = state.get("signal_history", [])
     if signal_history:
-        success = [s for s in signal_history if s.get("status") == "success"]
-        failed  = [s for s in signal_history if s.get("status") == "failed"]
-        expired = [s for s in signal_history if s.get("status") == "expired"]
+        real_hist = [s for s in signal_history if not s.get("is_virtual")]
+        virt_hist = [s for s in signal_history if s.get("is_virtual")]
 
-        lines.append(f"\n📋 <b>信号结算（{len(signal_history)}个）</b>")
-        lines.append("<blockquote>")
-        for label, icon, group in [
-            ("成功", "✅", success),
-            ("失败", "❌", failed),
-            ("因故平仓", "⏰", expired),
-        ]:
-            if group:
+        def _render_group(title: str, hist: list):
+            if not hist:
+                return
+            success = [s for s in hist if s.get("status") == "success"]
+            failed  = [s for s in hist if s.get("status") == "failed"]
+            expired = [s for s in hist if s.get("status") == "expired"]
+            lines.append(f"\n{title}（{len(hist)}个）")
+            lines.append("<blockquote>")
+            for label, icon, group in [
+                ("成功", "✅", success),
+                ("失败", "❌", failed),
+                ("因故平仓", "⏰", expired),
+            ]:
+                if not group:
+                    continue
                 lines.append(f"{icon} <b>{label}（{len(group)}）</b>")
-                for s in group[-5:]:
+                shown = list(reversed(group))[:5]
+                for s in shown:
                     entry_p = s.get("entry_price", 0)
                     exit_p = s.get("exit_price", 0)
-                    pnl = (exit_p - entry_p) / entry_p * 100 if entry_p > 0 else 0
+                    pnl = (exit_p - entry_p) / entry_p * 100 if entry_p > 0 and exit_p > 0 else 0
+                    pnl_str = f"<b>{pnl:+.1f}%</b>" if exit_p > 0 else "<i>无出场价</i>"
                     lines.append(
                         f"  {_coin(s['symbol'])} "
                         f"入<code>{_fmt_price(entry_p)}</code> → "
                         f"出<code>{_fmt_price(exit_p)}</code> "
-                        f"<b>{pnl:+.1f}%</b>"
+                        f"{pnl_str}"
                     )
-        lines.append("</blockquote>")
+                if len(group) > 5:
+                    lines.append(f"  <i>…还有 {len(group) - 5} 条</i>")
+            lines.append("</blockquote>")
 
-    # ── 统计 ──
-    total_signals = stats.get("signals", 0)
-    scans = stats.get("scans", 0)
-    radar_hits = stats.get("radar_hits", 0)
-    pool_entries = stats.get("pool_entries", 0)
+        _render_group("📋 <b>真实交易结算</b>", real_hist)
+        _render_group("📊 <b>虚拟成绩（未真实开仓）</b>", virt_hist)
+
+    # ── 统计（与健康报告同步） ──
+    pool_count = len(watchpool)
+    pos_count = len(state.get("positions", {}))
+    sig_count = len(signals)
+    settled_count = len(state.get("signal_history", []))
     lines.append(
         f"\n🏆 <b>统计</b>  "
-        f"扫描 {scans}  雷达 {radar_hits}  进池 {pool_entries}  信号 {total_signals}"
+        f"观察池 {pool_count}  持仓 {pos_count}  "
+        f"已触发信号 {sig_count}  结算 {settled_count}"
     )
     lines.append("━━━━━━━━━━━━━━━━━━━━")
-    lines.append("开仓由AI自动执行，或由老大社区兄弟自行决策！")
+    _mode = str(_load_notify_cfg().get("mode", "off")).lower()
+    if _mode == "auto":
+        lines.append("📡 当前 <b>自动开仓模式</b> · 信号触发即下单")
+    elif _mode == "alert":
+        lines.append("🔔 当前 <b>告警模式</b> · 仅推送不下单")
+    else:
+        lines.append("👁 当前 <b>纯观察模式</b> · 仅记录评分，不下单")
 
     msg = "\n".join(lines)
     _send_bb(msg)
@@ -518,7 +566,7 @@ def send_trade_report(signal: dict, buy_result: dict, analyze_result: dict):
 
         exec_block = (
             f"订单ID: {order_id}\n"
-            f"止损价: {sl_price}（保证金-30%）{sl_tag}\n"
+            f"止损价: {sl_price}（保证金-{buy_result.get('sl_margin_pct', 50)}%）{sl_tag}\n"
             f"移动止盈: {trailing_status}\n"
             f"滚仓: {roll_status}"
         )
@@ -531,7 +579,7 @@ def send_trade_report(signal: dict, buy_result: dict, analyze_result: dict):
 
     # ── 贝贝完整版（→乌鸦私信，含1234步骤） ──
     text_full = (
-        f"{exec_icon} <b>做多阻击成交报告 · {sym}</b>\n"
+        f"{exec_icon} <b>交易阻击成交报告 · {sym}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"⏰ {now_str}\n\n"
         f"<b>1️⃣ 触发</b>\n"
@@ -555,7 +603,7 @@ def send_trade_report(signal: dict, buy_result: dict, analyze_result: dict):
 
     # ── 精简版（→天天 + 群组） ──
     text_simple = (
-        f"{exec_icon} <b>做多阻击成交报告 · {sym}</b>\n"
+        f"{exec_icon} <b>交易阻击成交报告 · {sym}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"⏰ {now_str}\n\n"
         f"触发  {channel}\n"
@@ -588,19 +636,22 @@ def send_health_report(state: dict, filter_log: list):
     diag_lines = []
     all_ok = True
 
-    # 1) OI数据检查（通过state传入的oi_cache快照）
-    oi_cache = state.get("_oi_cache", {})
-    if not oi_cache:
-        diag_lines.append("⚠️ OI：缓存为空，尚未采集到数据")
-        all_ok = False
-    else:
-        freshest = max(v["time"] for v in oi_cache.values())
-        age_min = (now_ts - freshest) / 60
-        if age_min > 10:
-            diag_lines.append(f"⚠️ OI：最新数据 {age_min:.0f}分钟前，可能断连")
-            all_ok = False
+    # 1) OI数据检查（v3.3: 改用币安历史API，抽检一次验证连通性）
+    try:
+        import requests as _req
+        _oi_resp = _req.get(
+            "https://fapi.binance.com/futures/data/openInterestHist",
+            params={"symbol": "BTCUSDT", "period": "15m", "limit": 1},
+            timeout=5,
+        )
+        if _oi_resp.status_code == 200 and _oi_resp.json():
+            diag_lines.append("✅ OI：历史API连通正常")
         else:
-            diag_lines.append(f"✅ OI：{len(oi_cache)}币缓存，最新 {age_min:.0f}分钟前")
+            diag_lines.append("⚠️ OI：历史API返回异常")
+            all_ok = False
+    except Exception:
+        diag_lines.append("⚠️ OI：历史API无法连接")
+        all_ok = False
 
     # 2) 新闻通道
     if _tavily_fail_count < _TAVILY_FAIL_THRESHOLD:
@@ -648,12 +699,12 @@ def send_health_report(state: dict, filter_log: list):
     filter_count = len(filter_log) if filter_log else 0
 
     text = (
-        f"🔍 做多阻击系统自检 · {now_str}\n"
+        f"🔍 交易阻击系统自检 · {now_str}\n"
         f"━━━━━━━━━━━━━━\n"
-        f"扫描：{stats.get('scans', 0)}  "
-        f"雷达：{stats.get('radar_hits', 0)}  "
-        f"进池：{stats.get('pool_entries', 0)}  "
-        f"信号：{stats.get('signals', 0)}\n"
+        f"观察池：{len(watchpool)}  "
+        f"持仓：{len(state.get('positions', {}))}  "
+        f"已触发信号：{len(state.get('signals', []))}  "
+        f"结算：{len(state.get('signal_history', []))}\n"
         f"{diag_block}\n"
         f"⚠️ 近期过滤：{filter_count}个币未达标"
     )

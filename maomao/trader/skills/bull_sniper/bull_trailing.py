@@ -265,10 +265,11 @@ def _settle_signal(scanner_state: dict, symbol: str, status: str, exit_price: fl
             sig["status"] = mapped
             sig["exit_price"] = exit_price
             sig["settled_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            sig["is_virtual"] = False  # bull_trailing 真实成交结算
             scanner_state.setdefault("signal_history", []).append(sig)
             if len(scanner_state["signal_history"]) > 50:
                 scanner_state["signal_history"] = scanner_state["signal_history"][-50:]
-            logger.info(f"[结算] {symbol} 信号 → {status} 出场:{exit_price}")
+            logger.info(f"[真实结算] {symbol} 信号 → {status} 出场:{exit_price}")
         else:
             remaining.append(sig)
     scanner_state["signals"] = remaining
@@ -348,7 +349,7 @@ def check_positions(scanner_state: dict, cfg: dict = None) -> bool:
                 }
 
                 close_msg = (
-                    f"{emoji} <b>做多阻击成交报告 · {coin}</b>\n"
+                    f"{emoji} <b>交易阻击成交报告 · {coin}</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━\n"
                     f"结果: {label}\n"
                     f"入场: {entry_price:.4f}  估算盈亏: {margin_pnl:+.1f}%\n"
@@ -385,7 +386,7 @@ def check_positions(scanner_state: dict, cfg: dict = None) -> bool:
                 }
 
                 timeout_msg = (
-                    f"⏰ <b>做多阻击成交报告 · {coin}</b>\n"
+                    f"⏰ <b>交易阻击成交报告 · {coin}</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━\n"
                     f"结果: ⏰ 因故平仓\n"
                     f"持仓 {hours_held:.1f} 小时未爆发\n"
