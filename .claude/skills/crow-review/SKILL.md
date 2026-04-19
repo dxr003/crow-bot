@@ -1,0 +1,180 @@
+---
+name: crow-review
+description: 审 crow-bot 代码，带铁律和架构约束。当用户要求审查 /root/maomao、/root/damao、/root/scripts 下代码，或说"扫 xxx"、"review xxx"时使用。
+---
+
+# crow-review：乌鸦家代码审查
+
+专用于乌鸦团队代码库的定制审查流程。相比通用 `/simplify`，额外带入：
+- 7 条开发铁律（封板/不打补丁/原生优先 等）
+- 6 条架构约束（风控/+i/TG shell/多账户/模块开关/DRY）
+- 三段式报告格式（Bug/效率/清洁）
+
+使用方式：`/crow-review <文件或模块路径>`
+例：`/crow-review bull_sniper.py`、`/crow-review trader/multi/`
+
+---
+
+## Phase 1：识别审查范围
+
+1. 如果用户指定了文件或目录，直接用 Read/Grep 读。
+2. 如果没指定，运行 `git diff`（或 `git diff HEAD`）看改动。
+3. 如果都没有，扫最近修改的文件。
+
+把完整原文（或 diff）作为三个审查代理的共同输入。
+
+---
+
+## Phase 2：三维度并行审查
+
+用 Agent 工具**并行**启动三个审查代理（同一条消息里多个 tool call）。每个代理独立工作，最后汇总。
+
+### Agent 1：⭕ Bug 审查
+
+重点找**会炸的**问题：
+
+- **风控绕过**：任何开单/加仓/挂止损路径必须经过 `risk.py`，直接调 exchange.py/bn_trailing_stop.py 下单的算 Bug
+- **封板违规**：改了标 🔒 的文件（`chattr +i`）、或把新逻辑塞进封板模块内部
+- **权限漏洞**：`trader/multi/` 公开函数漏了 `require(role, action, account)` 开头检查
+- **hedge mode 错误**：双向持仓下只平一侧、positionSide 漏传、reduceOnly 和 positionSide 混用
+- **并发竞态**：模块被多线程调用时，客户端缓存/状态文件/字典没加锁
+- **精度丢失**：下单数量没走 `_fix(qty, stepSize)`、价格没走 tickSize 对齐
+- **API key 暴露**：print / log / Telegram 推送里带了 key 前缀
+- **状态文件损坏**：写 JSON 没先写临时文件再 rename，进程 kill 会留半文件
+- **异常吞噬**：`except Exception: pass` 无日志，把关键失败压下来
+
+### Agent 2：🔥 效率坑审查
+
+重点找**白烧 CPU/等待时间**的问题：
+
+- **串行多账户**：4 个账户循环查接口没用 `ThreadPoolExecutor`，节省 1.5~3 秒
+- **重复 API 调用**：同一轮循环内多次拉 `get_position_risk`、`mark_price`，应复用
+- **N+1 请求**：对列表每个元素单独调 API，应走批量接口
+- **热路径阻塞**：每次 tick/每条消息都读大文件、重建字典、初始化客户端
+- **土办法轮询**：能用原生 algoOrder / 条件单的地方自己 while True 盯盘（违反铁律4）
+- **未改写回**：轮询中不管状态变没变都 `_save(state)`，触发下游 noise
+- **TOCTOU 预检**：先 `Path.exists()` 再操作，应直接 try+except
+- **启动重活**：服务启动阶段同步加载几十 MB 数据、同步请求外部 API
+
+### Agent 3：🧹 代码清洁审查
+
+重点找**能删能合并**的代码：
+
+- **重复实现**：新写的工具函数在 `/root/scripts/core.py`、`/root/shared/`、`trader/multi/` 已有（违反 DRY）
+- **废弃代码**：留着 `# old version` 注释块、`_legacy_*` 函数、早版本的封板注释
+- **参数膨胀**：函数签名挂 5+ 参数只用其中 2 个，应拆或重构
+- **复制粘贴变种**：几处几乎一样只差一个字段，应抽公共
+- **stringly-typed**：判断 `if action == "trade"` 时 "trade"/"query"/"admin" 不是常量
+- **无效注释**：注释讲 WHAT（代码已经表达）、引用调用者（会腐烂）、任务编号
+- **冗余 try/except**：套在内部函数已经处理过异常的调用外面
+- **幽灵向后兼容**：为不存在的调用方留 `_old_name = new_name` 别名
+- **wrapper 泛滥**：薄适配只改一个字段名，调用方改掉更直接
+
+---
+
+## Phase 3：修复
+
+等三个代理都返回后：
+
+1. **按严重度排序**：⭕ Bug 优先改，🔥 效率坑其次，🧹 清洁最后
+2. **批量小改一起提**：相邻行的同类改动合一次编辑
+3. **封板文件**：发现需改时，先报告乌鸦，`chattr -i` 解锁 → 改 → 测 → `chattr +i` 重新封板
+4. **无法修的标记出来**：不是所有 finding 都值得立即改，挑真正有价值的
+
+改完用**三段式报告**交付：
+
+```
+⭕ Bug（N 条）
+  1. <文件>:<行> — <问题> — <修法>
+  ...
+
+🔥 效率坑（N 条）
+  1. <文件>:<行> — <问题> — <优化>
+  ...
+
+🧹 代码清洁（N 条）
+  1. <文件>:<行> — <冗余> — <删/合并建议>
+  ...
+```
+
+最后一行用一句话总结：本次审查覆盖 X 个文件，共 Y 条改动已落地，Z 条跳过（原因：...）。
+
+---
+
+## 附录 A：7 条开发铁律（照抄自 `/root/CLAUDE.md`）
+
+### 铁律1：封板制度
+已封板模块：P1 scanner.py / executor.py / position_manager.py / trader/trailing.py / trader/rolling.py / trader/order.py / trader/parser.py / trader/preview.py / trader/router.py / trader/exchange.py / trader/skills/bull_sniper/bull_trailing.py / /root/shared/core.py
+封板后不允许改动，必须改先报告乌鸦确认。
+
+### 铁律2：新功能不碰旧模块
+新建文件、新增函数、新增配置项。不改已封板模块内部逻辑。
+
+### 铁律3：不打补丁
+发现设计问题从根本重新设计，不补丁叠补丁。
+
+### 铁律4：原生优先
+能用交易所原生 API 实现的直接调用，不自己写脚本模拟。
+币安/HL 原生移动止盈、OCO、条件单等用官方接口。
+只有真的做不到才自己写。
+
+### 铁律5：先出架构方案再动手
+方案包含：改哪些文件、新建哪些文件、对封板模块有没有影响。确认后再动。
+
+### 铁律6：完成一块测一块
+
+### 铁律7：不触碰 Claude Code 系统规则
+写功能和脚本不涉及 Claude Code 本身的系统配置、权限、规则。
+需要动 Code 系统层面的问题，先报告乌鸦。
+
+---
+
+## 附录 B：6 条架构约束（crow-review 专属）
+
+审查时必须逐条核对：
+
+1. **风控必过 risk.py**
+   所有下单/加仓/挂损路径必须先过 `risk_manager.py`（单笔≤500U / 日亏≤200U / 回撤≤15%）。绕开直接调 exchange 的算违规。
+
+2. **+i 封板先解锁再改**
+   改前先 `lsattr <file>` 确认是否 +i，是则 `chattr -i` 解锁、改完测完 `chattr +i` 重新封。直接改封板文件报错就跳过是错的。
+
+3. **TG shell 冻结不动**
+   `bot.py` 主入口、消息路由、Telegram token 处理冻结，不改动。要改先报告乌鸦。
+
+4. **多账户并行化关注点**
+   `trader/multi/` 下任何对 N 个账户 fan-out 的查询/下单循环，必须用 `ThreadPoolExecutor`，不许串行。
+   客户端缓存必须双检锁（`_lock` 已在 registry.py 准备）。
+
+5. **模块有 start/stop 开关**
+   每个守护/扫描/推送模块必须提供独立开关（配置文件 mode: on/off 或 service disable），不许把开关嵌进硬编码逻辑。
+
+6. **写一次用多次（DRY）**
+   新写工具函数前先在 `/root/scripts/core.py`、`/root/shared/`、`trader/multi/` 搜同名或同职责函数。重复实现算违规。
+
+---
+
+## 附录 C：常见绿区（不用误报）
+
+以下情况看起来像问题其实不是，审查时放行：
+
+- `except Exception: pass` 在 `get_full_balance` 的 spot/funding 环节（best-effort，主数据是合约）
+- 封板文件里看到"不符合新风格的代码"——封板即历史，不动
+- `_resolve_name` 私有别名仍在：为封板模块向后兼容
+- TG 推送里的 emoji（🐦/⭕/🔥/🧹/📊 等）——是乌鸦偏好，不是冗余
+- 同一个常量在 `config.yaml` 和 `CLAUDE.md` 各写一遍——配置+文档分离，不算重复
+
+---
+
+## 使用范例
+
+```
+用户：扫一下 trader/multi/executor.py
+→ /crow-review trader/multi/executor.py
+→ 启动 3 个代理并行审查
+→ 产出三段式报告
+→ 按优先级批量修复
+→ 汇报改动清单
+```
+
+结束。保持简洁直白，不搞陪伴口吻。
