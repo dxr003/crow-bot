@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-bull_sniper buyer.py — 买入执行模块 v3.2
-对接币安2账户（BINANCE2_API_KEY），双向持仓模式（positionSide=LONG）
-流程：风控检查 → 设杠杆 → 滑点检查 → 市价开多 → 挂止损 → 挂移动止盈 → 返回结果
+bull_sniper buyer.py — 买入执行模块 v3.3
+多账户并发执行（config.yaml accounts），双向持仓模式（positionSide=LONG）
+流程：遍历启用账户 → 风控检查 → 设杠杆 → 滑点检查 → 市价开多 → 挂止损 → 挂移动止盈 → 返回结果
 """
 import hashlib
 import hmac
@@ -22,28 +22,31 @@ load_dotenv(Path("/root/.qixing_env"))
 logger = logging.getLogger("bull_buyer")
 
 from notifier import route as _route
+from _atomic import atomic_write_json
 
 FAPI_BASE = "https://fapi.binance.com"
 
-_client = None
+_clients = {}       # key: (key_env, secret_env) → UMFutures
 _exchange_info_cache = None
 
 
-def _get_client() -> UMFutures:
-    global _client
-    if _client is None:
-        key = os.getenv("BINANCE2_API_KEY", "")
-        secret = os.getenv("BINANCE2_API_SECRET", "")
+def _get_client(key_env: str = "BINANCE2_API_KEY",
+                secret_env: str = "BINANCE2_API_SECRET") -> UMFutures:
+    cache_key = (key_env, secret_env)
+    if cache_key not in _clients:
+        key = os.getenv(key_env, "")
+        secret = os.getenv(secret_env, "")
         if not key or not secret:
-            raise RuntimeError("BINANCE2_API_KEY/SECRET 未配置")
-        _client = UMFutures(key=key, secret=secret)
-    return _client
+            raise RuntimeError(f"{key_env}/{secret_env} 未配置")
+        _clients[cache_key] = UMFutures(key=key, secret=secret)
+    return _clients[cache_key]
 
 
-def _get_exchange_info() -> dict:
+def _get_exchange_info(key_env: str = "BINANCE2_API_KEY",
+                       secret_env: str = "BINANCE2_API_SECRET") -> dict:
     global _exchange_info_cache
     if _exchange_info_cache is None:
-        c = _get_client()
+        c = _get_client(key_env, secret_env)
         _exchange_info_cache = {}
         for s in c.exchange_info()["symbols"]:
             _exchange_info_cache[s["symbol"]] = s
@@ -88,8 +91,9 @@ def _fix_price(symbol: str, price: float) -> float:
     return round(round(price / tick) * tick, decimals)
 
 
-def _get_balance() -> dict:
-    c = _get_client()
+def _get_balance(key_env: str = "BINANCE2_API_KEY",
+                 secret_env: str = "BINANCE2_API_SECRET") -> dict:
+    c = _get_client(key_env, secret_env)
     info = c.account()
     return {
         "total":     float(info["totalWalletBalance"]),
@@ -98,8 +102,9 @@ def _get_balance() -> dict:
     }
 
 
-def _get_long_positions() -> list:
-    c = _get_client()
+def _get_long_positions(key_env: str = "BINANCE2_API_KEY",
+                        secret_env: str = "BINANCE2_API_SECRET") -> list:
+    c = _get_client(key_env, secret_env)
     result = []
     for p in c.get_position_risk():
         if float(p["positionAmt"]) > 0:
@@ -107,10 +112,11 @@ def _get_long_positions() -> list:
     return result
 
 
-def _algo_order(params: dict) -> dict:
+def _algo_order(params: dict, key_env: str = "BINANCE2_API_KEY",
+                secret_env: str = "BINANCE2_API_SECRET") -> dict:
     """币安algoOrder统一封装（止损用）"""
-    key = os.getenv("BINANCE2_API_KEY", "")
-    secret = os.getenv("BINANCE2_API_SECRET", "")
+    key = os.getenv(key_env, "")
+    secret = os.getenv(secret_env, "")
     ts = int(time.time() * 1000)
     params["timestamp"] = str(ts)
     query = urlencode(params)
@@ -124,10 +130,11 @@ def _algo_order(params: dict) -> dict:
     return {"status_code": resp.status_code, "data": resp.json()}
 
 
-def _fapi_order(params: dict) -> dict:
+def _fapi_order(params: dict, key_env: str = "BINANCE2_API_KEY",
+                secret_env: str = "BINANCE2_API_SECRET") -> dict:
     """币安合约普通端点 /fapi/v1/order（移动止盈用）"""
-    key = os.getenv("BINANCE2_API_KEY", "")
-    secret = os.getenv("BINANCE2_API_SECRET", "")
+    key = os.getenv(key_env, "")
+    secret = os.getenv(secret_env, "")
     ts = int(time.time() * 1000)
     params["timestamp"] = str(ts)
     query = urlencode(params)
@@ -164,11 +171,11 @@ def _register_trailing(symbol: str, entry_price: float, qty: float,
         "activated": False,
         "registered_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
-    TRAILING_STATE.parent.mkdir(parents=True, exist_ok=True)
-    TRAILING_STATE.write_text(json.dumps(state, indent=2, ensure_ascii=False))
+    atomic_write_json(TRAILING_STATE, state)
 
 
 def execute(symbol: str, price: float, analyze_result: dict, cfg: dict) -> dict:
+    """多账户入口：遍历 cfg["accounts"]，各账户独立执行，返回 {账户名: result}"""
     mode = cfg.get("mode", "off")
 
     if mode == "off":
@@ -177,25 +184,59 @@ def execute(symbol: str, price: float, analyze_result: dict, cfg: dict) -> dict:
 
     if mode == "alert":
         logger.info(f"[buyer] {symbol} mode=alert, 推送等待人工确认")
-        return {"status": "skipped", "reason": "mode=alert等待人工确认", "order_id": None}
+        return {"status": "skipped", "reason": "等待人类确认", "order_id": None}
 
-    try:
-        return _execute_auto(symbol, price, analyze_result, cfg)
-    except Exception as e:
-        logger.error(f"[buyer] {symbol} 执行异常: {e}")
-        return {"status": "error", "reason": str(e), "order_id": None}
+    accounts = cfg.get("accounts", {})
+    if not accounts:
+        # 兼容无accounts配置：回退到默认币安2
+        accounts = {"币安2": {"enabled": True, "api_key_env": "BINANCE2_API_KEY", "secret_env": "BINANCE2_API_SECRET"}}
+
+    results = {}
+    for acct_name, acct_cfg in accounts.items():
+        if not acct_cfg.get("enabled", False):
+            logger.info(f"[buyer] {symbol} [{acct_name}] 未启用，跳过")
+            results[acct_name] = {"status": "skipped", "reason": f"{acct_name}未启用", "order_id": None}
+            continue
+
+        key_env = acct_cfg.get("api_key_env", "BINANCE2_API_KEY")
+        secret_env = acct_cfg.get("secret_env", "BINANCE2_API_SECRET")
+        try:
+            r = _execute_auto(symbol, price, analyze_result, cfg, acct_name, key_env, secret_env)
+            results[acct_name] = r
+        except Exception as e:
+            logger.error(f"[buyer] {symbol} [{acct_name}] 执行异常: {e}")
+            results[acct_name] = {"status": "error", "reason": str(e), "order_id": None}
+
+    # 兼容：如果只有一个账户，同时返回顶层字段供旧代码读取
+    if len(results) == 1:
+        single = list(results.values())[0]
+        single["_accounts"] = results
+        return single
+
+    # 多账户：取第一个executed的作为主结果，附上全部
+    for r in results.values():
+        if r["status"] == "executed":
+            r["_accounts"] = results
+            return r
+    # 全部未执行：返回第一个
+    first = list(results.values())[0]
+    first["_accounts"] = results
+    return first
 
 
-def _execute_auto(symbol: str, price: float, analyze_result: dict, cfg: dict) -> dict:
+def _execute_auto(symbol: str, price: float, analyze_result: dict, cfg: dict,
+                  acct_name: str = "币安2",
+                  key_env: str = "BINANCE2_API_KEY",
+                  secret_env: str = "BINANCE2_API_SECRET") -> dict:
 
     # ── 1. 持仓数检查 ──
     max_positions = cfg.get("max_concurrent_positions", 10)
-    long_positions = _get_long_positions()
+    long_positions = _get_long_positions(key_env, secret_env)
 
     if len(long_positions) >= max_positions:
         return {
             "status": "skipped",
-            "reason": f"多头持仓已达上限{max_positions}个",
+            "reason": f"[{acct_name}] 多头持仓已达上限{max_positions}个",
             "order_id": None,
         }
 
@@ -204,26 +245,26 @@ def _execute_auto(symbol: str, price: float, analyze_result: dict, cfg: dict) ->
         if p["symbol"] == symbol:
             return {
                 "status": "skipped",
-                "reason": f"{symbol}已有多头持仓",
+                "reason": f"[{acct_name}] {symbol}已有多头持仓",
                 "order_id": None,
             }
 
     # ── 3. 余额检查 ──
-    balance = _get_balance()
+    balance = _get_balance(key_env, secret_env)
     position_usd = cfg.get("position_usd", 50)
     min_available = cfg.get("min_available_balance", 150)
 
     if balance["available"] < min_available:
         return {
             "status": "skipped",
-            "reason": f"可用余额{balance['available']:.1f}U<最低{min_available}U",
+            "reason": f"[{acct_name}] 可用余额{balance['available']:.1f}U<最低{min_available}U",
             "order_id": None,
         }
 
     if balance["available"] < position_usd:
         return {
             "status": "skipped",
-            "reason": f"可用余额{balance['available']:.1f}U不足{position_usd}U",
+            "reason": f"[{acct_name}] 可用余额{balance['available']:.1f}U不足{position_usd}U",
             "order_id": None,
         }
 
@@ -238,12 +279,20 @@ def _execute_auto(symbol: str, price: float, analyze_result: dict, cfg: dict) ->
 
     # ── 5. 设置杠杆和保证金模式 ──
     leverage = cfg.get("default_leverage", 5)
-    c = _get_client()
+    c = _get_client(key_env, secret_env)
     try:
         c.change_margin_type(symbol=symbol, marginType="CROSSED")
     except Exception:
         pass
-    c.change_leverage(symbol=symbol, leverage=leverage)
+    try:
+        c.change_leverage(symbol=symbol, leverage=leverage)
+    except Exception as e:
+        logger.warning(f"[buyer] {symbol} [{acct_name}] change_leverage 失败: {e}，放弃本次下单")
+        return {
+            "status": "skipped",
+            "reason": f"[{acct_name}] 设置杠杆失败: {e}",
+            "order_id": None,
+        }
 
     # ── 6. 滑点检查（>2%直接放弃） ──
     mark_resp = requests.get(
@@ -293,7 +342,7 @@ def _execute_auto(symbol: str, price: float, analyze_result: dict, cfg: dict) ->
         return {"status": "error", "reason": f"下单失败: {e}", "order_id": None}
 
     logger.info(
-        f"[buyer] {symbol} 开多 {qty} @ ~{mark} "
+        f"[buyer] [{acct_name}] {symbol} 开多 {qty} @ ~{mark} "
         f"{leverage}x {position_usd}U 订单:{order_id}"
     )
 
@@ -306,12 +355,12 @@ def _execute_auto(symbol: str, price: float, analyze_result: dict, cfg: dict) ->
             if float(_p.get("positionAmt", 0)) > 0:
                 actual_entry = float(_p["entryPrice"])
                 break
-        logger.info(f"[buyer] {symbol} 实际入场价:{actual_entry} (mark:{mark})")
+        logger.info(f"[buyer] [{acct_name}] {symbol} 实际入场价:{actual_entry} (mark:{mark})")
     except Exception as _e:
-        logger.warning(f"[buyer] {symbol} 读入场价失败,用mark:{mark}: {_e}")
+        logger.warning(f"[buyer] [{acct_name}] {symbol} 读入场价失败,用mark:{mark}: {_e}")
 
-    # ── 10. 挂止损（保证金亏损30%，基于实际入场价） ──
-    sl_margin_pct = 30
+    # ── 10. 挂止损（保证金亏损50%，基于实际入场价） ──
+    sl_margin_pct = 50
     sl_price_drop = sl_margin_pct / leverage / 100
     sl_price = _fix_price(symbol, actual_entry * (1 - sl_price_drop))
 
@@ -325,19 +374,19 @@ def _execute_auto(symbol: str, price: float, analyze_result: dict, cfg: dict) ->
             "type": "STOP_MARKET",
             "triggerPrice": str(sl_price),
             "closePosition": "true",
-        })
+        }, key_env, secret_env)
         if sl_resp["status_code"] == 200:
             sl_order_id = str(sl_resp["data"].get("algoId", "?"))
-            logger.info(f"[buyer] {symbol} 止损 @ {sl_price} algoId:{sl_order_id}")
+            logger.info(f"[buyer] [{acct_name}] {symbol} 止损 @ {sl_price} algoId:{sl_order_id}")
         else:
-            logger.warning(f"[buyer] {symbol} 止损挂单失败: {sl_resp['data']}")
+            logger.warning(f"[buyer] [{acct_name}] {symbol} 止损挂单失败: {sl_resp['data']}")
             coin = symbol.replace("USDT", "")
-            sl_fail_msg = f"❌ <b>{coin} 止损挂单失败</b>\n入场: {actual_entry}\n需人工检查"
+            sl_fail_msg = f"❌ <b>[{acct_name}] {coin} 止损挂单失败</b>\n入场: {actual_entry}\n需人工检查"
             _route("order_fail", sl_fail_msg)
     except Exception as e:
-        logger.warning(f"[buyer] {symbol} 止损挂单异常: {e}")
+        logger.warning(f"[buyer] [{acct_name}] {symbol} 止损挂单异常: {e}")
         coin = symbol.replace("USDT", "")
-        sl_fail_msg = f"❌ <b>{coin} 止损挂单异常</b>\n{e}\n需人工检查"
+        sl_fail_msg = f"❌ <b>[{acct_name}] {coin} 止损挂单异常</b>\n{e}\n需人工检查"
         _route("order_fail", sl_fail_msg)
 
     # ── 11. 移动止盈 ──
@@ -348,13 +397,14 @@ def _execute_auto(symbol: str, price: float, analyze_result: dict, cfg: dict) ->
         # 限价单移动止盈（trailing_limit.py）
         try:
             from trailing_limit import register as tl_register
-            tl_register(symbol, actual_entry, qty, side="LONG", leverage=leverage, cfg=cfg)
+            tl_register(symbol, actual_entry, qty, side="LONG", leverage=leverage,
+                        cfg=cfg, acct_name=acct_name, key_env=key_env, secret_env=secret_env)
             trailing_order_id = "trailing_limit"
-            logger.info(f"[buyer] {symbol} 限价移动止盈已注册")
+            logger.info(f"[buyer] [{acct_name}] {symbol} 限价移动止盈已注册")
         except Exception as e:
-            logger.warning(f"[buyer] {symbol} 限价移动止盈注册失败: {e}")
+            logger.warning(f"[buyer] [{acct_name}] {symbol} 限价移动止盈注册失败: {e}")
             coin = symbol.replace("USDT", "")
-            tp_fail_msg = f"❌ <b>{coin} 移动止盈注册失败</b>\n{e}\n需人工检查"
+            tp_fail_msg = f"❌ <b>[{acct_name}] {coin} 移动止盈注册失败</b>\n{e}\n需人工检查"
             _route("order_fail", tp_fail_msg)
     else:
         # 币安原生移动止盈（10%回撤上限）
@@ -371,46 +421,51 @@ def _execute_auto(symbol: str, price: float, analyze_result: dict, cfg: dict) ->
                 "activationPrice": str(activate_price),
                 "callbackRate": str(callback_rate),
                 "quantity": str(qty),
-            })
+            }, key_env, secret_env)
             if tp_resp["status_code"] == 200:
                 trailing_order_id = str(tp_resp["data"].get("orderId", "?"))
                 logger.info(
-                    f"[buyer] {symbol} 币安原生移动止盈 "
+                    f"[buyer] [{acct_name}] {symbol} 币安原生移动止盈 "
                     f"激活:{activate_price} 回撤:{callback_rate}% orderId:{trailing_order_id}"
                 )
             else:
-                logger.warning(f"[buyer] {symbol} 移动止盈挂单失败: {tp_resp['data']}")
+                logger.warning(f"[buyer] [{acct_name}] {symbol} 移动止盈挂单失败: {tp_resp['data']}")
                 coin = symbol.replace("USDT", "")
-                tp_fail_msg = f"❌ <b>{coin} 币安原生移动止盈挂单失败</b>\n{tp_resp['data']}\n需人工检查"
+                tp_fail_msg = f"❌ <b>[{acct_name}] {coin} 币安原生移动止盈挂单失败</b>\n{tp_resp['data']}\n需人工检查"
                 _route("order_fail", tp_fail_msg)
         except Exception as e:
-            logger.warning(f"[buyer] {symbol} 移动止盈挂单异常: {e}")
+            logger.warning(f"[buyer] [{acct_name}] {symbol} 移动止盈挂单异常: {e}")
             coin = symbol.replace("USDT", "")
-            tp_fail_msg = f"❌ <b>{coin} 移动止盈挂单异常</b>\n{e}\n需人工检查"
+            tp_fail_msg = f"❌ <b>[{acct_name}] {coin} 移动止盈挂单异常</b>\n{e}\n需人工检查"
             _route("order_fail", tp_fail_msg)
 
         if cfg.get("custom_trailing_enabled", False):
             pullback_pct = trailing_cfg.get("pullback_trigger", 25)
             try:
                 _register_trailing(symbol, actual_entry, qty, activation_pct, pullback_pct)
-                logger.info(f"[buyer] {symbol} 自建监控已注册（观察模式）")
+                logger.info(f"[buyer] [{acct_name}] {symbol} 自建监控已注册（观察模式）")
             except Exception as e:
-                logger.warning(f"[buyer] {symbol} 自建监控注册失败: {e}")
+                logger.warning(f"[buyer] [{acct_name}] {symbol} 自建监控注册失败: {e}")
 
     if use_custom:
-        tp_desc = "STOP_MARKET移动止盈(50%激活/40%回撤)"
+        tl_cfg = cfg.get("trailing_limit", {})
+        tl_act = tl_cfg.get("activation_profit_pct", 60)
+        tl_pull = tl_cfg.get("pullback_pct", 40)
+        tp_desc = f"STOP_MARKET移动止盈({tl_act}%激活/{tl_pull}%回撤)"
     else:
         tp_desc = f"币安原生+{activation_pct}%激活/{callback_rate}%回撤"
 
     return {
         "status": "executed",
         "reason": (
-            f"[币安2] 开多 {symbol} {qty} @ {actual_entry} "
+            f"[{acct_name}] 开多 {symbol} {qty} @ {actual_entry} "
             f"{leverage}x {position_usd}U 止损:{sl_price} "
             f"移动止盈:{tp_desc}"
         ),
         "order_id": order_id,
+        "account": acct_name,
         "sl_price": sl_price,
+        "sl_margin_pct": sl_margin_pct,
         "sl_algo_id": sl_order_id,
         "tp_order_id": trailing_order_id,
     }

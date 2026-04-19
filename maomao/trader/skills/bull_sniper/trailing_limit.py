@@ -27,6 +27,7 @@ FAPI_BASE = "https://fapi.binance.com"
 STATE_FILE = Path(__file__).parent / "data" / "trailing_limit_state.json"
 
 from notifier import route as _route
+from _atomic import atomic_write_json
 
 
 def _load() -> dict:
@@ -39,13 +40,14 @@ def _load() -> dict:
 
 
 def _save(state: dict):
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False))
+    atomic_write_json(STATE_FILE, state)
 
 
-def _bn2_signed(method: str, path: str, params: dict) -> dict:
-    key = os.getenv("BINANCE2_API_KEY", "")
-    secret = os.getenv("BINANCE2_API_SECRET", "")
+def _bn2_signed(method: str, path: str, params: dict,
+                key_env: str = "BINANCE2_API_KEY",
+                secret_env: str = "BINANCE2_API_SECRET") -> dict:
+    key = os.getenv(key_env, "")
+    secret = os.getenv(secret_env, "")
     params["timestamp"] = str(int(time.time() * 1000))
     qs = urlencode(params)
     sig = hmac.new(secret.encode(), qs.encode(), hashlib.sha256).hexdigest()
@@ -96,13 +98,15 @@ def _fix_price(symbol: str, price: float, tick_size: float = None) -> str:
     return f"{fixed:.{decimals}f}"
 
 
-def _cancel_order(symbol: str, order_id: str) -> bool:
+def _cancel_order(symbol: str, order_id: str,
+                  key_env: str = "BINANCE2_API_KEY",
+                  secret_env: str = "BINANCE2_API_SECRET") -> bool:
     if not order_id:
         return False
     try:
         r = _bn2_signed("DELETE", "/fapi/v1/algoOrder", {
             "algoId": order_id,
-        })
+        }, key_env, secret_env)
         return r["status_code"] == 200
     except Exception as e:
         logger.warning(f"[移动止盈] {symbol} 撤单失败 {order_id}: {e}")
@@ -110,7 +114,9 @@ def _cancel_order(symbol: str, order_id: str) -> bool:
 
 
 def _place_limit_tp(symbol: str, side: str, position_side: str,
-                    qty: str, price: str) -> str:
+                    qty: str, price: str,
+                    key_env: str = "BINANCE2_API_KEY",
+                    secret_env: str = "BINANCE2_API_SECRET") -> str:
     """通过Algo条件单挂STOP_MARKET，价格到达时触发市价平仓"""
     try:
         r = _bn2_signed("POST", "/fapi/v1/algoOrder", {
@@ -121,7 +127,7 @@ def _place_limit_tp(symbol: str, side: str, position_side: str,
             "type": "STOP_MARKET",
             "triggerPrice": price,
             "quantity": qty,
-        })
+        }, key_env, secret_env)
         if r["status_code"] == 200:
             return str(r["data"].get("algoId", ""))
         logger.warning(f"[移动止盈] {symbol} 挂单失败: {r['data']}")
@@ -131,14 +137,17 @@ def _place_limit_tp(symbol: str, side: str, position_side: str,
 
 
 def register(symbol: str, entry_price: float, qty: float,
-             side: str = "LONG", leverage: int = 5, cfg: dict = None):
+             side: str = "LONG", leverage: int = 5, cfg: dict = None,
+             acct_name: str = "", key_env: str = "", secret_env: str = ""):
     cfg = cfg or {}
     tl_cfg = cfg.get("trailing_limit", {})
     activation_pct = tl_cfg.get("activation_profit_pct", 50)
     pullback_pct = tl_cfg.get("pullback_pct", 40)
 
+    # 多账户：key用 symbol:account 作为state key，单账户兼容用 symbol
+    state_key = f"{symbol}:{acct_name}" if acct_name else symbol
     state = _load()
-    state[symbol] = {
+    state[state_key] = {
         "entry_price": entry_price,
         "qty": qty,
         "side": side,
@@ -150,10 +159,14 @@ def register(symbol: str, entry_price: float, qty: float,
         "current_order_id": "",
         "current_tp_price": 0,
         "registered_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "account": acct_name,
+        "key_env": key_env,
+        "secret_env": secret_env,
     }
     _save(state)
+    acct_tag = f" [{acct_name}]" if acct_name else ""
     logger.info(
-        f"[移动止盈] {symbol} 已注册 入场:{entry_price} "
+        f"[移动止盈]{acct_tag} {symbol} 已注册 入场:{entry_price} "
         f"激活:{activation_pct}% 回撤:{pullback_pct}%"
     )
 
@@ -171,29 +184,45 @@ def check_all(cfg: dict = None) -> list:
     results = []
     changed = False
 
-    # 拉币安2所有持仓
-    try:
-        key = os.getenv("BINANCE2_API_KEY", "")
-        if not key:
-            return []
-        from binance.um_futures import UMFutures
-        c = UMFutures(key=key, secret=os.getenv("BINANCE2_API_SECRET", ""))
-        positions = {}
-        for p in c.get_position_risk():
-            amt = float(p["positionAmt"])
-            if amt != 0:
-                positions[p["symbol"]] = {
-                    "amt": amt,
-                    "entry_price": float(p["entryPrice"]),
-                    "mark_price": float(p["markPrice"]),
-                }
-    except Exception as e:
-        logger.warning(f"[移动止盈] 拉持仓失败: {e}")
-        return []
-
-    for symbol, entry in list(state.items()):
+    # 按账户分组拉持仓（去重，同一账户只拉一次）
+    _pos_cache = {}  # key: (key_env, secret_env) → {symbol: {amt, entry_price, mark_price}}
+    def _get_positions(ke: str, se: str) -> dict:
+        ck = (ke, se)
+        if ck in _pos_cache:
+            return _pos_cache[ck]
         try:
+            k = os.getenv(ke, "")
+            if not k:
+                _pos_cache[ck] = {}
+                return {}
+            from binance.um_futures import UMFutures
+            c = UMFutures(key=k, secret=os.getenv(se, ""))
+            pmap = {}
+            for p in c.get_position_risk():
+                amt = float(p["positionAmt"])
+                if amt != 0:
+                    pmap[p["symbol"]] = {
+                        "amt": amt,
+                        "entry_price": float(p["entryPrice"]),
+                        "mark_price": float(p["markPrice"]),
+                    }
+            _pos_cache[ck] = pmap
+            return pmap
+        except Exception as e:
+            logger.warning(f"[移动止盈] 拉持仓失败 ({ke}): {e}")
+            _pos_cache[ck] = {}
+            return {}
+
+    for state_key, entry in list(state.items()):
+        try:
+            # state_key 可能是 "BTCUSDT" 或 "BTCUSDT:币安2"
+            symbol = state_key.split(":")[0] if ":" in state_key else state_key
             coin = symbol.replace("USDT", "")
+            ke = entry.get("key_env", "BINANCE2_API_KEY")
+            se = entry.get("secret_env", "BINANCE2_API_SECRET")
+            acct = entry.get("account", "")
+            acct_tag = f" [{acct}]" if acct else ""
+            positions = _get_positions(ke, se)
             pos = positions.get(symbol)
             is_long = entry["side"] == "LONG"
 
@@ -215,14 +244,16 @@ def check_all(cfg: dict = None) -> list:
                     label = "✅ 止盈成交"
                     event = "tp_closed"
                     exit_desc = f"止盈价: {tp_price:.4f}" if tp_price > 0 else f"现价: {mark:.4f}"
+                    close_status = "tp"
                 else:
                     emoji = "❌"
                     label = "❌ 触发止损已平仓"
                     event = "sl_closed"
                     exit_desc = f"现价: {mark:.4f}"
+                    close_status = "sl"
 
                 close_msg = (
-                    f"{emoji} <b>做多阻击成交报告 · {coin}</b>\n"
+                    f"{emoji} <b>交易阻击成交报告 · {coin}{acct_tag}</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━\n"
                     f"结果: {label}\n"
                     f"入场: {entry_price:.4f}  {exit_desc}\n"
@@ -230,10 +261,16 @@ def check_all(cfg: dict = None) -> list:
                     f"冷却: 12小时"
                 )
                 _route(event, close_msg)
-                logger.info(f"[移动止盈] {coin} {label} 盈亏{margin_pnl:+.1f}%")
+                logger.info(f"[移动止盈]{acct_tag} {coin} {label} 盈亏{margin_pnl:+.1f}%")
 
-                results.append({"symbol": symbol, "pnl_pct": round(margin_pnl, 1)})
-                del state[symbol]
+                results.append({
+                    "symbol": symbol,
+                    "pnl_pct": round(margin_pnl, 1),
+                    "account": acct,
+                    "status": close_status,      # tp / sl，由仓位消失时的浮盈判断
+                    "exit_price": tp_price if (close_status == "tp" and tp_price > 0) else mark,
+                })
+                del state[state_key]
                 changed = True
                 continue
 
@@ -268,19 +305,19 @@ def check_all(cfg: dict = None) -> list:
                     close_side = "SELL" if is_long else "BUY"
                     pos_side = "LONG" if is_long else "SHORT"
 
-                    oid = _place_limit_tp(symbol, close_side, pos_side, qty_str, tp_str)
+                    oid = _place_limit_tp(symbol, close_side, pos_side, qty_str, tp_str, ke, se)
                     entry["current_order_id"] = oid
                     entry["current_tp_price"] = float(tp_str)
 
                     act_msg = (
-                        f"🟢 <b>{coin} 限价移动止盈激活！</b>\n"
+                        f"🟢 <b>{coin}{acct_tag} 限价移动止盈激活！</b>\n"
                         f"保证金浮盈 <b>+{margin_pnl:.1f}%</b>（币价+{float_pnl:.1f}%）\n"
                         f"首挂止盈: {tp_str}（回撤{pullback_pct}%）\n"
                         f"orderId: {oid or '挂单失败'}"
                     )
                     _route("tp_activated", act_msg)
                     logger.info(
-                        f"[移动止盈] {coin} 激活 保证金+{margin_pnl:.1f}% "
+                        f"[移动止盈]{acct_tag} {coin} 激活 保证金+{margin_pnl:.1f}% "
                         f"挂单@{tp_str} oid={oid}"
                     )
                 continue
@@ -311,30 +348,29 @@ def check_all(cfg: dict = None) -> list:
 
                 if should_update:
                     old_oid = entry.get("current_order_id", "")
-                    _cancel_order(symbol, old_oid)
+                    _cancel_order(symbol, old_oid, ke, se)
 
                     qty_str = str(entry["qty"])
                     close_side = "SELL" if is_long else "BUY"
                     pos_side = "LONG" if is_long else "SHORT"
-                    oid = _place_limit_tp(symbol, close_side, pos_side, qty_str, new_tp_str)
+                    oid = _place_limit_tp(symbol, close_side, pos_side, qty_str, new_tp_str, ke, se)
 
                     if not oid:
-                        oid = _place_limit_tp(symbol, close_side, pos_side, qty_str, new_tp_str)
+                        oid = _place_limit_tp(symbol, close_side, pos_side, qty_str, new_tp_str, ke, se)
                         if not oid:
-                            _route("order_fail", f"⚠️ {coin} 移动止盈挂单失败，需人工检查")
+                            _route("order_fail", f"⚠️ {coin}{acct_tag} 移动止盈挂单失败，需人工检查")
 
                     entry["current_order_id"] = oid
                     entry["current_tp_price"] = new_tp_val
                     changed = True
 
                     logger.info(
-                        f"[移动止盈] {coin} 更新 "
+                        f"[移动止盈]{acct_tag} {coin} 更新 "
                         f"峰值:{peak:.4f} 旧止盈:{old_tp:.4f}→新:{new_tp_str} oid={oid}"
                     )
 
         except Exception as e:
-            coin = symbol.replace("USDT", "")
-            logger.warning(f"[移动止盈] {coin} 检查异常: {e}")
+            logger.warning(f"[移动止盈] {state_key} 检查异常: {e}")
 
     if changed:
         _save(state)

@@ -22,6 +22,7 @@ from notifier import send_signal, send_health_report, send_status_card, send_tra
 from buyer import execute as buyer_execute
 from reject_tracker import record_exit as _record_reject, update_peaks as _update_reject_peaks
 from news_score import get_smart_money_score
+from _atomic import atomic_write_json
 
 BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
@@ -596,7 +597,7 @@ def load_state() -> dict:
 
 
 def save_state(state: dict):
-    STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2))
+    atomic_write_json(STATE_FILE, state)
 
 
 # === State Schema & Sanitizer（防静默瘫痪）===
@@ -935,10 +936,12 @@ def scan_once(state: dict, tickers: list) -> dict:
         change_5m = calc_5m_change(symbol)
         change_1m = calc_1m_change(symbol)
         change_3m = calc_3m_change(symbol)
+        change_15m = calc_15m_change(symbol)
         market_data = fetch_market_data(symbol, CFG)
         market_data["change_1m"] = change_1m
         market_data["change_3m"] = change_3m
         market_data["change_5m"] = change_5m
+        market_data["change_15m"] = change_15m
         market_data["change_1h"] = change_1h
 
         # 用进池时锁定的量比基准替代滚动基准（v3.6 2026-04-18：k[5]→k[10] 主动买入额）
@@ -1248,7 +1251,7 @@ def run():
         else:
             try:
                 from bull_trailing import check_all as trailing_check
-                tp_triggered = trailing_check()
+                tp_triggered = trailing_check(CFG)
                 if tp_triggered:
                     for t in tp_triggered:
                         logger.info(f"[移动止盈] {t['symbol']} 触发 浮盈+{t['pnl_pct']}% 回撤-{t['drawdown']}%")

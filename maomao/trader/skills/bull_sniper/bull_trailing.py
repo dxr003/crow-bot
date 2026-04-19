@@ -37,6 +37,7 @@ STATE_FILE = Path("/root/maomao/trader/skills/bull_sniper/data/trailing_state.js
 LEGACY_FALLBACK_ACCT = "币安2"
 
 from notifier import route as _route
+from _atomic import atomic_write_json
 
 
 def _load() -> dict:
@@ -49,8 +50,7 @@ def _load() -> dict:
 
 
 def _save(state: dict):
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False))
+    atomic_write_json(STATE_FILE, state)
 
 
 def _iter_accounts(cfg: dict):

@@ -3,12 +3,12 @@ chain_score.py — E因子：捉妖评分模块 v2.0
 数据源：币安 Web3 Skills API query-token-info（免费无认证）
 
 反向逻辑：庄控越重=弹药越足=拉盘越容易=加分
-聪明钱流出=庄家在跑=一票否决
+聪明钱流出=庄家在跑=扣分（v3.3 从一票否决改为-1扣分减震）
 
 E1  弹药确认（top10HoldersPercentage）: 0~+5
 E2a 聪明钱持仓（smartMoneyHolders）: 0~+3
 E2b 币安净流向（volume24hNetBinance）: -2~+2
-E2c 聪明钱流出否决（inflow端点交叉验证）: 否决
+E2c 聪明钱流出（inflow端点交叉验证，v3.3: 否决→-1）
 E3a 新钱包占比（newWalletHolders/holders）: 0~+5
 E3b 批量地址（bundlerHolders）: 0~+3
 E3c holders门槛: 0~+5
@@ -24,6 +24,8 @@ import os
 import requests
 from pathlib import Path
 import json
+
+from _atomic import atomic_write_json
 
 logger = logging.getLogger("bull_sniper.chain_score")
 
@@ -81,13 +83,12 @@ def _load_holders_snapshot():
 
 
 def _save_holders_snapshot():
-    SNAPSHOT_FILE.parent.mkdir(parents=True, exist_ok=True)
     keep = {}
     now = time.time()
     for k, v in _holders_snapshot.items():
         if now - v.get("ts", 0) < 86400 * 3:
             keep[k] = v
-    SNAPSHOT_FILE.write_text(json.dumps(keep, ensure_ascii=False))
+    atomic_write_json(SNAPSHOT_FILE, keep, indent=None)
 
 
 def _load_alpha_cache():
@@ -102,12 +103,11 @@ def _load_alpha_cache():
 
 
 def _save_alpha_cache():
-    ALPHA_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
     now = time.time()
     out = {}
     for ticker, addr in _ca_cache["data"].items():
         out[ticker] = {"address": addr, "chainId": "56", "updated": now}
-    ALPHA_CACHE_FILE.write_text(json.dumps(out, ensure_ascii=False))
+    atomic_write_json(ALPHA_CACHE_FILE, out, indent=None)
 
 
 _load_holders_snapshot()
@@ -218,6 +218,13 @@ def get_chain_score(symbol: str, cfg: dict = None) -> dict:
     detail = {}
     zero = {"score": 0, "reason": "", "vetoed": False, "veto_reason": "", "detail": {}}
 
+    # 从scoring配置读取可调参数（v3.3）
+    scoring_cfg = (cfg or {}).get("scoring", {}) if isinstance(cfg, dict) else {}
+    h_alpha_bonus = int(scoring_cfg.get("h_alpha_bonus", 2))
+    e2b_outflow_penalty = int(scoring_cfg.get("e2b_binance_outflow_penalty", -1))
+    e4a_sell_penalty = int(scoring_cfg.get("e4a_sell_dominant_penalty", -1))
+    e2c_exit_penalty = int(scoring_cfg.get("e2c_smart_exit_penalty", -1))
+
     ca = _search_contract(ticker)
     if not ca:
         logger.info(f"[E因子v2] {symbol} 搜索无合约地址 → 返回0分")
@@ -240,32 +247,26 @@ def get_chain_score(symbol: str, cfg: dict = None) -> dict:
     vetoed = False
     veto_reason = ""
 
-    # ── E1 弹药确认 ──
-    top10 = float(dyn.get("top10HoldersPercentage", 0))
-    if top10 >= 97:
-        e1 = 5
-    elif top10 >= 93:
-        e1 = 4
-    elif top10 >= 85:
-        e1 = 2
-    else:
-        e1 = 0
+    # ── H. Alpha币加分（v3.3，搜到合约=二元加分） ──
+    h_score = h_alpha_bonus
+    score += h_score
+    detail["H_alpha_bonus"] = h_score
+    log_lines.append(f"H:Alpha币={h_score:+d}")
+    if h_score > 0:
+        reasons.append(f"Alpha+{h_score}")
+
+    # ── E1 弹药确认（已取消：含交易所/池子钱包，不可靠） ──
+    top10 = float(dyn.get("top10HoldersPercentage") or 0)
+    e1 = 0
     score += e1
     detail["E1_top10pct"] = round(top10, 2)
     detail["E1_score"] = e1
     log_lines.append(f"E1:{top10:.1f}%={e1:+d}")
-    if e1 > 0:
-        reasons.append(f"集中{top10:.0f}%+{e1}")
 
-    # ── E2a 聪明钱持仓 ──
-    sm_holders = int(dyn.get("smartMoneyHolders", 0))
-    sm_pct = float(dyn.get("smartMoneyHoldingPercent", 0))
-    if sm_holders >= 5 and sm_pct > 0.1:
-        e2a = 3
-    elif sm_holders >= 1 and sm_pct <= 0.1:
-        e2a = 1
-    else:
-        e2a = 0
+    # ── E2a 聪明钱持仓（≥20钱包→+1） ──
+    sm_holders = int(dyn.get("smartMoneyHolders") or 0)
+    sm_pct = float(dyn.get("smartMoneyHoldingPercent") or 0)
+    e2a = 1 if sm_holders >= 20 else 0
     score += e2a
     detail["E2a_sm_holders"] = sm_holders
     detail["E2a_sm_pct"] = round(sm_pct, 4)
@@ -275,7 +276,7 @@ def get_chain_score(symbol: str, cfg: dict = None) -> dict:
         reasons.append(f"聪明钱持仓+{e2a}")
 
     # ── E2b 币安净流向 ──
-    bn_net = float(dyn.get("volume24hNetBinance", 0))
+    bn_net = float(dyn.get("volume24hNetBinance") or 0)
     if bn_net < -100000:
         e2b = 2
     elif bn_net < 0:
@@ -283,7 +284,7 @@ def get_chain_score(symbol: str, cfg: dict = None) -> dict:
     elif bn_net <= 100000:
         e2b = 0
     else:
-        e2b = -2
+        e2b = e2b_outflow_penalty  # v3.3: 可配置，默认-1（原-2太重）
     score += e2b
     detail["E2b_bn_net"] = round(bn_net, 2)
     detail["E2b_score"] = e2b
@@ -292,55 +293,38 @@ def get_chain_score(symbol: str, cfg: dict = None) -> dict:
     if e2b != 0:
         reasons.append(f"币安流向{e2b:+d}")
 
-    # ── E2c 聪明钱流出否决（inflow端点交叉验证） ──
+    # ── E2c 聪明钱流出（v3.3：否决→扣分，不再一票毙掉） ──
+    e2c = 0
     if inflow:
-        inf_val = float(inflow.get("inflow", 0))
-        traders = int(inflow.get("traders", 0))
+        inf_val = float(inflow.get("inflow") or 0)
+        traders = int(inflow.get("traders") or 0)
         period_used = inflow.get("_period", "?")
         if inf_val < 0 and traders >= 2:
-            vetoed = True
-            veto_reason = f"聪明钱流出${inf_val:,.0f} {traders}地址"
+            e2c = e2c_exit_penalty  # v3.3: 可配置，默认-1
         detail["E2c_inflow"] = round(inf_val, 2)
         detail["E2c_traders"] = traders
-        tag = "→否决" if vetoed else "通过"
+        tag = f"→扣分{e2c:+d}" if e2c != 0 else "通过"
         log_lines.append(f"E2c:inflow={inf_val:,.0f},traders={traders}({period_used}){tag}")
     else:
         log_lines.append(f"E2c:inflow端点无数据=跳过")
+    score += e2c
+    detail["E2c_score"] = e2c
+    if e2c != 0:
+        reasons.append(f"聪明钱流出{e2c:+d}")
 
-    if vetoed:
-        detail["E_total"] = score
-        logger.info(" | ".join(log_lines))
-        return {"score": score, "reason": veto_reason, "vetoed": True, "veto_reason": veto_reason, "detail": detail}
-
-    # ── E3a 新钱包占比 ──
-    holders = int(dyn.get("holders", 0))
-    new_wallet = int(dyn.get("newWalletHolders", 0))
+    # ── E3a 新钱包占比（已取消：二级市场币占比极低，无区分度） ──
+    holders = int(dyn.get("holders") or 0)
+    new_wallet = int(dyn.get("newWalletHolders") or 0)
     new_pct = (new_wallet / holders * 100) if holders > 0 else 0
-    if new_pct > 60:
-        e3a = 5
-    elif new_pct > 40:
-        e3a = 4
-    elif new_pct > 20:
-        e3a = 2
-    else:
-        e3a = 0
+    e3a = 0
     score += e3a
     detail["E3a_new_wallet_pct"] = round(new_pct, 1)
     detail["E3a_score"] = e3a
     log_lines.append(f"E3a:新钱包{new_pct:.1f}%={e3a:+d}")
-    if e3a > 0:
-        reasons.append(f"新钱包{new_pct:.0f}%+{e3a}")
 
-    # ── E3b 批量打包地址 ──
-    bundler = int(dyn.get("bundlerHolders", 0))
-    if bundler > 2000:
-        e3b = 3
-    elif bundler > 1000:
-        e3b = 2
-    elif bundler > 500:
-        e3b = 1
-    else:
-        e3b = 0
+    # ── E3b 批量打包地址（>1000→+1） ──
+    bundler = int(dyn.get("bundlerHolders") or 0)
+    e3b = 1 if bundler > 1000 else 0
     score += e3b
     detail["E3b_bundler"] = bundler
     detail["E3b_score"] = e3b
@@ -348,15 +332,8 @@ def get_chain_score(symbol: str, cfg: dict = None) -> dict:
     if e3b > 0:
         reasons.append(f"bundler{bundler}+{e3b}")
 
-    # ── E3c holders门槛 ──
-    if holders >= 50000:
-        e3c = 5
-    elif holders >= 30000:
-        e3c = 4
-    elif holders >= 20000:
-        e3c = 3
-    else:
-        e3c = 0
+    # ── E3c holders门槛（>3万→+1，仅验证API通道） ──
+    e3c = 1 if holders > 30000 else 0
     score += e3c
     detail["E3c_holders"] = holders
     detail["E3c_score"] = e3c
@@ -364,12 +341,12 @@ def get_chain_score(symbol: str, cfg: dict = None) -> dict:
     if e3c > 0:
         reasons.append(f"持有{holders}+{e3c}")
 
-    # ── E3d 5分钟增长 ──
+    # ── E3d 5分钟增长（涨>200人→+1） ──
     e3d = 0
     if ca in _holders_snapshot and holders > 0:
         prev = _holders_snapshot[ca].get("holders", 0)
-        if holders > prev:
-            e3d = 3
+        if holders - prev > 200:
+            e3d = 1
         log_lines.append(f"E3d:{prev}→{holders}={e3d:+d}")
     else:
         log_lines.append(f"E3d:首次=0")
@@ -380,8 +357,8 @@ def get_chain_score(symbol: str, cfg: dict = None) -> dict:
     detail["E3d_score"] = e3d
 
     # ── E4a 1h买卖比 ──
-    vol_1h_buy = float(dyn.get("volume1hBuy", 0))
-    vol_1h_sell = float(dyn.get("volume1hSell", 0))
+    vol_1h_buy = float(dyn.get("volume1hBuy") or 0)
+    vol_1h_sell = float(dyn.get("volume1hSell") or 0)
     ratio_1h = vol_1h_buy / vol_1h_sell if vol_1h_sell > 0 else 1.0
     if ratio_1h > 1.5:
         e4a = 3
@@ -390,7 +367,7 @@ def get_chain_score(symbol: str, cfg: dict = None) -> dict:
     elif ratio_1h >= 0.9:
         e4a = 0
     else:
-        e4a = -2
+        e4a = e4a_sell_penalty  # v3.3: 可配置，默认-1（原-2太重）
     score += e4a
     detail["E4a_ratio_1h"] = round(ratio_1h, 2)
     detail["E4a_score"] = e4a
@@ -399,8 +376,8 @@ def get_chain_score(symbol: str, cfg: dict = None) -> dict:
         reasons.append(f"1h买卖{e4a:+d}")
 
     # ── E4b 5m加速确认 ──
-    vol_5m_buy = float(dyn.get("volume5mBuy", 0))
-    vol_5m_sell = float(dyn.get("volume5mSell", 0))
+    vol_5m_buy = float(dyn.get("volume5mBuy") or 0)
+    vol_5m_sell = float(dyn.get("volume5mSell") or 0)
     ratio_5m = vol_5m_buy / vol_5m_sell if vol_5m_sell > 0 else 1.0
     if ratio_5m > 2.0:
         e4b = 2

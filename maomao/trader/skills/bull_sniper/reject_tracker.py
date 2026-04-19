@@ -16,6 +16,8 @@ import logging
 import time
 from pathlib import Path
 
+from _atomic import atomic_write_json
+
 logger = logging.getLogger("reject_tracker")
 
 DATA_FILE = Path(__file__).parent / "data" / "reject_tracker.json"
@@ -32,8 +34,7 @@ def _load() -> dict:
 
 
 def _save(data: dict):
-    DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
-    DATA_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    atomic_write_json(DATA_FILE, data)
 
 
 def record_exit(symbol: str, reason: str, score: int,
@@ -125,7 +126,7 @@ def update_peaks(live_prices: dict):
             if price > rec["peak_price"]:
                 rec["peak_price"] = price
                 rec["peak_time"] = now
-                changed = True
+            changed = True
 
         still_tracking.append(rec)
 
