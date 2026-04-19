@@ -7,19 +7,37 @@ description: 审 crow-bot 代码，带铁律和架构约束。当用户要求审
 
 专用于乌鸦团队代码库的定制审查流程。相比通用 `/simplify`，额外带入：
 - 7 条开发铁律（封板/不打补丁/原生优先 等）
-- 6 条架构约束（风控/+i/TG shell/多账户/模块开关/DRY）
+- 5 条架构约束（+i/TG shell/多账户/模块开关/DRY）
 - 三段式报告格式（Bug/效率/清洁）
 
-使用方式：`/crow-review <文件或模块路径>`
-例：`/crow-review bull_sniper.py`、`/crow-review trader/multi/`
+使用方式：`/crow-review <文件或模块路径>` 或直接说自然语言（见下方别名映射）
+例：`/crow-review bull_sniper.py`、`/crow-review trader/multi/`、「扫交易策略」
 
 ---
 
 ## Phase 1：识别审查范围
 
-1. 如果用户指定了文件或目录，直接用 Read/Grep 读。
-2. 如果没指定，运行 `git diff`（或 `git diff HEAD`）看改动。
-3. 如果都没有，扫最近修改的文件。
+### 模块别名映射（支持自然语言）
+
+用户用自然语言指代模块时，按下表解析成实际路径：
+
+| 用户说 | 实际扫描范围 |
+|---|---|
+| 扫交易策略 / 扫策略 / 扫交易策略模块 | `trader/skills/bull_sniper/`（做多阻击，主战场） |
+| 扫做多阻击 / 扫 bull | 同上 |
+| 扫做空阻击 / 扫做空 | `maomao/short_attack/` |
+| 扫多账户 | `trader/multi/` |
+| 扫移动止盈 | `trader/trailing.py` + `trader/skills/bull_sniper/bull_trailing.py` |
+| 扫滚仓 | `trader/rolling.py` |
+| 扫下单 / 扫交易 | `trader/order.py` + `trader/exchange.py` |
+
+表里没有的说法：先用 Glob/Grep 猜最匹配路径，确认后再扫。
+
+### 拉取范围
+
+1. 用户指定了文件/目录（或别名命中的路径），直接 Read/Grep 读原文。
+2. 没指定，运行 `git diff`（或 `git diff HEAD`）看改动。
+3. 都没有，扫最近修改的文件。
 
 把完整原文（或 diff）作为三个审查代理的共同输入。
 
@@ -33,7 +51,6 @@ description: 审 crow-bot 代码，带铁律和架构约束。当用户要求审
 
 重点找**会炸的**问题：
 
-- **风控绕过**：任何开单/加仓/挂止损路径必须经过 `risk.py`，直接调 exchange.py/bn_trailing_stop.py 下单的算 Bug
 - **封板违规**：改了标 🔒 的文件（`chattr +i`）、或把新逻辑塞进封板模块内部
 - **权限漏洞**：`trader/multi/` 公开函数漏了 `require(role, action, account)` 开头检查
 - **hedge mode 错误**：双向持仓下只平一侧、positionSide 漏传、reduceOnly 和 positionSide 混用
@@ -104,8 +121,13 @@ description: 审 crow-bot 代码，带铁律和架构约束。当用户要求审
 ## 附录 A：7 条开发铁律（照抄自 `/root/CLAUDE.md`）
 
 ### 铁律1：封板制度
-已封板模块：P1 scanner.py / executor.py / position_manager.py / trader/trailing.py / trader/rolling.py / trader/order.py / trader/parser.py / trader/preview.py / trader/router.py / trader/exchange.py / trader/skills/bull_sniper/bull_trailing.py / /root/shared/core.py
-封板后不允许改动，必须改先报告乌鸦确认。
+封板模块列表以 `/root/CLAUDE.md` 为准。审查前先跑：
+
+```bash
+lsattr -R /root/trader/ /root/shared/ /root/maomao/trader/ 2>/dev/null | grep -- '----i'
+```
+
+拿当前 `+i` 状态，不依赖 skill 内硬编码。封板后不允许改动，必须改先报告乌鸦确认。
 
 ### 铁律2：新功能不碰旧模块
 新建文件、新增函数、新增配置项。不改已封板模块内部逻辑。
@@ -129,27 +151,24 @@ description: 审 crow-bot 代码，带铁律和架构约束。当用户要求审
 
 ---
 
-## 附录 B：6 条架构约束（crow-review 专属）
+## 附录 B：5 条架构约束（crow-review 专属）
 
 审查时必须逐条核对：
 
-1. **风控必过 risk.py**
-   所有下单/加仓/挂损路径必须先过 `risk_manager.py`（单笔≤500U / 日亏≤200U / 回撤≤15%）。绕开直接调 exchange 的算违规。
-
-2. **+i 封板先解锁再改**
+1. **+i 封板先解锁再改**
    改前先 `lsattr <file>` 确认是否 +i，是则 `chattr -i` 解锁、改完测完 `chattr +i` 重新封。直接改封板文件报错就跳过是错的。
 
-3. **TG shell 冻结不动**
+2. **TG shell 冻结不动**
    `bot.py` 主入口、消息路由、Telegram token 处理冻结，不改动。要改先报告乌鸦。
 
-4. **多账户并行化关注点**
+3. **多账户并行化关注点**
    `trader/multi/` 下任何对 N 个账户 fan-out 的查询/下单循环，必须用 `ThreadPoolExecutor`，不许串行。
    客户端缓存必须双检锁（`_lock` 已在 registry.py 准备）。
 
-5. **模块有 start/stop 开关**
+4. **模块有 start/stop 开关**
    每个守护/扫描/推送模块必须提供独立开关（配置文件 mode: on/off 或 service disable），不许把开关嵌进硬编码逻辑。
 
-6. **写一次用多次（DRY）**
+5. **写一次用多次（DRY）**
    新写工具函数前先在 `/root/scripts/core.py`、`/root/shared/`、`trader/multi/` 搜同名或同职责函数。重复实现算违规。
 
 ---
@@ -169,8 +188,9 @@ description: 审 crow-bot 代码，带铁律和架构约束。当用户要求审
 ## 使用范例
 
 ```
-用户：扫一下 trader/multi/executor.py
-→ /crow-review trader/multi/executor.py
+用户：扫交易策略
+→ 解析为 trader/skills/bull_sniper/
+→ /crow-review trader/skills/bull_sniper/
 → 启动 3 个代理并行审查
 → 产出三段式报告
 → 按优先级批量修复
