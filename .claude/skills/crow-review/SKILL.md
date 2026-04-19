@@ -15,23 +15,53 @@ description: 审 crow-bot 代码，带铁律和架构约束。当用户要求审
 
 ---
 
+## Phase 0：加载策略 ground truth（必做，可跳过）
+
+**为什么要这步**：skill 不评判策略设计本身是否科学，但**能查代码是否忠实实现了乌鸦写下来的规则**。
+"代码 vs 文档漂移"是一类极低成本高收益的 Bug —— 文档说阈值 28、代码写 25；文档说不跑币安1、代码循环 4 账户；这种必须标出来。
+
+### 加载源（按优先级合并）
+
+1. **模块对应 spec 文件**（别名映射表里带了就读；没有就跳过）
+2. **`/root/CLAUDE.md`** 模块相关章节（搜模块名或模块路径）
+3. **记忆目录 `/root/.claude/projects/-root/memory/`** 下的 `project_<模块>_spec.md` / `project_*_tuning.md` / `feedback_*.md`
+   用 `Grep` 在 `MEMORY.md` 里找相关条目，按文件名读进来
+
+### 抽取"规则条目"
+
+从上述文档里抽出**能和代码对照**的**规则**（不是设计动机、不是背景）。典型形态：
+- 数值阈值（"进池 ≥8%"、"评分 ≥28 推信号"、"回撤 25% 止盈"、"冷却 60 分钟"）
+- 路径/账户限制（"做空阻击不推广多账户，只跑 X"、"tt/震天响只接触币安2"）
+- 触发/顺序（"先撤单再平仓"、"浮盈 ≥50% 激活移动止盈"）
+- 模块开关（"mode=off 纯记录不下单"）
+
+把这些条目作为**第 4 条共享上下文**传给下面三个 Agent。Agent 1 在审 Bug 时显式检查每一条"代码 vs 文档一致性"。
+
+### 文档不存在怎么办
+
+- 仅有 CLAUDE.md 章节：够用，继续。
+- 连章节都没有：Phase 0 产出一行 `⚠️ 无 ground truth 文档，本轮只做工程质量审查`，跳过去 Phase 1。
+- **不要**自己编"应该的阈值"当 ground truth —— 宁可跳过，不可幻觉。
+
+---
+
 ## Phase 1：识别审查范围
 
 ### 模块别名映射（支持自然语言）
 
-用户用自然语言指代模块时，按下表解析成实际路径：
+用户用自然语言指代模块时，按下表解析成实际路径 + 对应 spec：
 
-| 用户说 | 实际扫描范围 |
-|---|---|
-| 扫交易策略 / 扫策略 / 扫交易策略模块 | `trader/skills/bull_sniper/`（做多阻击，主战场） |
-| 扫做多阻击 / 扫 bull | 同上 |
-| 扫做空阻击 / 扫做空 | `maomao/short_attack/` |
-| 扫多账户 | `trader/multi/` |
-| 扫移动止盈 | `trader/trailing.py` + `trader/skills/bull_sniper/bull_trailing.py` |
-| 扫滚仓 | `trader/rolling.py` |
-| 扫下单 / 扫交易 | `trader/order.py` + `trader/exchange.py` |
+| 用户说 | 实际扫描范围 | 策略 spec 源 |
+|---|---|---|
+| 扫交易策略 / 扫策略 / 扫交易策略模块 | `trader/skills/bull_sniper/` | CLAUDE.md「做多阻击系统」+ memory `project_bull_sniper_spec.md` / `project_bull_sniper_layers.md` / `project_scoring_tuning.md` |
+| 扫做多阻击 / 扫 bull | 同上 | 同上 |
+| 扫做空阻击 / 扫做空 | `maomao/short_attack/` | memory `project_short_attack_audit.md` / `feedback_short_attack_no_multi.md` |
+| 扫多账户 | `trader/multi/` | CLAUDE.md「多账户架构」+ memory `project_multi_account.md` |
+| 扫移动止盈 | `trader/trailing.py` + `trader/skills/bull_sniper/bull_trailing.py` | CLAUDE.md「移动止盈预设 v3.1」 |
+| 扫滚仓 | `trader/rolling.py` | CLAUDE.md「滚仓 v2.0」 |
+| 扫下单 / 扫交易 | `trader/order.py` + `trader/exchange.py` | memory `project_trade_cmd_spec.md` |
 
-表里没有的说法：先用 Glob/Grep 猜最匹配路径，确认后再扫。
+表里没有的说法：先用 Glob/Grep 猜最匹配路径，确认后再扫；spec 去 memory 目录 `grep -i` 匹配。
 
 ### 拉取范围
 
@@ -39,7 +69,7 @@ description: 审 crow-bot 代码，带铁律和架构约束。当用户要求审
 2. 没指定，运行 `git diff`（或 `git diff HEAD`）看改动。
 3. 都没有，扫最近修改的文件。
 
-把完整原文（或 diff）作为三个审查代理的共同输入。
+把完整原文（或 diff）**和 Phase 0 抽出的规则条目清单**一起作为三个审查代理的共同输入。
 
 ---
 
@@ -51,6 +81,11 @@ description: 审 crow-bot 代码，带铁律和架构约束。当用户要求审
 
 重点找**会炸的**问题：
 
+- **策略/代码漂移**（Phase 0 喂进来的 ground truth 逐条对照）：
+  * 数值阈值不一致（文档说 28，代码写 25）
+  * 账户/路径限制被违反（文档说"不跑币安1"，代码循环 4 账户）
+  * 触发顺序/流程倒置（文档说"先撤再平"，代码直接平）
+  * 模块开关被绕过（mode=off 但仍下单）
 - **封板违规**：改了标 🔒 的文件（`chattr +i`）、或把新逻辑塞进封板模块内部
 - **权限漏洞**：`trader/multi/` 公开函数漏了 `require(role, action, account)` 开头检查
 - **hedge mode 错误**：双向持仓下只平一侧、positionSide 漏传、reduceOnly 和 positionSide 混用
@@ -98,11 +133,12 @@ description: 审 crow-bot 代码，带铁律和架构约束。当用户要求审
 3. **封板文件**：发现需改时，先报告乌鸦，`chattr -i` 解锁 → 改 → 测 → `chattr +i` 重新封板
 4. **无法修的标记出来**：不是所有 finding 都值得立即改，挑真正有价值的
 
-改完用**三段式报告**交付：
+改完用**三段式报告**交付（Bug 段里把"策略/代码漂移"单独前置）：
 
 ```
 ⭕ Bug（N 条）
-  1. <文件>:<行> — <问题> — <修法>
+  [漂移] 1. <文件>:<行> — 文档规则「...」 vs 代码「...」 — <修法>
+  [工程] 1. <文件>:<行> — <问题> — <修法>
   ...
 
 🔥 效率坑（N 条）
@@ -114,7 +150,7 @@ description: 审 crow-bot 代码，带铁律和架构约束。当用户要求审
   ...
 ```
 
-最后一行用一句话总结：本次审查覆盖 X 个文件，共 Y 条改动已落地，Z 条跳过（原因：...）。
+最后一行用一句话总结：本次审查覆盖 X 个文件，Phase 0 加载 K 条规则，共 Y 条改动已落地，Z 条跳过（原因：...）。
 
 ---
 
