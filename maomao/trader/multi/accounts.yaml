@@ -1,0 +1,57 @@
+# 多账户配置 v1.0（2026-04-18）
+# 启停拔插：改 enabled 字段，registry 每次调用检测 mtime 热重载，无需重启
+# 权限控制：capabilities 字段，AI交易员越权被 registry 直接拒绝
+# key 加载：优先 env_file（.env 文件），否则从进程 ENV 读
+
+accounts:
+  # ── 币安1：玄玄主号（老架构兼容，通过 exchange.py）──
+  币安1:
+    enabled: true
+    alias: ["main", "玄玄"]
+    env_file: /root/maomao/.env
+    key_env: BINANCE_API_KEY
+    secret_env: BINANCE_SECRET_KEY
+    capabilities:
+      futures: true
+      spot: true
+      transfer: true
+    note: "玄玄主号，老架构兼容，默认指令落点"
+
+  # ── 币安2：激进测试场 ──
+  币安2:
+    enabled: true
+    alias: ["test"]
+    env_file: /root/maomao/.env
+    key_env: BINANCE2_API_KEY
+    secret_env: BINANCE2_SECRET_KEY
+    capabilities:
+      futures: true
+      spot: true
+      transfer: true
+    note: "做多阻击 auto 模式执行账户，激进测试"
+
+  # ── 币安3：李红兵（大资金，默认关自动）──
+  币安3:
+    enabled: true
+    alias: ["lhb", "李红兵"]
+    env_file: /root/safe/lihongbing_binance.env
+    key_env: LHB_BINANCE_API_KEY
+    secret_env: LHB_BINANCE_API_SECRET
+    capabilities:
+      futures: true
+      spot: true
+      transfer: true
+    note: "李红兵账户，大资金以手动为主"
+
+  # ── 币安4：专攻组六（保守策略，未来跑高分信号）──
+  币安4:
+    enabled: true
+    alias: ["zgl", "专攻组六"]
+    env_file: /root/safe/zhuangongliu_binance.env
+    key_env: ZGL_BINANCE_API_KEY
+    secret_env: ZGL_BINANCE_API_SECRET
+    capabilities:
+      futures: true
+      spot: true
+      transfer: true
+    note: "专攻组六账户，保守策略，阈值待定"
