@@ -14,7 +14,7 @@ bull_trailing.py — 做多阻击仓位生命周期管理（多账户）
   - 底层 HTTP 函数接 (acct_name, key_env, secret_env) 三元组
   - check_all 读 cfg["accounts"] 聚合各账户持仓（观察，symbol级）
   - check_positions 按 pos_info["accounts"] 列表逐账户动作
-  - 旧 pos_info 缺 accounts 字段时回退到 ["币安2"]（向后兼容）
+  - 缺 accounts 字段视为脏数据，跳过并告警，不再静默回退
 """
 import hashlib
 import hmac
@@ -34,7 +34,6 @@ logger = logging.getLogger("bull_trailing")
 
 FAPI_BASE = "https://fapi.binance.com"
 STATE_FILE = Path("/root/maomao/trader/skills/bull_sniper/data/trailing_state.json")
-LEGACY_FALLBACK_ACCT = "币安2"
 
 from notifier import route as _route
 from _atomic import atomic_write_json
@@ -63,8 +62,7 @@ def _iter_accounts(cfg: dict):
     """yield (acct_name, key_env, secret_env) for each enabled account."""
     accounts = (cfg or {}).get("accounts") or {}
     if not accounts:
-        # 向后兼容：没配置 accounts 时走 币安2
-        yield LEGACY_FALLBACK_ACCT, "BINANCE2_API_KEY", "BINANCE2_API_SECRET"
+        logger.warning("[trailing] cfg 缺 accounts 字段，无账户可遍历")
         return
     for name, c in accounts.items():
         if not c.get("enabled"):
@@ -368,7 +366,10 @@ def check_positions(scanner_state: dict, cfg: dict = None) -> bool:
             coin = symbol.replace("USDT", "")
             entry_price = pos_info["entry_price"]
             entry_time = pos_info["entry_time"]
-            accts = pos_info.get("accounts") or [LEGACY_FALLBACK_ACCT]
+            accts = pos_info.get("accounts")
+            if not accts:
+                logger.warning(f"[仓位] {coin} pos_info 缺 accounts 字段，跳过该仓位")
+                continue
 
             # 只检查该仓位登记过的 + 当前启用的账户
             active_accts = [a for a in accts if a in acct_creds]
