@@ -134,32 +134,24 @@ def _get_mark_price(symbol: str) -> float:
 
 def _close_position(acct_name: str, key_env: str, secret_env: str,
                     symbol: str, qty: float) -> str:
-    """市价平多（双向持仓 SELL+LONG）"""
+    """市价平多（双向持仓 SELL+LONG），走 UMFutures SDK"""
     key = os.getenv(key_env, "")
     secret = os.getenv(secret_env, "")
     if not key or not secret:
         return f"[{acct_name}]缺少密钥"
-    ts = int(time.time() * 1000)
-    params = {
-        "symbol": symbol,
-        "side": "SELL",
-        "positionSide": "LONG",
-        "type": "MARKET",
-        "quantity": str(qty),
-        "timestamp": str(ts),
-    }
-    qs = "&".join(f"{k}={v}" for k, v in params.items())
-    sig = hmac.new(secret.encode(), qs.encode(), hashlib.sha256).hexdigest()
-    resp = requests.post(
-        f"{FAPI_BASE}/fapi/v1/order",
-        params=f"{qs}&signature={sig}",
-        headers={"X-MBX-APIKEY": key},
-        timeout=10,
-    )
-    if resp.status_code == 200:
-        oid = resp.json().get("orderId", "?")
-        return f"[{acct_name}]平仓成功 orderId:{oid}"
-    return f"[{acct_name}]平仓失败: {resp.text[:200]}"
+    from binance.um_futures import UMFutures
+    try:
+        c = UMFutures(key=key, secret=secret)
+        resp = c.new_order(
+            symbol=symbol,
+            side="SELL",
+            positionSide="LONG",
+            type="MARKET",
+            quantity=str(qty),
+        )
+        return f"[{acct_name}]平仓成功 orderId:{resp.get('orderId', '?')}"
+    except Exception as e:
+        return f"[{acct_name}]平仓失败: {str(e)[:200]}"
 
 
 def _cancel_algo_by_id(acct_name: str, key_env: str, secret_env: str, algo_id) -> bool:
