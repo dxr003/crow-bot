@@ -304,6 +304,17 @@ cat /root/changelog/$(ls /root/changelog/ | grep -v README | sort | tail -1)
 写功能和脚本不涉及Claude Code本身的系统配置、权限、规则。
 出现需要动Code系统层面的问题，先报告乌鸦，不自己处理。
 
+### 铁律8：大猫执行前必须报告计划
+未经乌鸦明确指令，禁止修改任何文件。
+- 方向性指示（"先搞技术建设""慢慢推进""继续"等）= 讨论授权，不是执行授权
+- 要动代码：先报告"改哪个文件、改什么、为什么"，等乌鸦回复"改/搞/可以/执行"才能动
+- 例外：乌鸦明确指向某具体任务并说"你自己处理"
+- 不适用：纯只读操作（ls/cat/grep/git status 等，不产生外部影响）
+- 任何 commit/push 前必须列出文件清单+改动摘要，等确认
+
+方向性对话 → 出方案 → 等确认 → 动手。顺序不可颠倒。
+反面教材：2026-04-20 notifier.py cleanup，"先搞技术建设"被误读为执行授权，连推两笔 commit。
+
 ---
 
 ### 玄玄记忆档案
@@ -388,6 +399,28 @@ cat /root/changelog/$(ls /root/changelog/ | grep -v README | sort | tail -1)
 - 清理冗余文件：备份文件、npm logs、`__pycache__`
 
 **当前状态**：大猫 v4.3 ✅ / 玄玄 v4.3 ✅ / 模型切换验证通过 / 底座封板完成
+
+---
+
+### 2026-04-21（多账户审查 + CC 同步最新版）
+
+**Claude Code 升级现状**
+- 当前版本 **2.1.114**（4-08 → 4-21 间已升过，本条补记录）
+- fewer-permission-prompts skill 跑过：因 `~/.claude/settings.json` 已 `Bash(*)` / `Read(*)` / `Write(*)` / `Edit(*)` / `WebSearch(*)` / `WebFetch(*)` 全通配，allowlist 加项零收益，未修改
+
+**多账户底座 crow-review（commit 5059fe6）**
+- `permissions.py` 自检用例修正：天天 trade 收紧后，币安4 / 李红兵期望 False
+- `guardian.py` 告警发送失败时不再 mark_alert，避免静默吞警 30 分钟
+- `strategy_router.py` 删除 STRATEGIES 中三项死注册（manual_trade/trailing_v31/rolling_v20）+ format_matrix 改 `enabled_only=True`
+- 5 处 finding 经核查驳回（详见 memory `project_multi_audit_2026-04-21.md`）
+
+**权限收紧（已生效）**
+- 天天 `trade=["币安2"]`（震天响本人账户），原先 `["*","!币安1"]` 含 3/4
+- 天天 `query=["*","!币安1"]` 保持不变
+
+**待办（下次会话推进）**
+- 天天 `trader/order.py` 366 行 → 全面迁移到 `trader.multi.executor`，并补 multi/executor 的限价/加仓/强平价反推三个方法（Plan A）
+- bot-backup 工作目录 8 个 .md deletion 状态待乌鸦定夺（恢复 / 确认删 / 搁置）
 
 ---
 

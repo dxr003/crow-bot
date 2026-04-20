@@ -9,16 +9,22 @@
 
 ## 查询命令
 
-### 查余额
+### 查全部余额（合约+现货+资金，爸爸问余额时默认用这个）
 ```bash
 python3 -c "
-from trader.exchange import get_client
-c = get_client()
-info = c.futures_account()
-bal = float(info['totalWalletBalance'])
-avail = float(info['availableBalance'])
-upnl = float(info['totalUnrealizedProfit'])
-print(f'余额: {bal:.2f}U  可用: {avail:.2f}U  浮盈: {upnl:.2f}U')
+from trader.exchange import get_all_balances
+b = get_all_balances()
+print(f'💰 合约: {b["futures"]:.2f}U  可用:{b["futures_avail"]:.2f}U  浮盈:{b["futures_upnl"]:+.2f}U')
+if b.get('spot'):
+    items = ', '.join(f'{a}:{v:.4f}' for a,v in b['spot'].items())
+    print(f'💰 现货: {items}')
+else:
+    print('💰 现货: 无')
+if b.get('funding'):
+    items = ', '.join(f'{a}:{v:.4f}' for a,v in b['funding'].items())
+    print(f'💰 资金: {items}')
+else:
+    print('💰 资金: 无')
 "
 ```
 
