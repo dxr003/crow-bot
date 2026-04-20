@@ -215,8 +215,8 @@ def run() -> dict:
             lines = [f"⚠️ <b>夜间守护告警</b>  {now.strftime('%H:%M:%S')}"]
             for msg in report["anomalies"]:
                 lines.append(f"  • {msg}")
-            send_admin("\n".join(lines))
-            mark_alert(state, anomaly_key)
+            if send_admin("\n".join(lines)):
+                mark_alert(state, anomaly_key)
 
     state["last_run"] = report["ts"]
     state["last_report"] = report

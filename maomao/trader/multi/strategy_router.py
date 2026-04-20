@@ -70,24 +70,9 @@ STRATEGIES: dict[str, dict] = {
         "runtime_file": "/root/short_attack/data/state.json",
         "type": "auto",
     },
-    "manual_trade": {
-        "name": "手动交易",
-        "type": "manual",
-        "note": "玄玄/大猫 通过对话下单，走 executor",
-    },
-    "trailing_v31": {
-        "name": "移动止盈 v3.1",
-        "runtime_file": "/root/maomao/data/trailing_state.json",
-        "type": "auto",
-        "note": "cron 每 5 分钟检查",
-    },
-    "rolling_v20": {
-        "name": "滚仓 v2.0",
-        "runtime_file": "/root/short_attack/data/roll_watch.json",
-        "type": "semi",
-        "note": "浮盈 50% 加仓，爸爸触发",
-    },
 }
+# 手动交易/移动止盈/滚仓 是能力而非"策略 × 账户"矩阵成员，
+# 在 format_matrix 末尾以"辅助模块"段单独展示，不进 STRATEGIES。
 
 
 # ─────────────── 读策略配置 ───────────────
@@ -161,7 +146,7 @@ def format_matrix() -> str:
     做空阻击     ✅    ⚪     ⚪    ⚪   [alert]
     手动交易     ✅    ✅     ✅    ✅   [玄玄全权/天天除币安1]
     """
-    accounts = [a["name"] for a in list_accounts(enabled_only=False)]
+    accounts = [a["name"] for a in list_accounts(enabled_only=True)]
     statuses = get_all_status()
 
     lines = ["🎯 <b>策略 × 账户 矩阵</b>\n"]
