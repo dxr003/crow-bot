@@ -12,14 +12,16 @@ executor.py — 多账户执行适配层 v1.0（2026-04-19）
 - 跨账户划转 → 未来单独做
 
 用法示例：
-    from trader.multi.executor import open_market, close_market, get_balance
+    from trader.multi.executor import open_market, close_market, get_balance, get_all_balances
     open_market("玄玄", "币安2", "BTCUSDT", side="BUY", margin=50, leverage=10)
     close_market("天天", "币安3", "ETHUSDT", pct=100)
-    get_balance("玄玄", "全查")   # 全查走另一个包装
+    get_balance("玄玄", "币安1")     # 单账户三项
+    get_all_balances("玄玄")         # 全账户聚合
 """
 from __future__ import annotations
 
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal, ROUND_DOWN
 
@@ -32,6 +34,12 @@ logger = logging.getLogger(__name__)
 
 
 # ══════════════════════════════════════════
+# 模块级缓存锁（保护 _filters / _hedge_cache 双重写入）
+# ══════════════════════════════════════════
+_cache_lock = threading.Lock()
+
+
+# ══════════════════════════════════════════
 # 精度缓存（symbol metadata 全网一致，账户无关）
 # ══════════════════════════════════════════
 _filters: dict[str, dict] = {}
@@ -40,19 +48,22 @@ _filters: dict[str, dict] = {}
 def _get_filters(client, symbol: str) -> dict:
     if symbol in _filters:
         return _filters[symbol]
-    info = client.exchange_info()
-    for s in info["symbols"]:
-        if s["symbol"] == symbol:
-            d = {}
-            for f in s["filters"]:
-                if f["filterType"] == "LOT_SIZE":
-                    d["stepSize"] = f["stepSize"]
-                elif f["filterType"] == "PRICE_FILTER":
-                    d["tickSize"] = f["tickSize"]
-                elif f["filterType"] == "MIN_NOTIONAL":
-                    d["minNotional"] = float(f.get("notional", 5))
-            _filters[symbol] = d
-            return d
+    with _cache_lock:
+        if symbol in _filters:
+            return _filters[symbol]
+        info = client.exchange_info()
+        for s in info["symbols"]:
+            if s["symbol"] == symbol:
+                d = {}
+                for f in s["filters"]:
+                    if f["filterType"] == "LOT_SIZE":
+                        d["stepSize"] = f["stepSize"]
+                    elif f["filterType"] == "PRICE_FILTER":
+                        d["tickSize"] = f["tickSize"]
+                    elif f["filterType"] == "MIN_NOTIONAL":
+                        d["minNotional"] = float(f.get("notional", 5))
+                _filters[symbol] = d
+                return d
     raise ValueError(f"未找到交易对: {symbol}")
 
 
@@ -96,23 +107,27 @@ def _is_hedge(client, account: str) -> bool:
     """返回账户是否为双向持仓模式（dualSidePosition=True）。结果缓存。"""
     if account in _hedge_cache:
         return _hedge_cache[account]
-    try:
-        r = client.get_position_mode()
-        hedge = bool(r.get("dualSidePosition", False))
-    except Exception as e:
-        logger.warning(f"[_is_hedge] {account} get_position_mode 失败，默认单向: {e}")
-        hedge = False
-    _hedge_cache[account] = hedge
-    return hedge
+    with _cache_lock:
+        if account in _hedge_cache:
+            return _hedge_cache[account]
+        try:
+            r = client.get_position_mode()
+            hedge = bool(r.get("dualSidePosition", False))
+        except Exception as e:
+            logger.warning(f"[_is_hedge] {account} get_position_mode 失败，默认单向: {e}")
+            hedge = False
+        _hedge_cache[account] = hedge
+        return hedge
 
 
 def clear_hedge_cache(role: str, account: str | None = None):
     """切换持仓模式后清缓存。需 admin 权限（默认按币安1 校验，显式传 account 则按该账户校验）。"""
     require(role, "admin", account or "币安1")
-    if account:
-        _hedge_cache.pop(resolve_name(account), None)
-    else:
-        _hedge_cache.clear()
+    with _cache_lock:
+        if account:
+            _hedge_cache.pop(resolve_name(account), None)
+        else:
+            _hedge_cache.clear()
 
 
 def _pos_side_for_open(side: str) -> str:
@@ -177,13 +192,18 @@ def get_full_balance(role: str, account: str) -> dict:
         fut_s = ex.submit(_fetch_spot)
         fut_fw = ex.submit(_fetch_funding)
 
-    # 合约（主）
-    fa = fut_f.result()
-    out["futures"] = {
-        "total": float(fa.get("totalWalletBalance", 0)),
-        "available": float(fa.get("availableBalance", 0)),
-        "upnl": float(fa.get("totalUnrealizedProfit", 0)),
-    }
+    # 合约（主，失败也不丢 spot/funding）
+    try:
+        fa = fut_f.result()
+        out["futures"] = {
+            "total": float(fa.get("totalWalletBalance", 0)),
+            "available": float(fa.get("availableBalance", 0)),
+            "upnl": float(fa.get("totalUnrealizedProfit", 0)),
+        }
+    except Exception as e:
+        logger.warning(f"[{account}] futures 查询失败: {e}")
+        out["futures"] = {"total": 0, "available": 0, "upnl": 0}
+        out["futures_error"] = str(e)
 
     # 现货（best-effort）
     try:
@@ -250,16 +270,29 @@ def open_market(role: str, account: str, symbol: str, side: str,
         return {"error": f"非法方向: {side}（应为 BUY/SELL）"}
 
     c = get_futures_client(account)
+    hedge = _is_hedge(c, account)
 
-    # 设置保证金模式 + 杠杆
-    _set_margin_mode(c, symbol, margin_type)
-    lev_res = _set_leverage(c, symbol, leverage)
+    # 4 个独立 REST 并行：margin_mode / leverage / filters / mark_price
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        f_mm = ex.submit(_set_margin_mode, c, symbol, margin_type)
+        f_lv = ex.submit(_set_leverage, c, symbol, leverage)
+        f_ft = ex.submit(_get_filters, c, symbol)
+        f_mp = ex.submit(_mark_price, c, symbol)
+
+    lev_res = f_lv.result()
     if lev_res.get("error"):
         return {"error": f"设置杠杆失败: {lev_res['error']}"}
+    f_mm.result()  # 失败仅返回 dict，不抛
+    try:
+        flt = f_ft.result()
+    except Exception as e:
+        return {"error": f"获取交易对精度失败: {e}"}
+    try:
+        price = f_mp.result()
+    except Exception as e:
+        return {"error": f"获取标记价失败: {e}"}
 
     # 计算数量
-    flt = _get_filters(c, symbol)
-    price = _mark_price(c, symbol)
     notional = margin * leverage
     qty = _fix(notional / price, flt["stepSize"])
 
@@ -271,7 +304,7 @@ def open_market(role: str, account: str, symbol: str, side: str,
         return {"error": f"下单金额 {qty*price:.2f}U 低于最小 {min_notional}U"}
 
     kwargs = {"symbol": symbol, "side": side, "type": "MARKET", "quantity": qty}
-    if _is_hedge(c, account):
+    if hedge:
         kwargs["positionSide"] = _pos_side_for_open(side)
 
     try:
@@ -280,7 +313,7 @@ def open_market(role: str, account: str, symbol: str, side: str,
             "ok": True, "account": account, "symbol": symbol, "side": side,
             "qty": qty, "price": price, "margin": margin, "leverage": leverage,
             "notional": qty * price, "orderId": order.get("orderId"),
-            "hedge": _is_hedge(c, account),
+            "hedge": hedge,
         }
     except Exception as e:
         return {"error": str(e)}
@@ -335,13 +368,10 @@ def close_market(role: str, account: str, symbol: str,
     }
 
 
-def place_stop_loss(role: str, account: str, symbol: str,
-                    stop_price: float, direction: str) -> dict:
-    """
-    挂止损单（STOP_MARKET, reduceOnly）
-    direction: "多"/"long"/"BUY"  表示持有多单要保护
-              "空"/"short"/"SELL" 表示持有空单要保护
-    """
+def _place_close_trigger(role: str, account: str, symbol: str,
+                          trigger_price: float, direction: str,
+                          *, order_type: str, price_field: str) -> dict:
+    """止损/止盈共用实现：方向解析 + tickSize 对齐 + hedge positionSide。"""
     require(role, "trade", account)
     account = resolve_name(account)
     c = get_futures_client(account)
@@ -355,54 +385,44 @@ def place_stop_loss(role: str, account: str, symbol: str,
         return {"error": f"非法方向: {direction}"}
 
     flt = _get_filters(c, symbol)
-    stop_price = _fix(stop_price, flt["tickSize"])
+    trigger_price = _fix(trigger_price, flt["tickSize"])
 
-    kwargs = {"symbol": symbol, "side": close_side, "type": "STOP_MARKET",
-              "stopPrice": stop_price, "closePosition": True}
+    kwargs = {"symbol": symbol, "side": close_side, "type": order_type,
+              "stopPrice": trigger_price, "closePosition": True}
     if _is_hedge(c, account):
         kwargs["positionSide"] = pos_side
 
     try:
         order = c.new_order(**kwargs)
         return {"ok": True, "account": account, "symbol": symbol,
-                "stopPrice": stop_price, "orderId": order.get("orderId")}
+                price_field: trigger_price, "orderId": order.get("orderId")}
     except Exception as e:
         return {"error": str(e)}
+
+
+def place_stop_loss(role: str, account: str, symbol: str,
+                    stop_price: float, direction: str) -> dict:
+    """挂止损单（STOP_MARKET, closePosition）。
+
+    direction: 多/long/BUY → 保护多单；空/short/SELL → 保护空单。
+    """
+    return _place_close_trigger(
+        role, account, symbol, stop_price, direction,
+        order_type="STOP_MARKET", price_field="stopPrice",
+    )
 
 
 def place_take_profit(role: str, account: str, symbol: str,
                       tp_price: float, direction: str) -> dict:
-    """挂止盈单（TAKE_PROFIT_MARKET, reduceOnly）"""
-    require(role, "trade", account)
-    account = resolve_name(account)
-    c = get_futures_client(account)
-
-    d = direction.lower()
-    if d in ("多", "long", "buy"):
-        close_side, pos_side = "SELL", "LONG"
-    elif d in ("空", "short", "sell"):
-        close_side, pos_side = "BUY", "SHORT"
-    else:
-        return {"error": f"非法方向: {direction}"}
-
-    flt = _get_filters(c, symbol)
-    tp_price = _fix(tp_price, flt["tickSize"])
-
-    kwargs = {"symbol": symbol, "side": close_side, "type": "TAKE_PROFIT_MARKET",
-              "stopPrice": tp_price, "closePosition": True}
-    if _is_hedge(c, account):
-        kwargs["positionSide"] = pos_side
-
-    try:
-        order = c.new_order(**kwargs)
-        return {"ok": True, "account": account, "symbol": symbol,
-                "tpPrice": tp_price, "orderId": order.get("orderId")}
-    except Exception as e:
-        return {"error": str(e)}
+    """挂止盈单（TAKE_PROFIT_MARKET, closePosition）。"""
+    return _place_close_trigger(
+        role, account, symbol, tp_price, direction,
+        order_type="TAKE_PROFIT_MARKET", price_field="tpPrice",
+    )
 
 
 def cancel_all(role: str, account: str, symbol: str) -> dict:
-    """撤销某币种所有挂单"""
+    """撤销某币种所有挂单（无挂单时也返回 ok）"""
     require(role, "trade", account)
     account = resolve_name(account)
     c = get_futures_client(account)
@@ -410,7 +430,11 @@ def cancel_all(role: str, account: str, symbol: str) -> dict:
         c.cancel_open_orders(symbol=symbol)
         return {"ok": True, "account": account, "symbol": symbol}
     except Exception as e:
-        return {"error": str(e)}
+        msg = str(e)
+        # -2011 / Unknown order：本来就没挂单，视为成功
+        if "-2011" in msg or "Unknown order" in msg or "no open orders" in msg.lower():
+            return {"ok": True, "account": account, "symbol": symbol, "no_orders": True}
+        return {"error": msg}
 
 
 # ══════════════════════════════════════════

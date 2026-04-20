@@ -45,7 +45,7 @@ print("  ✅ 币安1 被正确屏蔽")
 print("\n═══ 玄玄查单账户余额（别名测试）═══")
 r1 = get_balance("玄玄", "main")       # 别名 = 币安1
 r2 = get_balance("玄玄", "李红兵")      # 别名 = 币安3
-print(f"  main(→币安1): {r1['total']:.2f}U")
-print(f"  李红兵(→币安3): {r2['total']:.2f}U")
+print(f"  main(→币安1): 合约 {r1['futures']['total']:.2f}U")
+print(f"  李红兵(→币安3): 合约 {r2['futures']['total']:.2f}U")
 
 print("\n✅ 自检全部通过（未实际下单）")

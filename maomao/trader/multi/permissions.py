@@ -18,7 +18,7 @@ from typing import Any
 
 import yaml
 
-from trader.multi.registry import resolve_name  # 复用别名解析
+from trader.multi.registry import resolve_name
 
 CONFIG_PATH = Path(__file__).parent / "permissions.yaml"
 

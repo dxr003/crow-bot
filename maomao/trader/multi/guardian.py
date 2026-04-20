@@ -66,18 +66,22 @@ def check_accounts() -> list[dict]:
 
 
 def check_services() -> list[dict]:
-    """查 systemd 服务状态"""
+    """查 systemd 服务状态（一次 systemctl 拿全部，省 5 次 fork+exec）"""
+    try:
+        r = subprocess.run(
+            ["systemctl", "is-active", *SERVICES],
+            capture_output=True, text=True, timeout=10,
+        )
+        # is-active 多参时按行返回，failed/inactive 时退出码非 0 但仍有 stdout
+        lines = r.stdout.strip().splitlines()
+    except Exception as e:
+        return [{"service": svc, "active": "?", "ok": False, "error": str(e)}
+                for svc in SERVICES]
+
     results = []
-    for svc in SERVICES:
-        try:
-            r = subprocess.run(
-                ["systemctl", "is-active", svc],
-                capture_output=True, text=True, timeout=5,
-            )
-            active = r.stdout.strip()
-            results.append({"service": svc, "active": active, "ok": active == "active"})
-        except Exception as e:
-            results.append({"service": svc, "active": "?", "ok": False, "error": str(e)})
+    for svc, line in zip(SERVICES, lines + [""] * (len(SERVICES) - len(lines))):
+        active = line.strip() or "?"
+        results.append({"service": svc, "active": active, "ok": active == "active"})
     return results
 
 
@@ -131,9 +135,16 @@ def load_state() -> dict:
     if not STATE_PATH.exists():
         return {}
     try:
-        return json.loads(STATE_PATH.read_text(encoding="utf-8"))
-    except Exception:
+        data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    except Exception as e:
+        bak = STATE_PATH.with_suffix(STATE_PATH.suffix + f".bad.{int(time.time())}")
+        try:
+            STATE_PATH.rename(bak)
+        except Exception:
+            pass
+        logger.error(f"[guardian] state 文件损坏，已备份到 {bak.name}: {e}")
         return {}
+    return data if isinstance(data, dict) else {}
 
 
 def save_state(state: dict) -> None:
@@ -163,17 +174,20 @@ def run() -> dict:
         "anomalies": [],
     }
 
-    # 收集异常
+    # 收集异常（消息+稳定去重 key 分开，避免动态文本破坏限频）
+    anomaly_keys: list[str] = []
     for a in report["accounts"]:
         if not a["ok"]:
             report["anomalies"].append(
                 f"账户异常 {a['account']}: {a.get('error', '?')}"
             )
+            anomaly_keys.append(f"acct:{a['account']}")
     for s in report["services"]:
         if not s["ok"]:
             report["anomalies"].append(
                 f"服务异常 {s['service']}: {s['active']}"
             )
+            anomaly_keys.append(f"svc:{s['service']}")
     hb = report["bull_sniper_heartbeat"]
     if not hb["ok"]:
         if "reason" in hb:
@@ -182,11 +196,12 @@ def run() -> dict:
             report["anomalies"].append(
                 f"bull_sniper 心跳超时：{hb['age_sec']}秒未更新（阈值 {hb['threshold_sec']}秒）"
             )
+        anomaly_keys.append("hb:bull_sniper")
 
     # 告警（去重）
     state = load_state()
     if report["anomalies"]:
-        anomaly_key = "|".join(report["anomalies"])
+        anomaly_key = "|".join(sorted(anomaly_keys))
         if should_alert(state, anomaly_key):
             lines = [f"⚠️ <b>夜间守护告警</b>  {now.strftime('%H:%M:%S')}"]
             for msg in report["anomalies"]:
