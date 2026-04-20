@@ -459,6 +459,180 @@ def cancel_all(role: str, account: str, symbol: str) -> dict:
         return {"error": msg}
 
 
+def open_limit(role: str, account: str, symbol: str, side: str,
+               margin: float, leverage: int, price: float,
+               margin_type: str = "ISOLATED") -> dict:
+    """
+    限价开仓（GTC）。
+    - side: BUY(做多)/SELL(做空)
+    - margin: 保证金 U；数量 = margin*leverage/price
+    - price: 挂单价（按 tickSize 对齐）
+    """
+    require(role, "trade", account)
+    account = resolve_name(account)
+    side = side.upper()
+    if side not in ("BUY", "SELL"):
+        return {"error": f"非法方向: {side}（应为 BUY/SELL）"}
+
+    c = get_futures_client(account)
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        f_mm = ex.submit(_set_margin_mode, c, symbol, margin_type)
+        f_lv = ex.submit(_set_leverage, c, symbol, leverage)
+        f_ft = ex.submit(_get_filters, c, symbol)
+        f_hg = ex.submit(_is_hedge, c, account)
+
+    lev_res = f_lv.result()
+    if lev_res.get("error"):
+        return {"error": f"设置杠杆失败: {lev_res['error']}"}
+    mm_res = f_mm.result()
+    if mm_res.get("error"):
+        logger.warning(f"[{account}] {symbol} marginType→{margin_type} 未切换成功，继续下单: {mm_res['error']}")
+    try:
+        flt = f_ft.result()
+    except Exception as e:
+        return {"error": f"获取交易对精度失败: {e}"}
+    hedge = f_hg.result()
+
+    limit_price = _fix(price, flt["tickSize"])
+    if limit_price <= 0:
+        return {"error": f"挂单价异常: {price} → {limit_price}"}
+    notional = margin * leverage
+    qty = _fix(notional / limit_price, flt["stepSize"])
+    if qty <= 0:
+        return {"error": f"数量计算为 0（保证金 {margin}U × {leverage}x / 价 {limit_price} / step {flt['stepSize']}）"}
+
+    min_notional = flt.get("minNotional", 5)
+    if qty * limit_price < min_notional:
+        return {"error": f"挂单金额 {qty*limit_price:.2f}U 低于最小 {min_notional}U"}
+
+    kwargs = {"symbol": symbol, "side": side, "type": "LIMIT",
+              "quantity": qty, "price": limit_price, "timeInForce": "GTC"}
+    if hedge:
+        kwargs["positionSide"] = _pos_side_for_open(side)
+
+    try:
+        order = c.new_order(**kwargs)
+        return {
+            "ok": True, "account": account, "symbol": symbol, "side": side,
+            "qty": qty, "price": limit_price, "margin": margin, "leverage": leverage,
+            "notional": qty * limit_price, "orderId": order.get("orderId"),
+            "hedge": hedge, "type": "LIMIT",
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def add_to_position(role: str, account: str, symbol: str, margin: float) -> dict:
+    """加仓：自动识别现有持仓方向和杠杆，按市价加 margin U。
+    hedge 模式且双向都持仓时拒绝（语义不明）。"""
+    require(role, "trade", account)
+    account = resolve_name(account)
+    c = get_futures_client(account)
+
+    positions = [p for p in c.get_position_risk(symbol=symbol)
+                 if float(p.get("positionAmt", 0)) != 0]
+    if not positions:
+        return {"error": f"{symbol} 无持仓，无法加仓"}
+    if len(positions) > 1:
+        return {"error": f"{symbol} 同时持多空两侧，加仓方向不明，请指定"}
+
+    p = positions[0]
+    amt = float(p["positionAmt"])
+    side = "BUY" if amt > 0 else "SELL"
+    leverage = int(float(p.get("leverage", 10)))
+    margin_type = "ISOLATED" if p.get("marginType", "").lower() == "isolated" else "CROSSED"
+    return open_market(role, account, symbol, side, margin, leverage, margin_type)
+
+
+_LIQ_MMR = 0.005
+_LIQ_SLIPPAGE = 0.01
+
+
+def open_liq(role: str, account: str, symbol: str, side: str,
+             wallet: float, liq_price: float,
+             margin_type: str = "ISOLATED") -> dict:
+    """
+    强平价反推开仓：给定保证金 wallet 和目标强平价 liq_price，
+    自动算 qty 和派生杠杆。MMR=0.005，留 1% 滑点缓冲。
+    """
+    require(role, "trade", account)
+    account = resolve_name(account)
+    side = side.upper()
+    if side not in ("BUY", "SELL"):
+        return {"error": f"非法方向: {side}（应为 BUY/SELL）"}
+    if wallet <= 0:
+        return {"error": f"保证金必须 > 0: {wallet}"}
+    if liq_price <= 0:
+        return {"error": f"强平价必须 > 0: {liq_price}"}
+
+    c = get_futures_client(account)
+
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        f_ft = ex.submit(_get_filters, c, symbol)
+        f_mp = ex.submit(_mark_price, c, symbol)
+        f_hg = ex.submit(_is_hedge, c, account)
+
+    try:
+        flt = f_ft.result()
+    except Exception as e:
+        return {"error": f"获取交易对精度失败: {e}"}
+    try:
+        entry = f_mp.result()
+    except Exception as e:
+        return {"error": f"获取标记价失败: {e}"}
+    hedge = f_hg.result()
+
+    if side == "BUY":
+        liq_eff = liq_price * (1 - _LIQ_SLIPPAGE)
+        denom = entry - liq_eff * (1 - _LIQ_MMR)
+        if denom <= 0:
+            return {"error": f"强平价 {liq_price} 须低于当前价 {entry}（做多）"}
+    else:
+        liq_eff = liq_price * (1 + _LIQ_SLIPPAGE)
+        denom = liq_eff * (1 + _LIQ_MMR) - entry
+        if denom <= 0:
+            return {"error": f"强平价 {liq_price} 须高于当前价 {entry}（做空）"}
+
+    qty = _fix(wallet / denom, flt["stepSize"])
+    if qty <= 0:
+        return {"error": f"数量计算为 0（保证金 {wallet}U / 距离 {denom:.4f} / step {flt['stepSize']}）"}
+
+    notional = qty * entry
+    leverage = max(1, min(125, round(notional / wallet)))
+
+    min_notional = flt.get("minNotional", 5)
+    if notional < min_notional:
+        return {"error": f"下单金额 {notional:.2f}U 低于最小 {min_notional}U"}
+
+    # 设置 marginType 和派生杠杆（并行）
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        f_mm = ex.submit(_set_margin_mode, c, symbol, margin_type)
+        f_lv = ex.submit(_set_leverage, c, symbol, leverage)
+    lev_res = f_lv.result()
+    if lev_res.get("error"):
+        return {"error": f"设置派生杠杆 {leverage}x 失败: {lev_res['error']}"}
+    mm_res = f_mm.result()
+    if mm_res.get("error"):
+        logger.warning(f"[{account}] {symbol} marginType→{margin_type} 未切换成功，继续下单: {mm_res['error']}")
+
+    kwargs = {"symbol": symbol, "side": side, "type": "MARKET", "quantity": qty}
+    if hedge:
+        kwargs["positionSide"] = _pos_side_for_open(side)
+
+    try:
+        order = c.new_order(**kwargs)
+        return {
+            "ok": True, "account": account, "symbol": symbol, "side": side,
+            "qty": qty, "entry": entry, "liq_target": liq_price,
+            "wallet": wallet, "leverage": leverage, "auto_leverage": True,
+            "notional": notional, "orderId": order.get("orderId"),
+            "hedge": hedge,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 # ══════════════════════════════════════════
 # 全账户聚合
 # ══════════════════════════════════════════
