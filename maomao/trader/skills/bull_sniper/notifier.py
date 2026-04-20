@@ -46,6 +46,15 @@ def _load_notify_cfg():
     return _cfg_cache
 
 
+def _mode_tail_line(cfg: dict | None = None) -> str:
+    mode = str((cfg or _load_notify_cfg()).get("mode", "off")).lower()
+    if mode == "auto":
+        return "📡 当前 <b>自动开仓模式</b> · 信号触发即下单"
+    if mode == "alert":
+        return "🔔 当前 <b>告警模式</b> · 仅推送不下单"
+    return "👁 当前 <b>纯观察模式</b> · 仅记录评分，不下单"
+
+
 def _tg_send(token: str, chat_id: str, text: str):
     if not token or not chat_id:
         return
@@ -237,13 +246,7 @@ def send_signal(signal: dict):
         "━━━━━━━━━━━━━━━━━━━━",
     ]
 
-    _mode = str(_load_notify_cfg().get("mode", "off")).lower()
-    if _mode == "auto":
-        lines.append("📡 当前 <b>自动开仓模式</b> · 信号触发即下单")
-    elif _mode == "alert":
-        lines.append("🔔 当前 <b>告警模式</b> · 仅推送不下单")
-    else:
-        lines.append("👁 当前 <b>纯观察模式</b> · 仅记录评分，不下单")
+    lines.append(_mode_tail_line())
 
     msg = "\n".join(lines)
     _send_bb(msg)
@@ -280,12 +283,10 @@ def send_status_card(state: dict):
     now = time.time()
     watchpool = state.get("watchpool", {})
     signals = state.get("signals", [])
-    stats = state.get("stats", {})
     positions = state.get("positions", {})
 
     # 一次性读配置（避免后面多次打开文件）
     cfg = _load_notify_cfg()
-    mode_str = str(cfg.get("mode", "off")).lower()
     max_hist = int(cfg.get("max_history_per_group", 10))
 
     # 并行拉取：position_risk（持仓账户）+ prices（持仓∪信号的全量 symbols）
@@ -479,12 +480,7 @@ def send_status_card(state: dict):
         f"已触发信号 {sig_count}  结算 {settled_count}"
     )
     lines.append("━━━━━━━━━━━━━━━━━━━━")
-    if mode_str == "auto":
-        lines.append("📡 当前 <b>自动开仓模式</b> · 信号触发即下单")
-    elif mode_str == "alert":
-        lines.append("🔔 当前 <b>告警模式</b> · 仅推送不下单")
-    else:
-        lines.append("👁 当前 <b>纯观察模式</b> · 仅记录评分，不下单")
+    lines.append(_mode_tail_line(cfg))
 
     msg = "\n".join(lines)
     _send_bb(msg)
@@ -501,7 +497,6 @@ def send_trade_report(signal: dict, buy_result: dict, analyze_result: dict):
 
     # ── 触发通道 ──
     action = signal.get("action", "")
-    reason = signal.get("reason", "")
     ai_reason = signal.get("ai_reason", "")
     score = signal.get("score")
 
@@ -690,7 +685,6 @@ def send_health_report(state: dict, filter_log: list):
         diag_lines.append("✅ 评分：池空，待观察")
 
     # 5) 状态文件完整性
-    from pathlib import Path
     state_file = Path(__file__).parent / "data" / "scanner_state.json"
     if state_file.exists():
         age_min = (now_ts - state_file.stat().st_mtime) / 60
