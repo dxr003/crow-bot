@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal, ROUND_DOWN
 
@@ -43,14 +44,22 @@ _cache_lock = threading.Lock()
 # 精度缓存（symbol metadata 全网一致，账户无关）
 # ══════════════════════════════════════════
 _filters: dict[str, dict] = {}
+_filters_negative: dict[str, float] = {}   # symbol → 上次确认不存在的 ts
+_FILTERS_NEG_TTL = 60.0   # 秒；防 typo 反复打 exchange_info
 
 
 def _get_filters(client, symbol: str) -> dict:
     if symbol in _filters:
         return _filters[symbol]
+    neg_ts = _filters_negative.get(symbol)
+    if neg_ts and time.time() - neg_ts < _FILTERS_NEG_TTL:
+        raise ValueError(f"未找到交易对: {symbol}（{int(_FILTERS_NEG_TTL)}秒内已确认不存在）")
     with _cache_lock:
         if symbol in _filters:
             return _filters[symbol]
+        neg_ts = _filters_negative.get(symbol)
+        if neg_ts and time.time() - neg_ts < _FILTERS_NEG_TTL:
+            raise ValueError(f"未找到交易对: {symbol}（{int(_FILTERS_NEG_TTL)}秒内已确认不存在）")
         info = client.exchange_info()
         for s in info["symbols"]:
             if s["symbol"] == symbol:
@@ -63,7 +72,9 @@ def _get_filters(client, symbol: str) -> dict:
                     elif f["filterType"] == "MIN_NOTIONAL":
                         d["minNotional"] = float(f.get("notional", 5))
                 _filters[symbol] = d
+                _filters_negative.pop(symbol, None)
                 return d
+        _filters_negative[symbol] = time.time()
     raise ValueError(f"未找到交易对: {symbol}")
 
 
@@ -124,14 +135,14 @@ def _is_hedge(client, account: str) -> bool:
 def clear_hedge_cache(role: str, account: str | None = None):
     """切换持仓模式后清缓存。
     account 指定：按该账户 admin 校验，只清该账户。
-    account=None（清空所有）：必须对每个已缓存的账户都有 admin 权限才允许全清。"""
+    account=None（清空所有）：以全部启用账户为权限闸门，避免空缓存时无校验。"""
     with _cache_lock:
         if account:
             require(role, "admin", account)
             _hedge_cache.pop(resolve_name(account), None)
             return
-        for cached in list(_hedge_cache.keys()):
-            require(role, "admin", cached)
+        for a in list_accounts(enabled_only=True):
+            require(role, "admin", a["name"])
         _hedge_cache.clear()
 
 
@@ -517,6 +528,7 @@ def transfer(role: str, account: str, amount: float,
     """
     require(role, "trade", account)
     account = resolve_name(account)
+    asset = (asset or "USDT").upper()
 
     try:
         src = _norm_wallet(from_wallet)

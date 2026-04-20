@@ -14,14 +14,45 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
 from trader.multi.registry import list_accounts
 
 logger = logging.getLogger(__name__)
+
+
+# ─────────────── mtime 文件缓存 ───────────────
+# bot 高频"/状态"会重复打 yaml/json 解析；按 mtime 缓存解析结果，
+# 文件未变直接复用，文件变了自动重读。
+_FILE_CACHE: dict[str, tuple[float, Any, str | None]] = {}
+_FILE_CACHE_LOCK = threading.Lock()
+
+
+def _read_cached(path: Path, parse: Callable[[str], Any]) -> tuple[Any, str | None]:
+    """返回 (data, err)。err 取值：None=正常 / "not_found" / 其它=解析异常字符串。"""
+    key = str(path)
+    try:
+        mtime = path.stat().st_mtime
+    except FileNotFoundError:
+        return None, "not_found"
+    cached = _FILE_CACHE.get(key)
+    if cached and cached[0] == mtime:
+        return cached[1], cached[2]
+    with _FILE_CACHE_LOCK:
+        cached = _FILE_CACHE.get(key)
+        if cached and cached[0] == mtime:
+            return cached[1], cached[2]
+        try:
+            data = parse(path.read_text(encoding="utf-8"))
+            err = None
+        except Exception as e:
+            data, err = None, str(e)
+        _FILE_CACHE[key] = (mtime, data, err)
+        return data, err
 
 
 # ─────────────── 策略注册表 ───────────────
@@ -63,46 +94,51 @@ STRATEGIES: dict[str, dict] = {
 
 def get_bull_sniper_status() -> dict:
     """读 bull_sniper config.yaml，返回 mode/accounts 绑定"""
-    p = Path("/root/maomao/trader/skills/bull_sniper/config.yaml")
-    cfg: dict = {}
-    if p.exists():
-        try:
-            cfg = yaml.safe_load(p.read_text()) or {}
-        except Exception as e:
-            logger.warning(f"[strategy_router] bull_sniper config.yaml 解析失败: {e}")
-    bs = cfg.get("bull_sniper", {})
-    accounts = bs.get("accounts", {})
+    cfg, err = _read_cached(
+        Path("/root/maomao/trader/skills/bull_sniper/config.yaml"),
+        lambda s: yaml.safe_load(s) or {},
+    )
+    if err and err != "not_found":
+        logger.warning(f"[strategy_router] bull_sniper config.yaml 解析失败: {err}")
+    if not isinstance(cfg, dict):
+        cfg = {}
+    bs = cfg.get("bull_sniper", {}) if isinstance(cfg.get("bull_sniper"), dict) else {}
+    accounts = bs.get("accounts", {}) if isinstance(bs.get("accounts"), dict) else {}
+    scoring = bs.get("scoring", {}) if isinstance(bs.get("scoring"), dict) else {}
     return {
         "strategy": "bull_sniper",
         "name": "做多阻击",
         "enabled": bs.get("enabled", False),
         "mode": bs.get("mode", "off"),
         "accounts": {
-            acc: {"enabled": meta.get("enabled", False)}
+            acc: {"enabled": meta.get("enabled", False) if isinstance(meta, dict) else False}
             for acc, meta in accounts.items()
         },
-        "signal_threshold": bs.get("scoring", {}).get("signal_threshold", "?"),
+        "signal_threshold": scoring.get("signal_threshold", "?"),
     }
 
 
 def get_short_attack_status() -> dict:
     """读 short_attack 状态"""
-    state_path = Path("/root/short_attack/data/state.json")
-    if not state_path.exists():
+    st, err = _read_cached(Path("/root/short_attack/data/state.json"), json.loads)
+    if err == "not_found":
         return {"strategy": "short_attack", "name": "做空阻击",
                 "enabled": False, "note": "state.json 不存在"}
-    try:
-        st = json.loads(state_path.read_text())
-    except Exception as e:
-        return {"strategy": "short_attack", "name": "做空阻击", "error": str(e)}
+    if err:
+        return {"strategy": "short_attack", "name": "做空阻击", "error": err}
+    if not isinstance(st, dict):
+        return {"strategy": "short_attack", "name": "做空阻击",
+                "error": f"state.json 顶层非 dict (实际 {type(st).__name__})"}
+    positions = st.get("positions") or {}
+    monitoring = st.get("monitoring") or {}
     return {
         "strategy": "short_attack",
         "name": "做空阻击",
         "enabled": True,
         "mode": "alert",
         "accounts": {"币安1": {"enabled": True}},
-        "active_positions": len(st.get("positions", {})),
-        "monitoring": len(st.get("monitoring", {})),
+        "active_positions": len(positions) if isinstance(positions, (dict, list)) else 0,
+        "monitoring": len(monitoring) if isinstance(monitoring, (dict, list)) else 0,
     }
 
 

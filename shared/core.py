@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from telegram.constants import ParseMode
+from telegram.error import RetryAfter
 
 
 def _md_to_html(text: str) -> str:
@@ -87,6 +88,7 @@ def _md_to_html(text: str) -> str:
 MODELS = [
     "claude-sonnet-4-6",
     "claude-opus-4-6",
+    "claude-opus-4-7",
     "claude-haiku-4-5-20251001",
 ]
 
@@ -213,8 +215,14 @@ async def ask_with_timer(update, gen_coro, model):
     start_time = time.time()
     step_info = {"text": "启动中"}
     async def ticker():
+        # 基础节奏 3s（多 ticker 并发也不易触 TG 单 chat 限流）；
+        # RetryAfter 命中后用其 retry_after，其它瞬时错误指数退避封顶 30s；成功即衰减回基础节奏。
+        BASE_INTERVAL = 3.0
+        MAX_BACKOFF = 30.0
+        backoff = BASE_INTERVAL
+        last_text = None
         while True:
-            await asyncio.sleep(1)
+            await asyncio.sleep(backoff)
             elapsed = int(time.time() - start_time)
             actions = step_info.get("actions")
             if actions:
@@ -222,10 +230,16 @@ async def ask_with_timer(update, gen_coro, model):
                 txt = f"⚡ {elapsed}s\n{lines}"
             else:
                 txt = f"🐦 乌鸦团队 · {step_info['text']}... {elapsed}s"
+            if txt == last_text:
+                continue   # 文本未变就不打 API（TG 也会回 BadRequest "not modified"）
             try:
                 await thinking_msg.edit_text(txt)
+                last_text = txt
+                backoff = BASE_INTERVAL
+            except RetryAfter as e:
+                backoff = min(max(float(getattr(e, "retry_after", 5)), BASE_INTERVAL), MAX_BACKOFF)
             except Exception:
-                pass
+                backoff = min(backoff * 2, MAX_BACKOFF)
     ticker_task = asyncio.create_task(ticker())
     full_text = ""
     try:
@@ -276,10 +290,14 @@ def create_and_run_bot(env_path, claude_add_dir=None):
         _add_dir = claude_add_dir or "/root"
 
     def admin_only(func):
-        async def wrapper(update, ctx):
-            if update.effective_user.id != admin_id:
+        async def wrapper(update, ctx, *args, **kwargs):
+            uid = update.effective_user.id
+            if uid != admin_id:
+                uname = update.effective_user.username or ""
+                txt = update.message.text if update.message else ""
+                logger.warning(f"[admin_only] 拒绝: user_id={uid} username=@{uname} text={txt!r} expected_admin={admin_id}")
                 return
-            return await func(update, ctx)
+            return await func(update, ctx, *args, **kwargs)
         return wrapper
 
     async def ask_claude(update, prompt, image_b64=None):
@@ -405,8 +423,10 @@ def create_and_run_bot(env_path, claude_add_dir=None):
     _CANCEL_WORDS  = {"取消", "cancel", "不", "算了", "不要", "no", "n", "N"}
 
     @admin_only
-    async def handle_text(update, ctx):
-        user_text = update.message.text
+    async def handle_text(update, ctx, text_override=None):
+        if not update.message or not update.message.text:
+            return
+        user_text = text_override if text_override is not None else update.message.text
         if bot_dir in ("maomao", "tiantian"):
             import sys; sys.path.insert(0, f'/root/{bot_dir}')
             stripped = user_text.strip()
@@ -492,168 +512,77 @@ def create_and_run_bot(env_path, claude_add_dir=None):
         logger.error("Exception:", exc_info=ctx.error)
         _bot_log("error", str(ctx.error)[:200])
 
+    # ── 多账户快捷卡片（2026-04-19 拆分：持仓/余额独立） ──
+    _ACC_ROLE = {"maomao": "玄玄", "tiantian": "天天", "damao": "大猫"}.get(bot_dir)
+
+    def _mk_card_handler(kind, acc_name):
+        """kind ∈ {'pos','bal'}，返回对应 account 的持仓卡或余额卡"""
+        @admin_only
+        async def _h(update, ctx):
+            try:
+                if kind == "pos":
+                    from shared.query_cards import render_positions_card
+                    card = render_positions_card(_ACC_ROLE, acc_name)
+                else:
+                    from shared.query_cards import render_wallet_card
+                    card = render_wallet_card(_ACC_ROLE, acc_name)
+                await update.message.reply_text(card, parse_mode=ParseMode.HTML)
+            except PermissionError as e:
+                await update.message.reply_text(f"⛔ {e}")
+            except Exception as e:
+                logger.error(f"{kind} {acc_name} 失败: {e}", exc_info=True)
+                await update.message.reply_text(f"❌ {acc_name} 查询失败: {e}")
+        return _h
+
+    @admin_only
+    async def cmd_all_card(update, ctx):
+        try:
+            from shared.query_cards import render_all_card
+            card = render_all_card(_ACC_ROLE)
+            await update.message.reply_text(card, parse_mode=ParseMode.HTML)
+        except PermissionError as e:
+            await update.message.reply_text(f"⛔ {e}")
+        except Exception as e:
+            logger.error(f"全查失败: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ 全查失败: {e}")
+
+    cmd_pos1 = _mk_card_handler("pos", "币安1")
+    cmd_pos2 = _mk_card_handler("pos", "币安2")
+    cmd_pos3 = _mk_card_handler("pos", "币安3")
+    cmd_pos4 = _mk_card_handler("pos", "币安4")
+    cmd_bal1 = _mk_card_handler("bal", "币安1")
+    cmd_bal2 = _mk_card_handler("bal", "币安2")
+    cmd_bal3 = _mk_card_handler("bal", "币安3")
+    cmd_bal4 = _mk_card_handler("bal", "币安4")
+
     @admin_only
     async def cmd_q_positions(update, ctx):
-        import sys; sys.path.insert(0, f'/root/{bot_dir}')
+        """/1 全账户持仓（纯持仓，按 role 过滤；迁到 trader.multi 四账户）"""
         try:
-            if bot_dir == "maomao":
-                from trader.multi_account import get_all_positions
-                positions = get_all_positions()
-            else:
-                from trader.exchange import get_positions
-                positions = [dict(p, _account="") for p in get_positions()]
-            if not positions or all("_error" in p for p in positions):
-                await update.message.reply_text("📭 当前无持仓")
-                return
-            # 查挂单（SL/TP状态）
-            open_orders = {}
-            try:
-                if bot_dir == "maomao":
-                    from trader.multi_account import ACCOUNTS, _load_client
-                    for acct in ACCOUNTS:
-                        try:
-                            cli, _, _ = _load_client(acct)
-                            for o in cli.get_open_orders():
-                                open_orders.setdefault(o["symbol"], []).append(o)
-                        except Exception:
-                            pass
-                else:
-                    from trader.exchange import get_client
-                    for o in get_client().futures_get_open_orders():
-                        open_orders.setdefault(o["symbol"], []).append(o)
-            except Exception:
-                pass
-            # 查自研移动止盈状态
-            tl_state = {}
-            try:
-                import json as _json
-                from pathlib import Path as _Path
-                _tl = _Path("/root/maomao/trader/skills/bull_sniper/data/trailing_limit_state.json")
-                if _tl.exists():
-                    tl_state = _json.loads(_tl.read_text())
-            except Exception:
-                pass
-            lines = []
-            cur_account = None
-            for p in positions:
-                if "_error" in p:
-                    lines.append(f"\n<b>【{p['_account']}】</b> ❌ {p['_error']}")
-                    continue
-                acct = p.get("_account", "")
-                if acct and acct != cur_account:
-                    lines.append(f"\n<b>【{acct}】</b>")
-                    cur_account = acct
-                sym  = p['symbol']
-                amt  = float(p['positionAmt'])
-                side = "多" if amt > 0 else "空"
-                entry = float(p['entryPrice'])
-                liq   = float(p.get('liquidationPrice', 0))
-                upnl  = float(p.get('unRealizedProfit', 0))
-                lev   = p.get('leverage', '?')
-                mark  = float(p.get('markPrice', 0))
-                margin = float(p.get('isolatedWallet', 0)) or float(p.get('initialMargin', 0))
-                notional = abs(amt) * mark
-                pct = (upnl / margin * 100) if margin > 0 else 0
-                pnl_icon = "🟢" if upnl >= 0 else "🔴"
-                liq_str = f"{liq:.4f}" if liq > 0 else "全仓"
-                # SL/TP 状态
-                sl_tag, tp_tag = "SL❌", "TP❌"
-                orders = open_orders.get(sym, [])
-                for o in orders:
-                    ot = o.get("type", "")
-                    sp = o.get("stopPrice", "0")
-                    if ot == "STOP_MARKET":
-                        sl_tag = f"SL✅ {float(sp):.4f}"
-                    elif ot in ("TRAILING_STOP_MARKET", "TAKE_PROFIT_MARKET"):
-                        tp_tag = f"TP✅ 原生"
-                if sym in tl_state:
-                    tp_tag = f"TP✅ 移动止盈"
-                lines.append(
-                    f"<b>{p['symbol']}</b> {side} {lev}x\n"
-                    f"  持仓: {abs(amt):.4f}  保证金: {margin:.2f}U\n"
-                    f"  入场: {entry:.4f}  现价: {mark:.4f}\n"
-                    f"  强平: {liq_str}  仓位值: {notional:.2f}U\n"
-                    f"  {pnl_icon} 浮盈: {upnl:+.2f}U ({pct:+.1f}%)\n"
-                    f"  {sl_tag}  {tp_tag}"
-                )
-            await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+            from shared.query_cards import render_all_positions_card
+            card = render_all_positions_card(_ACC_ROLE)
+            if len(card) > 4000:
+                card = card[:4000] + "\n..."
+            await update.message.reply_text(card, parse_mode=ParseMode.HTML)
+        except PermissionError as e:
+            await update.message.reply_text(f"⛔ {e}")
         except Exception as e:
+            logger.error(f"/1 持仓查询失败: {e}", exc_info=True)
             await update.message.reply_text(f"❌ 查询失败: {e}")
 
     @admin_only
     async def cmd_q_balances(update, ctx):
-        import sys; sys.path.insert(0, f'/root/{bot_dir}')
+        """/2 全账户余额（合约+现货+资金，按 role 过滤；迁到 trader.multi 四账户）"""
         try:
-            if bot_dir == "maomao":
-                from trader.multi_account import get_all_balances as get_multi_bal
-                accounts = get_multi_bal()
-                lines = ["💰 <b>全账户余额</b>"]
-                total_all = 0
-                stables = {"USDT", "USDC", "BUSD", "FDUSD"}
-                for b in accounts:
-                    if "error" in b:
-                        lines.append(f"\n<b>【{b['name']}】</b> ❌ {b['error']}")
-                        continue
-                    upnl = b['futures_upnl']
-                    equity = b['futures'] + upnl
-                    acct_total = equity
-                    upnl_icon = "🟢" if upnl >= 0 else "🔴"
-                    lines.append(f"\n<b>【{b['name']}】</b>")
-                    lines.append(f"  合约余额: {b['futures']:.2f}U")
-                    lines.append(f"  可用保证金: {b['futures_avail']:.2f}U")
-                    lines.append(f"  {upnl_icon} 浮盈: {upnl:+.2f}U")
-                    lines.append(f"  净值: {equity:.2f}U")
-                    spot = {k: v for k, v in b.get('spot', {}).items() if v >= 1}
-                    if spot:
-                        spot_items = []
-                        for asset, amt in sorted(spot.items(), key=lambda x: -x[1]):
-                            spot_items.append(f"{asset}:{amt:.4f}")
-                            if asset in stables:
-                                acct_total += amt
-                        lines.append(f"  现货: {', '.join(spot_items)}")
-                    funding = {k: v for k, v in b.get('funding', {}).items() if v >= 1}
-                    if funding:
-                        fund_items = []
-                        for asset, amt in sorted(funding.items(), key=lambda x: -x[1]):
-                            fund_items.append(f"{asset}:{amt:.4f}")
-                            if asset in stables:
-                                acct_total += amt
-                        lines.append(f"  资金: {', '.join(fund_items)}")
-                    lines.append(f"  <b>小计: {acct_total:.2f}U</b>")
-                    total_all += acct_total
-                lines.append(f"\n━━━━━━━━━━━━━━━━━━━━")
-                lines.append(f"<b>全账户合计: {total_all:.2f}U</b>")
-            else:
-                from trader.exchange import get_all_balances
-                b = get_all_balances()
-                upnl = b['futures_upnl']
-                equity = b['futures'] + upnl
-                total = equity
-                upnl_icon = "🟢" if upnl >= 0 else "🔴"
-                stables = {"USDT", "USDC", "BUSD", "FDUSD"}
-                lines = ["💰 <b>账户余额</b>\n"]
-                lines.append(f"  合约余额: {b['futures']:.2f}U")
-                lines.append(f"  可用保证金: {b['futures_avail']:.2f}U")
-                lines.append(f"  {upnl_icon} 浮盈: {upnl:+.2f}U")
-                lines.append(f"  净值: {equity:.2f}U")
-                spot = {k: v for k, v in b.get('spot', {}).items() if v >= 1}
-                if spot:
-                    lines.append("\n<b>现货</b>")
-                    for asset, amt in sorted(spot.items(), key=lambda x: -x[1]):
-                        lines.append(f"  {asset}: {amt:.4f}")
-                        if asset in stables:
-                            total += amt
-                funding = {k: v for k, v in b.get('funding', {}).items() if v >= 1}
-                if funding:
-                    lines.append("\n<b>资金</b>")
-                    for asset, amt in sorted(funding.items(), key=lambda x: -x[1]):
-                        lines.append(f"  {asset}: {amt:.4f}")
-                        if asset in stables:
-                            total += amt
-                lines.append(f"\n━━━━━━━━━━━━━━━━━━━━")
-                lines.append(f"<b>合计: {total:.2f}U</b>")
-            await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+            from shared.query_cards import render_all_wallets_card
+            card = render_all_wallets_card(_ACC_ROLE)
+            if len(card) > 4000:
+                card = card[:4000] + "\n..."
+            await update.message.reply_text(card, parse_mode=ParseMode.HTML)
+        except PermissionError as e:
+            await update.message.reply_text(f"⛔ {e}")
         except Exception as e:
+            logger.error(f"/2 余额查询失败: {e}", exc_info=True)
             await update.message.reply_text(f"❌ 查询失败: {e}")
 
     async def _do_transfer(update, ctx, transfer_type, desc):
@@ -732,17 +661,21 @@ def create_and_run_bot(env_path, claude_add_dir=None):
                 pass
 
     async def post_init(app):
-        base_cmds = [
-            BotCommand("start","状态"), BotCommand("help","帮助"),
-            BotCommand("model","切换模型"),
-            BotCommand("mode","查看状态"), BotCommand("status","四Bot服务状态"),
-            BotCommand("ping","心跳"), BotCommand("log","查看日志"),
-            BotCommand("restart","重启本Bot"), BotCommand("stop","关闭本Bot"),
-        ]
+        # 数字快捷键排最前
+        num_cmds = []
         if bot_dir == "maomao":
-            base_cmds += [
-                BotCommand("1","查询所有持仓"),
-                BotCommand("2","查询各账户余额"),
+            num_cmds = [
+                BotCommand("1","全账户持仓"),
+                BotCommand("2","全账户余额"),
+                BotCommand("all","全账户净值汇总"),
+                BotCommand("pos1","币安1 持仓"),
+                BotCommand("bal1","币安1 余额"),
+                BotCommand("pos2","币安2 持仓"),
+                BotCommand("bal2","币安2 余额"),
+                BotCommand("pos3","币安3 持仓（李红兵）"),
+                BotCommand("bal3","币安3 余额（李红兵）"),
+                BotCommand("pos4","币安4 持仓（专攻组六）"),
+                BotCommand("bal4","币安4 余额（专攻组六）"),
                 BotCommand("3","现货→合约 /3 <金额>"),
                 BotCommand("4","合约→现货 /4 <金额>"),
                 BotCommand("5","现货→资金 /5 <金额>"),
@@ -752,14 +685,27 @@ def create_and_run_bot(env_path, claude_add_dir=None):
                 BotCommand("9","系统快照 /9 [条数]"),
             ]
         elif bot_dir == "tiantian":
-            base_cmds += [
-                BotCommand("1","查询持仓"),
-                BotCommand("2","查询余额"),
+            num_cmds = [
+                BotCommand("1","全账户持仓"),
+                BotCommand("2","全账户余额"),
+                BotCommand("pos2","币安2 持仓"),
+                BotCommand("bal2","币安2 余额"),
+                BotCommand("pos3","币安3 持仓（李红兵）"),
+                BotCommand("bal3","币安3 余额（李红兵）"),
+                BotCommand("pos4","币安4 持仓（专攻组六）"),
+                BotCommand("bal4","币安4 余额（专攻组六）"),
                 BotCommand("3","现货→合约 /3 <金额>"),
                 BotCommand("4","合约→现货 /4 <金额>"),
                 BotCommand("5","现货→资金 /5 <金额>"),
                 BotCommand("6","资金→现货 /6 <金额>"),
             ]
+        base_cmds = num_cmds + [
+            BotCommand("start","状态"), BotCommand("help","帮助"),
+            BotCommand("model","切换模型"),
+            BotCommand("mode","查看状态"), BotCommand("status","四Bot服务状态"),
+            BotCommand("ping","心跳"), BotCommand("log","查看日志"),
+            BotCommand("restart","重启本Bot"), BotCommand("stop","关闭本Bot"),
+        ]
         await app.bot.set_my_commands(base_cmds)
         state = load_state(bot_dir)
         logger.info(f"{bot_name} v4.3 | Claude Code代理 | {state['model']}")
@@ -789,11 +735,24 @@ def create_and_run_bot(env_path, claude_add_dir=None):
         app.add_handler(CommandHandler("4", cmd_transfer_4))
         app.add_handler(CommandHandler("5", cmd_transfer_5))
         app.add_handler(CommandHandler("6", cmd_transfer_6))
+    # 多账户快捷卡片：/all /pos1-/pos4 /bal1-/bal4（按 role 过滤）
+    if bot_dir in ("maomao", "tiantian"):
+        app.add_handler(CommandHandler("all", cmd_all_card))
+        app.add_handler(CommandHandler("pos1", cmd_pos1))
+        app.add_handler(CommandHandler("pos2", cmd_pos2))
+        app.add_handler(CommandHandler("pos3", cmd_pos3))
+        app.add_handler(CommandHandler("pos4", cmd_pos4))
+        app.add_handler(CommandHandler("bal1", cmd_bal1))
+        app.add_handler(CommandHandler("bal2", cmd_bal2))
+        app.add_handler(CommandHandler("bal3", cmd_bal3))
+        app.add_handler(CommandHandler("bal4", cmd_bal4))
     if bot_dir == "maomao":
         app.add_handler(CommandHandler("7", cmd_trade_log))
         app.add_handler(CommandHandler("8", cmd_bot_log))
         app.add_handler(CommandHandler("9", cmd_sys_log))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_text))
+    from shared.message_buffer import make_buffered_handler
+    buffered_handle_text = make_buffered_handler(handle_text, admin_id=admin_id)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, buffered_handle_text))
     app.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, handle_photo))
     from telegram.ext import CallbackQueryHandler
     app.add_handler(CallbackQueryHandler(handle_callback))

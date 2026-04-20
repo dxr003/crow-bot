@@ -75,14 +75,17 @@ def _load_config() -> dict:
 
 
 def resolve_name(name: str) -> str:
-    """把别名（main / lhb / 李红兵 等）解析成正式账户名（币安1 / 币安3）"""
+    """把别名（main / lhb / 李红兵 等）解析成正式账户名（币安1 / 币安3）。
+    英文别名大小写不敏感（main/MAIN/Main 都接），正式中文名精确匹配。"""
     cfg = _load_config()
     accounts = cfg.get("accounts", {})
     if name in accounts:
         return name
+    name_lower = name.lower() if isinstance(name, str) else None
     for official, meta in accounts.items():
-        if name in (meta.get("alias") or []):
-            return official
+        for a in meta.get("alias") or []:
+            if a == name or (name_lower and isinstance(a, str) and a.lower() == name_lower):
+                return official
     raise KeyError(f"未知账户: {name}")
 
 
