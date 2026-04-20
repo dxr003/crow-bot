@@ -26,6 +26,15 @@ TRACK_HOURS = 6
 
 _SCHEMA_DEFAULTS = {"tracking": list, "history": list}
 
+# 退出原因常量：reason → (日报长标签, 状态卡短标签)
+REJECT_REASONS: dict[str, tuple[str, str]] = {
+    "score_low": ("⚖️ 评分不够", "评分低"),
+    "over_20":   ("🚀 超20%不追", ">20%"),
+    "under_5":   ("📉 跌回退出", "<5%"),
+    "veto":      ("🤖 AI否决", "AI否决"),
+    "other":     ("其他", "其他"),
+}
+
 
 def _load() -> dict:
     """读文件并保证 schema 完整（文件缺/坏/缺 key 都自愈为默认空容器）。"""
@@ -86,7 +95,6 @@ def record_exit(symbol: str, reason: str, score: int,
         "peak_price": exit_price,
         "peak_time": now,
         "last_price": exit_price,
-        "samples": 0,
     }
     data["tracking"].append(record)
     _save(data)
@@ -133,7 +141,6 @@ def update_peaks(live_prices: dict):
         price = live_prices.get(symbol, 0)
         if price > 0:
             rec["last_price"] = price
-            rec["samples"] += 1
             if price > rec["peak_price"]:
                 rec["peak_price"] = price
                 rec["peak_time"] = now
@@ -180,31 +187,20 @@ def get_daily_report(date_str: str = "") -> str:
     if not history:
         return ""
 
-    # 按退出原因分组
-    by_reason = {
-        "score_low": [],
-        "over_20": [],
-        "under_5": [],
-        "veto": [],
-        "other": [],
-    }
+    # 按退出原因分组（reason → 记录列表）
+    by_reason: dict[str, list[dict]] = {r: [] for r in REJECT_REASONS}
     for rec in history[-50:]:
         r = rec.get("reason", "other")
         by_reason.setdefault(r, []).append(rec)
 
     lines = ["\n📋 <b>拒绝回顾（过去24h退出未买入）</b>"]
 
-    reason_labels = {
-        "score_low": "⚖️ 评分不够",
-        "over_20": "🚀 超20%不追",
-        "under_5": "📉 跌回退出",
-        "veto": "🤖 AI否决",
-    }
-
     total = 0
     missed = 0
 
-    for reason, label in reason_labels.items():
+    for reason, (label, _short) in REJECT_REASONS.items():
+        if reason == "other":
+            continue
         items = by_reason.get(reason, [])
         if not items:
             continue
@@ -247,8 +243,8 @@ def get_daily_report(date_str: str = "") -> str:
         big_miss = sum(1 for r in over_20 if r.get("peak_gain_from_exit", 0) >= 20)
         if big_miss > 0:
             lines.append(
-                f"⚠️ 超20%退出的币中，{big_miss}个继续涨了20%+，"
-                f"建议观察是否放宽上限"
+                f"⚠️ 超20%退出的币中，{big_miss}个继续涨了20%+"
+                f"（平均峰值 +{avg_peak:.1f}%），建议观察是否放宽上限"
             )
 
     score_low = by_reason.get("score_low", [])
@@ -275,8 +271,8 @@ def get_tracking_status() -> str:
     lines = [f"\n🔍 <b>拒绝追踪中（{len(tracking)}个）</b>"]
     for rec in tracking:
         coin = rec["symbol"].replace("USDT", "")
-        reason = {"score_low": "评分低", "over_20": ">20%", "under_5": "<5%",
-                  "veto": "AI否决"}.get(rec["reason"], rec["reason"])
+        reason_meta = REJECT_REASONS.get(rec["reason"])
+        reason = reason_meta[1] if reason_meta else rec["reason"]
         elapsed = (now - rec["exit_time"]) / 3600
         peak_gain = 0
         if rec["exit_price"] > 0:
