@@ -1194,7 +1194,14 @@ def _settle_signals(state: dict, now: float):
             state.setdefault("signal_history", []).append(sig)
             if len(state["signal_history"]) > 50:
                 state["signal_history"] = state["signal_history"][-50:]
-            logger.info(f"[虚拟结算] {symbol} → {settled} 入场:{entry_price} 现价:{live_price}")
+            # 虚拟结算后写冷却，避免刚平就被海选回来（与 bull_trailing 真实结算路径对齐）
+            cd_h = {"success": 12, "failed": 24, "expired": 6}.get(settled, 6)
+            state.setdefault("cooldowns", {})[symbol] = {
+                "expire_at": now + cd_h * 3600,
+                "type": f"v{settled}",
+                "last_entry_price": entry_price,
+            }
+            logger.info(f"[虚拟结算] {symbol} → {settled} 入场:{entry_price} 现价:{live_price} 冷却{cd_h}h")
         else:
             remaining.append(sig)
 
