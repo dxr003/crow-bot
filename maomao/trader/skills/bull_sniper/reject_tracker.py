@@ -24,13 +24,24 @@ DATA_FILE = Path(__file__).parent / "data" / "reject_tracker.json"
 TRACK_HOURS = 6
 
 
+_SCHEMA_DEFAULTS = {"tracking": list, "history": list}
+
+
 def _load() -> dict:
+    """读文件并保证 schema 完整（文件缺/坏/缺 key 都自愈为默认空容器）。"""
+    data: dict = {}
     if DATA_FILE.exists():
         try:
-            return json.loads(DATA_FILE.read_text())
-        except Exception:
-            pass
-    return {"tracking": [], "history": []}
+            data = json.loads(DATA_FILE.read_text()) or {}
+        except Exception as e:
+            logger.warning(f"[reject_tracker] 读文件失败，重置: {e}")
+            data = {}
+    if not isinstance(data, dict):
+        data = {}
+    for key, factory in _SCHEMA_DEFAULTS.items():
+        if not isinstance(data.get(key), factory):
+            data[key] = factory()
+    return data
 
 
 def _save(data: dict):
@@ -95,7 +106,7 @@ def update_peaks(live_prices: dict):
         return
 
     now = time.time()
-    changed = False
+    needs_save = False  # 仅在峰值变动或追踪完成时落盘，避免高频 IO
     still_tracking = []
 
     for rec in data["tracking"]:
@@ -109,7 +120,7 @@ def update_peaks(live_prices: dict):
             data["history"].append(rec)
             if len(data["history"]) > 200:
                 data["history"] = data["history"][-200:]
-            changed = True
+            needs_save = True
             logger.info(
                 f"[追踪完成] {symbol} "
                 f"退出涨幅:{rec['pool_gain_pct']:+.1f}% "
@@ -126,12 +137,12 @@ def update_peaks(live_prices: dict):
             if price > rec["peak_price"]:
                 rec["peak_price"] = price
                 rec["peak_time"] = now
-            changed = True
+                needs_save = True
 
         still_tracking.append(rec)
 
     data["tracking"] = still_tracking
-    if changed:
+    if needs_save:
         _save(data)
 
 
