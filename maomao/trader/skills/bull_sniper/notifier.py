@@ -3,19 +3,31 @@ notifier.py — 交易阻击推送模块 v2.0
 统一路由：玄玄(乌鸦私信) / 贝贝(群组) / 天天(震天响)
 """
 import html as html_mod
+import logging
 import os
 import time
 import requests
 import yaml
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from binance.um_futures import UMFutures
 
+logger = logging.getLogger("bull_notifier")
+
 BB_BOT_TOKEN      = os.getenv("PUSH_BOT_TOKEN", "")
 TT_BOT_TOKEN      = os.getenv("TT_BOT_TOKEN", "")
-ADMIN_ID          = os.getenv("ADMIN_ID", "509640925")
+ADMIN_ID          = os.getenv("ADMIN_ID", "")
 TT_CHAT_ID        = os.getenv("TT_CHAT_ID", "")
-BROADCAST_CHAT_ID = os.getenv("BROADCAST_CHAT_ID", "-1001150897644")
+BROADCAST_CHAT_ID = os.getenv("BROADCAST_CHAT_ID", "")
+
+# 关键 chat_id 缺失时启动期告警，避免 silent 走默认值推到错误目标
+if not ADMIN_ID:
+    ADMIN_ID = "509640925"
+    logger.warning("[notifier] ADMIN_ID 未配置，使用默认 509640925")
+if not BROADCAST_CHAT_ID:
+    BROADCAST_CHAT_ID = "-1001150897644"
+    logger.warning("[notifier] BROADCAST_CHAT_ID 未配置，使用默认 -1001150897644")
 
 _cfg_cache = {}
 _cfg_mtime = 0
@@ -29,8 +41,8 @@ def _load_notify_cfg():
         if mt != _cfg_mtime:
             _cfg_cache = yaml.safe_load(cfg_path.read_text()).get("bull_sniper", {})
             _cfg_mtime = mt
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"[notifier] 配置加载失败: {e}")
     return _cfg_cache
 
 
@@ -44,9 +56,9 @@ def _tg_send(token: str, chat_id: str, text: str):
             timeout=10,
         )
         if resp.status_code != 200:
-            print(f"[notifier] 推送失败: {resp.text[:200]}")
+            logger.warning(f"[notifier] 推送失败: {resp.text[:200]}")
     except Exception as e:
-        print(f"[notifier] 推送异常: {e}")
+        logger.warning(f"[notifier] 推送异常: {e}")
 
 
 def _send_admin(text: str):
@@ -64,6 +76,10 @@ def _send_tt(text: str):
     _tg_send(TT_BOT_TOKEN, TT_CHAT_ID, text)
 
 
+# 推送并行线程池：最多 3 路（admin / tt / bb）
+_push_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="notifier-push")
+
+
 def route(event: str, text: str, text_group: str = None):
     """
     统一事件路由（v2.0）
@@ -76,20 +92,26 @@ def route(event: str, text: str, text_group: str = None):
     g = text_group or text
     group_on = _load_notify_cfg().get("group_notify", True)
 
+    jobs = []
     if event in ("open_success", "open_fail"):
-        _send_admin(text)
-        _send_tt(text)
+        jobs.extend([(_send_admin, text), (_send_tt, text)])
         if group_on:
-            _send_bb(g)
+            jobs.append((_send_bb, g))
     elif event == "position_gone":
-        _send_admin(text)
-        _send_tt(text)
+        jobs.extend([(_send_admin, text), (_send_tt, text)])
     elif event in ("tp_activated", "tp_closed", "sl_closed", "forced_close",
                    "order_fail"):
-        _send_admin(text)
-        _send_tt(text)
+        jobs.extend([(_send_admin, text), (_send_tt, text)])
         if group_on:
-            _send_bb(g)
+            jobs.append((_send_bb, g))
+
+    # 3 路推送并行（fire-and-forget 风格，等全部完成再返回）
+    futures = [_push_pool.submit(fn, msg) for fn, msg in jobs]
+    for f in futures:
+        try:
+            f.result(timeout=15)
+        except Exception as e:
+            logger.warning(f"[notifier] 并行推送异常: {e}")
 
 
 def _fmt_vol(vol: float) -> str:
@@ -130,7 +152,8 @@ def _fetch_prices(symbols: list) -> dict:
         resp = requests.get("https://fapi.binance.com/fapi/v1/ticker/price", timeout=8)
         resp.raise_for_status()
         return {t["symbol"]: float(t["price"]) for t in resp.json() if t["symbol"] in symbols}
-    except Exception:
+    except Exception as e:
+        logger.warning(f"[notifier] 拉取价格失败: {e}")
         return {}
 
 
@@ -142,6 +165,7 @@ def _fetch_position_risk(symbols: list) -> dict:
         key = os.getenv("BN2_API_KEY", "") or os.getenv("BINANCE_API_KEY", "")
         secret = os.getenv("BN2_API_SECRET", "") or os.getenv("BINANCE_API_SECRET", "")
         if not key or not secret:
+            logger.warning("[notifier] BN2/BINANCE API key 未配置，跳过 position_risk 拉取")
             return {}
         client = UMFutures(key=key, secret=secret)
         data = client.get_position_risk()
@@ -157,7 +181,8 @@ def _fetch_position_risk(symbols: list) -> dict:
                     "margin": float(p.get("isolatedWallet", 0)),
                 }
         return result
-    except Exception:
+    except Exception as e:
+        logger.warning(f"[notifier] 拉取持仓风险失败: {e}")
         return {}
 
 
@@ -287,6 +312,33 @@ def send_status_card(state: dict):
     watchpool = state.get("watchpool", {})
     signals = state.get("signals", [])
     stats = state.get("stats", {})
+    positions = state.get("positions", {})
+
+    # 一次性读配置（避免后面多次打开文件）
+    cfg = _load_notify_cfg()
+    mode_str = str(cfg.get("mode", "off")).lower()
+    max_hist = int(cfg.get("max_history_per_group", 10))
+
+    # 并行拉取：position_risk（持仓账户）+ prices（持仓∪信号的全量 symbols）
+    pos_symbols = list(positions.keys())
+    sig_symbols = [s["symbol"] for s in signals] if signals else []
+    all_price_symbols = list(set(pos_symbols) | set(sig_symbols))
+
+    pos_risk: dict = {}
+    live_prices: dict = {}
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="notifier-card") as pool:
+        f_risk = pool.submit(_fetch_position_risk, pos_symbols) if pos_symbols else None
+        f_px = pool.submit(_fetch_prices, all_price_symbols) if all_price_symbols else None
+        if f_risk:
+            try:
+                pos_risk = f_risk.result(timeout=12)
+            except Exception as e:
+                logger.warning(f"[notifier] 并行拉取持仓风险失败: {e}")
+        if f_px:
+            try:
+                live_prices = f_px.result(timeout=12)
+            except Exception as e:
+                logger.warning(f"[notifier] 并行拉取价格失败: {e}")
 
     lines = [
         f"⚡️ <b>小刃 · 交易阻击信号预警 · {time.strftime('%m-%d %H:%M')}</b>",
@@ -326,16 +378,13 @@ def send_status_card(state: dict):
         lines.append("\n👁 <b>当前无观察目标</b>")
 
     # ── 持仓中 ──
-    positions = state.get("positions", {})
     if positions:
         lines.append(f"\n💰 <b>持仓中（{len(positions)}个）</b>")
         lines.append("<blockquote>")
-        pos_symbols = list(positions.keys())
-        pos_risk = _fetch_position_risk(pos_symbols)
         for sym, pos in positions.items():
             entry_p = pos.get("entry_price", 0)
             info = pos_risk.get(sym, {})
-            live_p = info.get("mark", 0) or _fetch_prices([sym]).get(sym, 0)
+            live_p = info.get("mark", 0) or live_prices.get(sym, 0)
             leverage = info.get("leverage", 5)
             upnl = info.get("upnl", 0)
             amt = info.get("amt", 0)
@@ -366,10 +415,7 @@ def send_status_card(state: dict):
     # ── 信号记录（含实时价格+浮盈） ──
     recent_signals = list(signals) if signals else []
     if recent_signals:
-        # 批量拉实时价格
-        sig_symbols = [s["symbol"] for s in recent_signals]
-        live_prices = _fetch_prices(sig_symbols)
-
+        # live_prices 已在入口并行拉取
         lines.append(f"\n✅ <b>已触发做多信号（{len(recent_signals)}个）</b>")
         for sig in reversed(recent_signals):
             action = sig.get("action", "")
@@ -434,7 +480,7 @@ def send_status_card(state: dict):
                 if not group:
                     continue
                 lines.append(f"{icon} <b>{label}（{len(group)}）</b>")
-                shown = list(reversed(group))[:5]
+                shown = list(reversed(group))[:max_hist]
                 for s in shown:
                     entry_p = s.get("entry_price", 0)
                     exit_p = s.get("exit_price", 0)
@@ -446,8 +492,8 @@ def send_status_card(state: dict):
                         f"出<code>{_fmt_price(exit_p)}</code> "
                         f"{pnl_str}"
                     )
-                if len(group) > 5:
-                    lines.append(f"  <i>…还有 {len(group) - 5} 条</i>")
+                if len(group) > max_hist:
+                    lines.append(f"  <i>…还有 {len(group) - max_hist} 条</i>")
             lines.append("</blockquote>")
 
         _render_group("📋 <b>真实交易结算</b>", real_hist)
@@ -464,10 +510,9 @@ def send_status_card(state: dict):
         f"已触发信号 {sig_count}  结算 {settled_count}"
     )
     lines.append("━━━━━━━━━━━━━━━━━━━━")
-    _mode = str(_load_notify_cfg().get("mode", "off")).lower()
-    if _mode == "auto":
+    if mode_str == "auto":
         lines.append("📡 当前 <b>自动开仓模式</b> · 信号触发即下单")
-    elif _mode == "alert":
+    elif mode_str == "alert":
         lines.append("🔔 当前 <b>告警模式</b> · 仅推送不下单")
     else:
         lines.append("👁 当前 <b>纯观察模式</b> · 仅记录评分，不下单")
@@ -492,9 +537,9 @@ def send_trade_report(signal: dict, buy_result: dict, analyze_result: dict):
     score = signal.get("score")
 
     if action == "signal_fast":
-        channel = "⚡ 快速通道（8-10%）"
+        channel = "⚡ 快速通道"
     elif action == "signal_scored":
-        channel = "🤖 AI决策通道（10-20%）"
+        channel = "🤖 AI决策通道"
     else:
         channel = f"📌 {action}"
 
@@ -596,9 +641,7 @@ def send_trade_report(signal: dict, buy_result: dict, analyze_result: dict):
         f"<blockquote>{analyze_block}</blockquote>\n\n"
         f"<b>3️⃣ 市场数据</b>\n"
         f"<blockquote>{market_block}</blockquote>\n\n"
-        f"<b>4️⃣ 执行结果</b>\n"
-        f"<blockquote>{exec_block}</blockquote>\n"
-        f"━━━━━━━━━━━━━━━━━━━━"
+        f"<blockquote>{exec_block}</blockquote>"
     )
 
     # ── 精简版（→天天 + 群组） ──
@@ -609,9 +652,7 @@ def send_trade_report(signal: dict, buy_result: dict, analyze_result: dict):
         f"触发  {channel}\n"
         f"24h涨幅: +{signal.get('gain_pct', 0)}%  "
         f"触发价: {_fmt_price(signal.get('cur_price', 0))}\n\n"
-        f"执行结果\n"
-        f"<blockquote>{exec_block}</blockquote>\n"
-        f"━━━━━━━━━━━━━━━━━━━━"
+        f"<blockquote>{exec_block}</blockquote>"
     )
 
     # 直接分发，不走route()
