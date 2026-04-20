@@ -209,12 +209,8 @@ def _fmt_price(price: float) -> str:
 
 # ── 即时推送：信号触发 ──
 
-def send_signal(signal: dict, watchpool_snapshot: list = None):
-    """
-    信号触发时立即推到群组
-    signal: scanner产出的信号字典
-    watchpool_snapshot: 当前观察池状态（可选，附在卡片下方）
-    """
+def send_signal(signal: dict):
+    """信号触发时立即推到群组"""
     symbol = signal["symbol"]
     entry_price = signal["entry_price"]
     cur_price = signal["cur_price"]
@@ -237,37 +233,10 @@ def send_signal(signal: dict, watchpool_snapshot: list = None):
         f"📌 距历史高点：<code>-{drop_ath:.1f}%</code>",
         f"⏱ 观察时长：<code>{elapsed:.0f}分钟</code>",
         "</blockquote>",
+        "",
+        "━━━━━━━━━━━━━━━━━━━━",
     ]
 
-    # 附加观察池快照
-    if watchpool_snapshot:
-        sorted_snap = sorted(watchpool_snapshot, key=lambda x: x.get("entered_at", 0))
-        lines.append("")
-        lines.append(f"👁 <b>观察中（{len(sorted_snap)}个）</b>")
-        lines.append("<blockquote>")
-        for idx, wp in enumerate(sorted_snap, 1):
-            gain_since = wp.get("gain_since_entry", 0)
-            _ep = wp.get("entry_price", 0)
-            _pp = wp.get("peak_price", _ep)
-            peak_gain = (_pp - _ep) / _ep * 100 if _ep > 0 else 0
-            enter_t = _fmt_enter_time(wp["entered_at"])
-            wp_elapsed = _fmt_elapsed(wp["entered_at"])
-            sign = "+" if gain_since >= 0 else ""
-            score = wp.get("last_score")
-            score_tag = f"  评分<code>{score}</code>" if score is not None else ""
-            sep = "\n" if idx > 1 else ""
-            lines.append(
-                f"{sep}<b>#{idx} {_coin(wp['symbol'])}</b>  "
-                f"池内<code>{sign}{gain_since:.1f}%</code>  "
-                f"峰<code>+{peak_gain:.1f}%</code>  "
-                f"<code>{_fmt_price(wp.get('cur_price', wp['entry_price']))}</code>\n"
-                f"   {enter_t}发现 · 量<code>{_fmt_vol(wp.get('volume_usdt', 0))}</code> · "
-                f"{wp_elapsed}{score_tag}"
-            )
-        lines.append("</blockquote>")
-
-    lines.append("")
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
     _mode = str(_load_notify_cfg().get("mode", "off")).lower()
     if _mode == "auto":
         lines.append("📡 当前 <b>自动开仓模式</b> · 信号触发即下单")
