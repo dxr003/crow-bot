@@ -89,30 +89,39 @@ def _send_tt(text: str):
 _push_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="notifier-push")
 
 
+# event → 发送目标元组。bb 目标受 group_notify 开关控制。
+# 新增事件在这里加一行即可，不用动 route() 逻辑。
+_EVENT_TARGETS: dict[str, tuple[str, ...]] = {
+    "open_success":  ("admin", "tt", "bb"),
+    "open_fail":     ("admin", "tt", "bb"),
+    "tp_activated":  ("admin", "tt", "bb"),
+    "tp_closed":     ("admin", "tt", "bb"),
+    "sl_closed":     ("admin", "tt", "bb"),
+    "forced_close":  ("admin", "tt", "bb"),
+    "order_fail":    ("admin", "tt", "bb"),
+    "position_gone": ("admin", "tt"),
+}
+
+
 def route(event: str, text: str, text_group: str = None):
-    """
-    统一事件路由（v2.0）
-    open_success/open_fail        → 玄玄 + 天天 + 群组(可关)
-    tp_activated/tp_closed        → 贝贝 + 天天 + 群组(可关)
-    sl_closed/forced_close        → 贝贝 + 天天 + 群组(可关)
-    order_fail                    → 贝贝 + 天天 + 群组(可关)
-    position_gone                 → 贝贝 + 天天（不进群组）
-    """
+    """统一事件路由（v2.1 表驱动）。新增事件改 _EVENT_TARGETS 即可。
+    bb 走 text_group（或 fallback 到 text），受 group_notify 开关门控。"""
+    targets = _EVENT_TARGETS.get(event)
+    if not targets:
+        logger.warning(f"[notifier] 未知 event: {event}")
+        return
+
     g = text_group or text
     group_on = _load_notify_cfg().get("group_notify", True)
 
+    _SENDERS = {"admin": _send_admin, "bb": _send_bb, "tt": _send_tt}
+    _MSGS = {"admin": text, "tt": text, "bb": g}
+
     jobs = []
-    if event in ("open_success", "open_fail"):
-        jobs.extend([(_send_admin, text), (_send_tt, text)])
-        if group_on:
-            jobs.append((_send_bb, g))
-    elif event == "position_gone":
-        jobs.extend([(_send_admin, text), (_send_tt, text)])
-    elif event in ("tp_activated", "tp_closed", "sl_closed", "forced_close",
-                   "order_fail"):
-        jobs.extend([(_send_admin, text), (_send_tt, text)])
-        if group_on:
-            jobs.append((_send_bb, g))
+    for t in targets:
+        if t == "bb" and not group_on:
+            continue
+        jobs.append((_SENDERS[t], _MSGS[t]))
 
     # 3 路推送并行（fire-and-forget 风格，等全部完成再返回）
     futures = [_push_pool.submit(fn, msg) for fn, msg in jobs]
