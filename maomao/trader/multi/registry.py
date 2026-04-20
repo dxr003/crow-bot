@@ -35,7 +35,8 @@ _cache: dict[str, Any] = {
 # ══════════════════════════════════════════
 
 def _load_env_file(path: str) -> None:
-    """把 env_file 里的 key=value 合并到 os.environ（只加载一次）"""
+    """把 env_file 里的 key=value 注入 os.environ（每 yaml 热重载后各路径重新加载一次）。
+    注入采用强赋值：_load_config 清 env_loaded 后本函数再跑能真正覆盖旧值，保证换 env_file 生效。"""
     if path in _cache["env_loaded"]:
         return
     p = Path(path)
@@ -46,7 +47,7 @@ def _load_env_file(path: str) -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         k, v = line.split("=", 1)
-        os.environ.setdefault(k.strip(), v.strip())
+        os.environ[k.strip()] = v.strip()
     _cache["env_loaded"].add(path)
 
 
@@ -56,15 +57,20 @@ def _load_env_file(path: str) -> None:
 
 def _load_config() -> dict:
     """读取 accounts.yaml，检查 mtime 变化触发热重载"""
-    if not CONFIG_PATH.exists():
+    try:
+        mtime = CONFIG_PATH.stat().st_mtime
+    except FileNotFoundError:
         raise FileNotFoundError(f"accounts.yaml 不存在: {CONFIG_PATH}")
-    mtime = CONFIG_PATH.stat().st_mtime
+    if mtime == _cache["mtime"]:
+        return _cache["config"]
     with _lock:
         if mtime != _cache["mtime"]:
             _cache["config"] = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
             _cache["mtime"] = mtime
-            _cache["futures_clients"].clear()  # 配置变了，清空 client 缓存
+            # 配置变了：client 缓存要重建；env_loaded 也清空，否则新 env_file 的 key 被旧值 setdefault 挡住
+            _cache["futures_clients"].clear()
             _cache["spot_clients"].clear()
+            _cache["env_loaded"].clear()
         return _cache["config"]
 
 

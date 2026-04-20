@@ -104,7 +104,8 @@ _hedge_cache: dict[str, bool] = {}
 
 
 def _is_hedge(client, account: str) -> bool:
-    """返回账户是否为双向持仓模式（dualSidePosition=True）。结果缓存。"""
+    """返回账户是否为双向持仓模式（dualSidePosition=True）。成功才缓存——
+    失败时不写 cache 防止首连抖动把 hedge 账户永久判成单向，导致后续下单漏 positionSide。"""
     if account in _hedge_cache:
         return _hedge_cache[account]
     with _cache_lock:
@@ -113,21 +114,25 @@ def _is_hedge(client, account: str) -> bool:
         try:
             r = client.get_position_mode()
             hedge = bool(r.get("dualSidePosition", False))
+            _hedge_cache[account] = hedge
+            return hedge
         except Exception as e:
-            logger.warning(f"[_is_hedge] {account} get_position_mode 失败，默认单向: {e}")
-            hedge = False
-        _hedge_cache[account] = hedge
-        return hedge
+            logger.warning(f"[_is_hedge] {account} get_position_mode 失败，本次按单向走，不缓存以便下次重试: {e}")
+            return False
 
 
 def clear_hedge_cache(role: str, account: str | None = None):
-    """切换持仓模式后清缓存。需 admin 权限（默认按币安1 校验，显式传 account 则按该账户校验）。"""
-    require(role, "admin", account or "币安1")
+    """切换持仓模式后清缓存。
+    account 指定：按该账户 admin 校验，只清该账户。
+    account=None（清空所有）：必须对每个已缓存的账户都有 admin 权限才允许全清。"""
     with _cache_lock:
         if account:
+            require(role, "admin", account)
             _hedge_cache.pop(resolve_name(account), None)
-        else:
-            _hedge_cache.clear()
+            return
+        for cached in list(_hedge_cache.keys()):
+            require(role, "admin", cached)
+        _hedge_cache.clear()
 
 
 def _pos_side_for_open(side: str) -> str:
@@ -270,19 +275,23 @@ def open_market(role: str, account: str, symbol: str, side: str,
         return {"error": f"非法方向: {side}（应为 BUY/SELL）"}
 
     c = get_futures_client(account)
-    hedge = _is_hedge(c, account)
 
-    # 4 个独立 REST 并行：margin_mode / leverage / filters / mark_price
-    with ThreadPoolExecutor(max_workers=4) as ex:
+    # 5 个独立 REST 并行：margin_mode / leverage / filters / mark_price / position_mode
+    with ThreadPoolExecutor(max_workers=5) as ex:
         f_mm = ex.submit(_set_margin_mode, c, symbol, margin_type)
         f_lv = ex.submit(_set_leverage, c, symbol, leverage)
         f_ft = ex.submit(_get_filters, c, symbol)
         f_mp = ex.submit(_mark_price, c, symbol)
+        f_hg = ex.submit(_is_hedge, c, account)
 
     lev_res = f_lv.result()
     if lev_res.get("error"):
         return {"error": f"设置杠杆失败: {lev_res['error']}"}
-    f_mm.result()  # 失败仅返回 dict，不抛
+    mm_res = f_mm.result()
+    if mm_res.get("error"):
+        # marginType 切换失败：已有持仓 / 同 margin 已设（-4046 在 _set_margin_mode 内转 ok）
+        # 其它情况（-4048 持仓中无法改 marginType 等）不中止下单，但记日志，避免保证金模式误判
+        logger.warning(f"[{account}] {symbol} marginType→{margin_type} 未切换成功，继续下单: {mm_res['error']}")
     try:
         flt = f_ft.result()
     except Exception as e:
@@ -291,6 +300,7 @@ def open_market(role: str, account: str, symbol: str, side: str,
         price = f_mp.result()
     except Exception as e:
         return {"error": f"获取标记价失败: {e}"}
+    hedge = f_hg.result()
 
     # 计算数量
     notional = margin * leverage
@@ -368,9 +378,15 @@ def close_market(role: str, account: str, symbol: str,
     }
 
 
+_TRIGGER_KIND = {
+    "stop": ("STOP_MARKET", "stopPrice"),
+    "tp":   ("TAKE_PROFIT_MARKET", "tpPrice"),
+}
+
+
 def _place_close_trigger(role: str, account: str, symbol: str,
                           trigger_price: float, direction: str,
-                          *, order_type: str, price_field: str) -> dict:
+                          kind: str) -> dict:
     """止损/止盈共用实现：方向解析 + tickSize 对齐 + hedge positionSide。"""
     require(role, "trade", account)
     account = resolve_name(account)
@@ -384,6 +400,7 @@ def _place_close_trigger(role: str, account: str, symbol: str,
     else:
         return {"error": f"非法方向: {direction}"}
 
+    order_type, price_field = _TRIGGER_KIND[kind]
     flt = _get_filters(c, symbol)
     trigger_price = _fix(trigger_price, flt["tickSize"])
 
@@ -406,19 +423,13 @@ def place_stop_loss(role: str, account: str, symbol: str,
 
     direction: 多/long/BUY → 保护多单；空/short/SELL → 保护空单。
     """
-    return _place_close_trigger(
-        role, account, symbol, stop_price, direction,
-        order_type="STOP_MARKET", price_field="stopPrice",
-    )
+    return _place_close_trigger(role, account, symbol, stop_price, direction, "stop")
 
 
 def place_take_profit(role: str, account: str, symbol: str,
                       tp_price: float, direction: str) -> dict:
     """挂止盈单（TAKE_PROFIT_MARKET, closePosition）。"""
-    return _place_close_trigger(
-        role, account, symbol, tp_price, direction,
-        order_type="TAKE_PROFIT_MARKET", price_field="tpPrice",
-    )
+    return _place_close_trigger(role, account, symbol, tp_price, direction, "tp")
 
 
 def cancel_all(role: str, account: str, symbol: str) -> dict:

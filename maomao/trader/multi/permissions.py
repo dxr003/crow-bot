@@ -25,7 +25,12 @@ CONFIG_PATH = Path(__file__).parent / "permissions.yaml"
 _lock = threading.Lock()
 _cache: dict[str, Any] = {"mtime": 0, "config": {}}
 
-VALID_ACTIONS = {"query", "trade", "admin"}
+ACTION_META: dict[str, tuple[str, str]] = {
+    "query": ("🔍", "查询"),
+    "trade": ("💰", "执行"),
+    "admin": ("⚙️", "配置"),
+}
+VALID_ACTIONS = set(ACTION_META)
 
 
 def _load_config() -> dict:
@@ -99,11 +104,9 @@ def list_role_summary() -> str:
     for role, rcfg in (cfg.get("roles") or {}).items():
         desc = rcfg.get("description", "")
         lines.append(f"\n<b>{role}</b> — {desc}")
-        for act in ("query", "trade", "admin"):
+        for act, (icon, name_cn) in ACTION_META.items():
             rules = rcfg.get(act, [])
             allowed = [a for a in accounts if _match(rules, a)]
-            icon = {"query": "🔍", "trade": "💰", "admin": "⚙️"}[act]
-            name_cn = {"query": "查询", "trade": "执行", "admin": "配置"}[act]
             if not allowed:
                 lines.append(f"  {icon} {name_cn}: —")
             else:

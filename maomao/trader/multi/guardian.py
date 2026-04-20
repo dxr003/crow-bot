@@ -30,7 +30,15 @@ from trader.multi._atomic import atomic_write_json
 
 logger = logging.getLogger(__name__)
 
-load_dotenv("/root/maomao/.env")
+_env_loaded = False
+
+
+def _ensure_env() -> None:
+    """懒加载 .env（ADMIN_ID / PUSH_BOT_TOKEN）——避免 import guardian 就做磁盘 I/O + 环境注入"""
+    global _env_loaded
+    if not _env_loaded:
+        load_dotenv("/root/maomao/.env")
+        _env_loaded = True
 
 # ── 配置 ──
 SERVICES = ["maomao", "damao", "tiantian", "baobao", "bull-sniper"]
@@ -105,6 +113,7 @@ def check_bull_sniper_heartbeat() -> dict:
 # ══════════════════════════════════════════
 
 def send_admin(text: str) -> bool:
+    _ensure_env()
     token = os.getenv("PUSH_BOT_TOKEN", "")
     admin = os.getenv("ADMIN_ID", "509640925")
     if not token:

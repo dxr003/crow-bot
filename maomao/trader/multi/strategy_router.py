@@ -12,12 +12,16 @@
 """
 from __future__ import annotations
 
+import json
+import logging
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from trader.multi.registry import list_accounts
+
+logger = logging.getLogger(__name__)
 
 
 # ─────────────── 策略注册表 ───────────────
@@ -57,19 +61,15 @@ STRATEGIES: dict[str, dict] = {
 
 # ─────────────── 读策略配置 ───────────────
 
-def _read_yaml(path: str | Path) -> dict:
-    p = Path(path)
-    if not p.exists():
-        return {}
-    try:
-        return yaml.safe_load(p.read_text()) or {}
-    except Exception:
-        return {}
-
-
 def get_bull_sniper_status() -> dict:
     """读 bull_sniper config.yaml，返回 mode/accounts 绑定"""
-    cfg = _read_yaml("/root/maomao/trader/skills/bull_sniper/config.yaml")
+    p = Path("/root/maomao/trader/skills/bull_sniper/config.yaml")
+    cfg: dict = {}
+    if p.exists():
+        try:
+            cfg = yaml.safe_load(p.read_text()) or {}
+        except Exception as e:
+            logger.warning(f"[strategy_router] bull_sniper config.yaml 解析失败: {e}")
     bs = cfg.get("bull_sniper", {})
     accounts = bs.get("accounts", {})
     return {
@@ -91,21 +91,19 @@ def get_short_attack_status() -> dict:
     if not state_path.exists():
         return {"strategy": "short_attack", "name": "做空阻击",
                 "enabled": False, "note": "state.json 不存在"}
-    import json
     try:
         st = json.loads(state_path.read_text())
-        return {
-            "strategy": "short_attack",
-            "name": "做空阻击",
-            "enabled": True,
-            "mode": "alert",  # 记忆里说"自动下单已禁用"
-            "accounts": {"币安1": {"enabled": True}},  # 老架构只绑币安1
-            "active_positions": len(st.get("positions", {})),
-            "monitoring": len(st.get("monitoring", {})),
-        }
     except Exception as e:
-        return {"strategy": "short_attack", "name": "做空阻击",
-                "error": str(e)}
+        return {"strategy": "short_attack", "name": "做空阻击", "error": str(e)}
+    return {
+        "strategy": "short_attack",
+        "name": "做空阻击",
+        "enabled": True,
+        "mode": "alert",
+        "accounts": {"币安1": {"enabled": True}},
+        "active_positions": len(st.get("positions", {})),
+        "monitoring": len(st.get("monitoring", {})),
+    }
 
 
 def get_all_status() -> list[dict]:
