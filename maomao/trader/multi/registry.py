@@ -20,7 +20,7 @@ import yaml
 
 CONFIG_PATH = Path(__file__).parent / "accounts.yaml"
 
-_lock = threading.Lock()
+_lock = threading.RLock()  # 可重入：get_futures_client 在 lock 内会再调 _load_config
 _cache: dict[str, Any] = {
     "mtime": 0,
     "config": {},
