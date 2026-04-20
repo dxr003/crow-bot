@@ -41,12 +41,18 @@ from _atomic import atomic_write_json
 
 
 def _load() -> dict:
-    if STATE_FILE.exists():
-        try:
-            return json.loads(STATE_FILE.read_text())
-        except Exception:
-            return {}
-    return {}
+    """读追踪状态，保证返回 dict（坏文件/非 dict 都自愈为空容器）。"""
+    if not STATE_FILE.exists():
+        return {}
+    try:
+        data = json.loads(STATE_FILE.read_text())
+    except Exception as e:
+        logger.warning(f"[trailing] 状态文件读失败，重置: {e}")
+        return {}
+    if not isinstance(data, dict):
+        logger.warning(f"[trailing] 状态文件格式非 dict，重置")
+        return {}
+    return data
 
 
 def _save(state: dict):
@@ -372,7 +378,6 @@ def check_positions(scanner_state: dict, cfg: dict = None) -> bool:
 
             # 判别每账户的仓位状态
             live_by_acct = {}   # acct -> pos dict（仍有仓）
-            gone_accts = []
             unknown = False
             for acct in active_accts:
                 p = acct_positions.get(acct)
@@ -382,8 +387,6 @@ def check_positions(scanner_state: dict, cfg: dict = None) -> bool:
                 bn_pos = p.get(symbol)
                 if bn_pos:
                     live_by_acct[acct] = bn_pos
-                else:
-                    gone_accts.append(acct)
 
             if unknown:
                 # 有账户拉失败，本轮不做决策（避免误判平仓）
