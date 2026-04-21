@@ -13,3 +13,5 @@
 ## 变更记录
 
 - 2026-04-21 | `settings.json` 新增 `env.BASH_DEFAULT_TIMEOUT_MS=600000` 和 `BASH_MAX_TIMEOUT_MS=600000` | bash 默认超时从 120s 拉到 10 分钟，解决 crow-review/长 API 扫描撞 120s 软超时问题 | 乌鸦明确「批」 | `3cae04d`
+- 2026-04-21 | `bot-backup/.git/hooks/pre-commit` 禁用（重命名 `.disabled`）| TG 刷屏，乌鸦要求「commit 日志不输出到贝贝，本地 git log 保留即可」 | 乌鸦明确「一起批准」 | 无 commit（.git 不进仓库）
+- 2026-04-21 | `scanner.py:1329` 健康报告频率 1h → 4h（触发时刻 00/04/08/12/16/20 :02）| 贝贝每小时自检刷屏 | 乌鸦明确「一起批准」 | `3f6abdc`
