@@ -1,18 +1,19 @@
-"""L0 Event Ledger — 事件账本基础设施。
+"""L0 Event Ledger — 动作账本基础设施。
 
-定位（乌鸦定稿 2026-04-21）：
-- 所有模块共用的事件记录 + 查询 + 成本结算底座
-- 与 shared/core.py 并列：shared/core.py 是代码层 L0，ledger 是事件层 L0
+定位（乌鸦 2026-04-21 v2.0 定稿）：
+- 所有模块共用的动作记录 + 查询底座
+- 只记动作，不记成本（cost_usd / token_usage / credit_cost 一律不落）
 - 强制 import 使用，不走 config 开关
 
 核心概念：
-- event(name, payload, trace_id=, parent_trace_id=, cost_usd=) 写一条账本
-- trace_id：信号→派发→执行 一单到底，场景 B 回溯靠它
+- event(name, payload, *, actor, target, result, error_msg, related_files) 写一条
+- trace_id：信号→派发→执行 一单到底，Q1 动作追溯 / Q3 信号回溯靠它
 - parent_trace_id：跨进程/跨模块父子链，未来聚合查询用
-- cost_usd：每笔付费调用记账，Nansen/OpenRouter 接入前必备
+- related_files：金路径 + failed 自动采集，Q2「改 A 忘 B」防御靠它
 
-物理存储：/root/logs/{system,exec,signal,dialog,external}/*.jsonl（JSONL + 轮转）
-物理路径保留 /root/logs/，因为 journalctl/tail/jq 等工具已经习惯这个位置。
+约束见 `/root/ledger/ledger_conventions.md`（改前需乌鸦明批）。
+
+物理存储：/root/logs/{exec,signal,risk,system,dialog,external,trace}/*.jsonl
 """
 from .core import (
     Ledger,
@@ -22,8 +23,40 @@ from .core import (
     current_trace_id,
     now_iso,
 )
-from .external import log_external_call
+from .external import (
+    log_api_call_started,
+    log_api_call_completed,
+    log_api_call_failed,
+)
 from .redact import scrub
+
+
+def log_order_placed(
+    *,
+    symbol: str,
+    account: str,
+    side: str,
+    qty: float,
+    order_type: str = "MARKET",
+    position_side: str | None = None,
+    result: str = "success",
+    trace_id: str | None = None,
+) -> str:
+    """最小闭环 helper：往 exec/orders.jsonl 写一条 order_placed。返回 trace_id。"""
+    tid = trace_id or current_trace_id() or new_trace_id()
+    payload = {"account": account, "side": side, "qty": qty, "order_type": order_type}
+    if position_side:
+        payload["position_side"] = position_side
+    get_ledger("exec", "orders").event(
+        "order_placed",
+        payload,
+        actor="executor",
+        target=symbol,
+        result=result,
+        trace_id=tid,
+    )
+    return tid
+
 
 __all__ = [
     "Ledger",
@@ -32,6 +65,9 @@ __all__ = [
     "set_trace_id",
     "current_trace_id",
     "now_iso",
-    "log_external_call",
+    "log_api_call_started",
+    "log_api_call_completed",
+    "log_api_call_failed",
+    "log_order_placed",
     "scrub",
 ]

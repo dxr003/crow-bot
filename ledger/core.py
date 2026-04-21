@@ -1,25 +1,26 @@
 """L0 事件账本核心。
 
-接口定型（乌鸦定稿 2026-04-21）：
+接口定型（2026-04-21 v2.0 动作账本）：
+
     from ledger import get_ledger, new_trace_id, set_trace_id
 
     lg = get_ledger("exec", "orders")
     set_trace_id(new_trace_id())
-    lg.event("open_market",
-             {"symbol": "BTCUSDT", "side": "BUY", "margin": 100},
-             parent_trace_id="sig_abc123",
-             cost_usd=0.0)
+    lg.event(
+        "order_placed",
+        {"account":"币安1","side":"BUY","qty":0.001,"order_type":"MARKET"},
+        actor="executor",
+        target="BTCUSDT",
+        result="pending",
+    )
 
 物理存储：/root/logs/{domain}/{event_file}.jsonl
-schema：
-    ts            ISO8601 + 08:00
-    trace_id      8 hex，进程内 ContextVar 自动传
-    parent_trace_id  可选，跨模块父子链
-    level         INFO/WARNING/ERROR
-    module        event_file 名
-    event         事件名（动词短语）
-    cost_usd      可选，付费调用记账
-    payload       事件具体字段（已经过脱敏）
+schema（见 ledger/ledger_conventions.md §4）：
+    必选：ts / trace_id / level / actor / event_type / target / result / payload
+    可选：parent_trace_id / error_msg / related_files
+    禁用：cost_usd / provider / model / token_usage / credit_cost / latency_ms
+
+兼容：历史 JSONL 可能含 cost_usd / module 字段，读取方按 §10 双字段兼容。
 """
 from __future__ import annotations
 
@@ -37,12 +38,23 @@ from .redact import scrub
 LOGS_ROOT = Path("/root/logs")
 BEIJING_TZ = timezone(timedelta(hours=8))
 
-DOMAINS = {"system", "exec", "signal", "dialog", "external"}
+DOMAINS = {"system", "exec", "signal", "risk", "dialog", "external", "trace"}
 
-DEFAULT_MAX_BYTES = 10 * 1024 * 1024
-DEFAULT_BACKUP = 5
-EXEC_MAX_BYTES = 15 * 1024 * 1024
-EXEC_BACKUP = 10
+_DEFAULT_CAPS = {
+    "exec":     (15 * 1024 * 1024, 10),
+    "signal":   (10 * 1024 * 1024, 5),
+    "risk":     (10 * 1024 * 1024, 5),
+    "system":   (10 * 1024 * 1024, 5),
+    "dialog":   (10 * 1024 * 1024, 5),
+    "external": (10 * 1024 * 1024, 5),
+    "trace":    (20 * 1024 * 1024, 10),
+}
+
+# 7 态 enum，见 conventions §4.1 v1.1
+VALID_RESULTS = {
+    "success", "failed", "timeout", "rate_limited",
+    "partial", "pending", "n-a",
+}
 
 _trace_id_var: ContextVar[str] = ContextVar("trace_id", default="")
 
@@ -70,24 +82,32 @@ class _JsonlFormatter(logging.Formatter):
         self.module_name = module_name
 
     def format(self, record: logging.LogRecord) -> str:
-        payload = getattr(record, "event_payload", None)
-        event = getattr(record, "event_name", record.msg)
+        event_type = getattr(record, "event_name", record.msg)
         trace = getattr(record, "trace_id", None) or current_trace_id() or ""
         parent = getattr(record, "parent_trace_id", None) or ""
-        cost = getattr(record, "cost_usd", None)
+        actor = getattr(record, "actor", None) or self.module_name
+        target = getattr(record, "target", "") or ""
+        result = getattr(record, "result", "n-a") or "n-a"
+        error_msg = getattr(record, "error_msg", None)
+        related_files = getattr(record, "related_files", None)
+        payload = getattr(record, "event_payload", None)
 
         obj: dict[str, Any] = {
             "ts": now_iso(),
             "trace_id": trace,
             "level": record.levelname,
-            "module": self.module_name,
-            "event": event,
+            "actor": actor,
+            "event_type": event_type,
+            "target": target,
+            "result": result,
+            "payload": scrub(payload) if payload is not None else {},
         }
         if parent:
             obj["parent_trace_id"] = parent
-        if cost is not None:
-            obj["cost_usd"] = cost
-        obj["payload"] = scrub(payload) if payload is not None else {}
+        if error_msg:
+            obj["error_msg"] = error_msg
+        if related_files:
+            obj["related_files"] = related_files
         return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
 
 
@@ -104,20 +124,34 @@ class Ledger:
         payload: dict[str, Any] | None = None,
         *,
         level: str = "INFO",
+        actor: str | None = None,
+        target: str = "",
+        result: str = "n-a",
         trace_id: str | None = None,
         parent_trace_id: str | None = None,
-        cost_usd: float | None = None,
+        error_msg: str | None = None,
+        related_files: list[str] | None = None,
     ) -> None:
+        if result not in VALID_RESULTS:
+            raise ValueError(
+                f"result 必须是 {VALID_RESULTS}，收到 {result!r}"
+            )
         extra: dict[str, Any] = {
             "event_name": name,
             "event_payload": payload or {},
+            "target": target,
+            "result": result,
         }
+        if actor:
+            extra["actor"] = actor
         if trace_id:
             extra["trace_id"] = trace_id
         if parent_trace_id:
             extra["parent_trace_id"] = parent_trace_id
-        if cost_usd is not None:
-            extra["cost_usd"] = cost_usd
+        if error_msg:
+            extra["error_msg"] = error_msg
+        if related_files:
+            extra["related_files"] = related_files
         self._logger.log(
             logging._nameToLevel.get(level, logging.INFO), name, extra=extra
         )
@@ -139,21 +173,18 @@ def get_ledger(
     max_bytes: int | None = None,
     backup_count: int | None = None,
 ) -> Ledger:
-    """拿一个 Ledger。同一 (domain, event_file) 返回单例，handler 不重复添加。
+    """拿一个 Ledger。同一 (domain, event_file) 返回同一 handler，不重复添加。
 
     Args:
-        domain: system / exec / signal / dialog / external
+        domain: system / exec / signal / risk / dialog / external / trace
         event_file: 文件名（不含扩展名）
     """
     if domain not in DOMAINS:
         raise ValueError(f"domain 必须是 {DOMAINS}，收到 {domain!r}")
 
-    if domain == "exec":
-        max_bytes = max_bytes or EXEC_MAX_BYTES
-        backup_count = backup_count or EXEC_BACKUP
-    else:
-        max_bytes = max_bytes or DEFAULT_MAX_BYTES
-        backup_count = backup_count or DEFAULT_BACKUP
+    default_bytes, default_backup = _DEFAULT_CAPS[domain]
+    max_bytes = max_bytes or default_bytes
+    backup_count = backup_count or default_backup
 
     log_path = LOGS_ROOT / domain / f"{event_file}.jsonl"
     log_path.parent.mkdir(parents=True, exist_ok=True)

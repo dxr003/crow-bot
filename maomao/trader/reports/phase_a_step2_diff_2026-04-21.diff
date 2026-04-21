@@ -1,0 +1,434 @@
+--- /root/bot-backup/ledger/core.py	2026-04-21 14:41:43.299353345 +0800
++++ /root/ledger/core.py	2026-04-21 15:31:16.971836612 +0800
+@@ -1,25 +1,26 @@
+ """L0 事件账本核心。
+ 
+-接口定型（乌鸦定稿 2026-04-21）：
++接口定型（2026-04-21 v2.0 动作账本）：
++
+     from ledger import get_ledger, new_trace_id, set_trace_id
+ 
+     lg = get_ledger("exec", "orders")
+     set_trace_id(new_trace_id())
+-    lg.event("open_market",
+-             {"symbol": "BTCUSDT", "side": "BUY", "margin": 100},
+-             parent_trace_id="sig_abc123",
+-             cost_usd=0.0)
++    lg.event(
++        "order_placed",
++        {"account":"币安1","side":"BUY","qty":0.001,"order_type":"MARKET"},
++        actor="executor",
++        target="BTCUSDT",
++        result="pending",
++    )
+ 
+ 物理存储：/root/logs/{domain}/{event_file}.jsonl
+-schema：
+-    ts            ISO8601 + 08:00
+-    trace_id      8 hex，进程内 ContextVar 自动传
+-    parent_trace_id  可选，跨模块父子链
+-    level         INFO/WARNING/ERROR
+-    module        event_file 名
+-    event         事件名（动词短语）
+-    cost_usd      可选，付费调用记账
+-    payload       事件具体字段（已经过脱敏）
++schema（见 ledger/ledger_conventions.md §4）：
++    必选：ts / trace_id / level / actor / event_type / target / result / payload
++    可选：parent_trace_id / error_msg / related_files
++    禁用：cost_usd / provider / model / token_usage / credit_cost / latency_ms
++
++兼容：历史 JSONL 可能含 cost_usd / module 字段，读取方按 §10 双字段兼容。
+ """
+ from __future__ import annotations
+ 
+@@ -37,12 +38,23 @@
+ LOGS_ROOT = Path("/root/logs")
+ BEIJING_TZ = timezone(timedelta(hours=8))
+ 
+-DOMAINS = {"system", "exec", "signal", "dialog", "external"}
++DOMAINS = {"system", "exec", "signal", "risk", "dialog", "external", "trace"}
+ 
+-DEFAULT_MAX_BYTES = 10 * 1024 * 1024
+-DEFAULT_BACKUP = 5
+-EXEC_MAX_BYTES = 15 * 1024 * 1024
+-EXEC_BACKUP = 10
++_DEFAULT_CAPS = {
++    "exec":     (15 * 1024 * 1024, 10),
++    "signal":   (10 * 1024 * 1024, 5),
++    "risk":     (10 * 1024 * 1024, 5),
++    "system":   (10 * 1024 * 1024, 5),
++    "dialog":   (10 * 1024 * 1024, 5),
++    "external": (10 * 1024 * 1024, 5),
++    "trace":    (20 * 1024 * 1024, 10),
++}
++
++VALID_RESULTS = {
++    "success", "failed", "partial", "pending", "n-a",
++    # external 域细分（等 conventions §4.1 明批是否正式写进通用枚举）
++    "timeout", "rate_limited",
++}
+ 
+ _trace_id_var: ContextVar[str] = ContextVar("trace_id", default="")
+ 
+@@ -70,24 +82,32 @@
+         self.module_name = module_name
+ 
+     def format(self, record: logging.LogRecord) -> str:
+-        payload = getattr(record, "event_payload", None)
+-        event = getattr(record, "event_name", record.msg)
++        event_type = getattr(record, "event_name", record.msg)
+         trace = getattr(record, "trace_id", None) or current_trace_id() or ""
+         parent = getattr(record, "parent_trace_id", None) or ""
+-        cost = getattr(record, "cost_usd", None)
++        actor = getattr(record, "actor", None) or self.module_name
++        target = getattr(record, "target", "") or ""
++        result = getattr(record, "result", "n-a") or "n-a"
++        error_msg = getattr(record, "error_msg", None)
++        related_files = getattr(record, "related_files", None)
++        payload = getattr(record, "event_payload", None)
+ 
+         obj: dict[str, Any] = {
+             "ts": now_iso(),
+             "trace_id": trace,
+             "level": record.levelname,
+-            "module": self.module_name,
+-            "event": event,
++            "actor": actor,
++            "event_type": event_type,
++            "target": target,
++            "result": result,
++            "payload": scrub(payload) if payload is not None else {},
+         }
+         if parent:
+             obj["parent_trace_id"] = parent
+-        if cost is not None:
+-            obj["cost_usd"] = cost
+-        obj["payload"] = scrub(payload) if payload is not None else {}
++        if error_msg:
++            obj["error_msg"] = error_msg
++        if related_files:
++            obj["related_files"] = related_files
+         return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+ 
+ 
+@@ -104,20 +124,34 @@
+         payload: dict[str, Any] | None = None,
+         *,
+         level: str = "INFO",
++        actor: str | None = None,
++        target: str = "",
++        result: str = "n-a",
+         trace_id: str | None = None,
+         parent_trace_id: str | None = None,
+-        cost_usd: float | None = None,
++        error_msg: str | None = None,
++        related_files: list[str] | None = None,
+     ) -> None:
++        if result not in VALID_RESULTS:
++            raise ValueError(
++                f"result 必须是 {VALID_RESULTS}，收到 {result!r}"
++            )
+         extra: dict[str, Any] = {
+             "event_name": name,
+             "event_payload": payload or {},
++            "target": target,
++            "result": result,
+         }
++        if actor:
++            extra["actor"] = actor
+         if trace_id:
+             extra["trace_id"] = trace_id
+         if parent_trace_id:
+             extra["parent_trace_id"] = parent_trace_id
+-        if cost_usd is not None:
+-            extra["cost_usd"] = cost_usd
++        if error_msg:
++            extra["error_msg"] = error_msg
++        if related_files:
++            extra["related_files"] = related_files
+         self._logger.log(
+             logging._nameToLevel.get(level, logging.INFO), name, extra=extra
+         )
+@@ -139,21 +173,18 @@
+     max_bytes: int | None = None,
+     backup_count: int | None = None,
+ ) -> Ledger:
+-    """拿一个 Ledger。同一 (domain, event_file) 返回单例，handler 不重复添加。
++    """拿一个 Ledger。同一 (domain, event_file) 返回同一 handler，不重复添加。
+ 
+     Args:
+-        domain: system / exec / signal / dialog / external
++        domain: system / exec / signal / risk / dialog / external / trace
+         event_file: 文件名（不含扩展名）
+     """
+     if domain not in DOMAINS:
+         raise ValueError(f"domain 必须是 {DOMAINS}，收到 {domain!r}")
+ 
+-    if domain == "exec":
+-        max_bytes = max_bytes or EXEC_MAX_BYTES
+-        backup_count = backup_count or EXEC_BACKUP
+-    else:
+-        max_bytes = max_bytes or DEFAULT_MAX_BYTES
+-        backup_count = backup_count or DEFAULT_BACKUP
++    default_bytes, default_backup = _DEFAULT_CAPS[domain]
++    max_bytes = max_bytes or default_bytes
++    backup_count = backup_count or default_backup
+ 
+     log_path = LOGS_ROOT / domain / f"{event_file}.jsonl"
+     log_path.parent.mkdir(parents=True, exist_ok=True)
+--- /root/bot-backup/ledger/external.py	2026-04-21 14:48:04.521779973 +0800
++++ /root/ledger/external.py	2026-04-21 15:29:46.808428292 +0800
+@@ -1,69 +1,160 @@
+-"""付费/外部 API 调用记账。
++"""外部 API 调用账本（动作版，不记成本）。
+ 
+-用法（analyzer / 新闻抓取 / AI 调用点接入）：
++对齐 conventions §6.6：三态 api_call_started / api_call_completed / api_call_failed。
++所有函数自动从 ContextVar 继承 trace_id（可显式覆盖）。
+ 
+-    from ledger import log_external_call
++典型用法（analyzer/新闻/AI 调用点）：
+ 
+-    t0 = time.time()
+-    resp = requests.post(url, ...)
+-    log_external_call(
+-        provider="anthropic",
+-        endpoint="/v1/messages",
+-        model="claude-haiku-4-5",
+-        status=resp.status_code,
+-        duration_ms=int((time.time() - t0) * 1000),
+-        cost_usd=calc_anthropic_cost(usage),   # 调用方算好传进来
+-        payload={"prompt_tokens": usage["input_tokens"],
+-                 "output_tokens": usage["output_tokens"]},
++    from ledger import (
++        log_api_call_started, log_api_call_completed, log_api_call_failed,
+     )
+ 
+-设计：
+-- 只负责"落一条账本"，不负责算成本（价格表交调用方维护）
+-- trace_id 自动从 ContextVar 继承（信号生成 → 分析调用 → Haiku 调用 同一链）
+-- payload 里的敏感字段（api_key/tg_token）由 scrub 自动脱敏
++    t0 = time.time()
++    log_api_call_started(
++        provider="tavily",
++        endpoint="/search",
++        method="POST",
++        request_summary={"query_hash": _hash(q)},
++    )
++    try:
++        resp = requests.post(url, json=body, timeout=10)
++        log_api_call_completed(
++            provider="tavily",
++            endpoint="/search",
++            status_code=resp.status_code,
++            duration_ms=int((time.time() - t0) * 1000),
++            response_summary={"result_count": len(resp.json().get("results", []))},
++        )
++    except requests.Timeout:
++        log_api_call_failed(
++            provider="tavily", endpoint="/search",
++            error_msg="timeout", result="timeout",
++            duration_ms=int((time.time() - t0) * 1000),
++        )
++    except Exception as e:
++        log_api_call_failed(
++            provider="tavily", endpoint="/search",
++            error_msg=str(e)[:200],
++        )
++
++设计原则（乌鸦 2026-04-21 定）：
++- 只记"动作发生了"，不记成本（cost_usd / credit / token 一律不落）
++- request_summary / response_summary 是结构化摘要（数量、hash），不是完整 body
++- trace_id 强制从 ContextVar 继承，调用方无需手动传（除非跨进程）
+ """
+ from __future__ import annotations
+ 
+ from typing import Any
+ 
+-from .core import get_ledger
++from .core import Ledger, get_ledger, current_trace_id
++
++_ext_ledger: Ledger = get_ledger("external", "api_calls")
++
++
++def _resolve_tid(trace_id: str | None) -> str:
++    return trace_id or current_trace_id() or ""
++
++
++def log_api_call_started(
++    *,
++    provider: str,
++    endpoint: str,
++    method: str = "POST",
++    request_summary: dict[str, Any] | None = None,
++    trace_id: str | None = None,
++    parent_trace_id: str | None = None,
++) -> None:
++    body: dict[str, Any] = {
++        "provider": provider,
++        "endpoint": endpoint,
++        "method": method,
++    }
++    if request_summary:
++        body["request_summary"] = request_summary
++    _ext_ledger.event(
++        "api_call_started",
++        body,
++        actor=provider,
++        target=provider,
++        result="pending",
++        trace_id=_resolve_tid(trace_id),
++        parent_trace_id=parent_trace_id,
++        level="INFO",
++    )
++
+ 
+-_ext_ledger = get_ledger("external", "api_calls")
++def log_api_call_completed(
++    *,
++    provider: str,
++    endpoint: str,
++    status_code: int,
++    duration_ms: int,
++    method: str = "POST",
++    response_summary: dict[str, Any] | None = None,
++    result: str = "success",
++    trace_id: str | None = None,
++    parent_trace_id: str | None = None,
++) -> None:
++    if result not in ("success", "partial"):
++        raise ValueError(
++            f"completed 事件 result 只允许 success/partial，收到 {result!r}"
++        )
++    body: dict[str, Any] = {
++        "provider": provider,
++        "endpoint": endpoint,
++        "method": method,
++        "status_code": status_code,
++        "duration_ms": duration_ms,
++    }
++    if response_summary:
++        body["response_summary"] = response_summary
++    _ext_ledger.event(
++        "api_call_completed",
++        body,
++        actor=provider,
++        target=provider,
++        result=result,
++        trace_id=_resolve_tid(trace_id),
++        parent_trace_id=parent_trace_id,
++        level="INFO",
++    )
+ 
+ 
+-def log_external_call(
++def log_api_call_failed(
+     *,
+     provider: str,
+     endpoint: str,
+-    model: str | None = None,
+-    status: int | str | None = None,
++    error_msg: str,
++    method: str = "POST",
++    status_code: int | None = None,
+     duration_ms: int | None = None,
+-    cost_usd: float | None = None,
+-    payload: dict[str, Any] | None = None,
++    result: str = "failed",
++    related_files: list[str] | None = None,
+     trace_id: str | None = None,
+     parent_trace_id: str | None = None,
+-    error: str | None = None,
+ ) -> None:
++    if result not in ("failed", "timeout", "rate_limited"):
++        raise ValueError(
++            f"failed 事件 result 只允许 failed/timeout/rate_limited，收到 {result!r}"
++        )
+     body: dict[str, Any] = {
+         "provider": provider,
+         "endpoint": endpoint,
++        "method": method,
+     }
+-    if model:
+-        body["model"] = model
+-    if status is not None:
+-        body["status"] = status
++    if status_code is not None:
++        body["status_code"] = status_code
+     if duration_ms is not None:
+         body["duration_ms"] = duration_ms
+-    if payload:
+-        body["payload"] = payload
+-    if error:
+-        body["error"] = error
+-
+     _ext_ledger.event(
+-        "call_failed" if error else "call",
++        "api_call_failed",
+         body,
+-        trace_id=trace_id,
++        actor=provider,
++        target=provider,
++        result=result,
++        trace_id=_resolve_tid(trace_id),
+         parent_trace_id=parent_trace_id,
+-        cost_usd=cost_usd,
+-        level="ERROR" if error else "INFO",
++        error_msg=error_msg,
++        related_files=related_files,
++        level="ERROR",
+     )
+--- /root/bot-backup/ledger/__init__.py	2026-04-21 14:47:55.405434983 +0800
++++ /root/ledger/__init__.py	2026-04-21 15:30:05.681141713 +0800
+@@ -1,18 +1,19 @@
+-"""L0 Event Ledger — 事件账本基础设施。
++"""L0 Event Ledger — 动作账本基础设施。
+ 
+-定位（乌鸦定稿 2026-04-21）：
+-- 所有模块共用的事件记录 + 查询 + 成本结算底座
+-- 与 shared/core.py 并列：shared/core.py 是代码层 L0，ledger 是事件层 L0
++定位（乌鸦 2026-04-21 v2.0 定稿）：
++- 所有模块共用的动作记录 + 查询底座
++- 只记动作，不记成本（cost_usd / token_usage / credit_cost 一律不落）
+ - 强制 import 使用，不走 config 开关
+ 
+ 核心概念：
+-- event(name, payload, trace_id=, parent_trace_id=, cost_usd=) 写一条账本
+-- trace_id：信号→派发→执行 一单到底，场景 B 回溯靠它
++- event(name, payload, *, actor, target, result, error_msg, related_files) 写一条
++- trace_id：信号→派发→执行 一单到底，Q1 动作追溯 / Q3 信号回溯靠它
+ - parent_trace_id：跨进程/跨模块父子链，未来聚合查询用
+-- cost_usd：每笔付费调用记账，Nansen/OpenRouter 接入前必备
++- related_files：金路径 + failed 自动采集，Q2「改 A 忘 B」防御靠它
+ 
+-物理存储：/root/logs/{system,exec,signal,dialog,external}/*.jsonl（JSONL + 轮转）
+-物理路径保留 /root/logs/，因为 journalctl/tail/jq 等工具已经习惯这个位置。
++约束见 `/root/ledger/ledger_conventions.md`（改前需乌鸦明批）。
++
++物理存储：/root/logs/{exec,signal,risk,system,dialog,external,trace}/*.jsonl
+ """
+ from .core import (
+     Ledger,
+@@ -22,7 +23,11 @@
+     current_trace_id,
+     now_iso,
+ )
+-from .external import log_external_call
++from .external import (
++    log_api_call_started,
++    log_api_call_completed,
++    log_api_call_failed,
++)
+ from .redact import scrub
+ 
+ __all__ = [
+@@ -32,6 +37,8 @@
+     "set_trace_id",
+     "current_trace_id",
+     "now_iso",
+-    "log_external_call",
++    "log_api_call_started",
++    "log_api_call_completed",
++    "log_api_call_failed",
+     "scrub",
+ ]
