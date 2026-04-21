@@ -72,6 +72,9 @@ def parse(text: str) -> dict | None:
     text = re.sub(r'([\u4e00-\u9fff]+)([A-Za-z][A-Za-z0-9]*)', r'\1 \2', text)
     # 英文紧跟中文时插入空格（如"btc止盈" → "btc 止盈"）
     text = re.sub(r'([A-Za-z0-9]+)([\u4e00-\u9fff])', r'\1 \2', text)
+    # 中文紧跟数字时插入空格（如"止损100" → "止损 100"、"止盈75" → "止盈 75"）
+    # 账户前缀"币安4"已在 dispatch._extract_account 提前剥离，这里安全
+    text = re.sub(r'([\u4e00-\u9fff]+)(\d)', r'\1 \2', text)
     tokens = text.split()
     if not tokens:
         return None
