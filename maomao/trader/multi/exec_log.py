@@ -1,67 +1,54 @@
 """
-exec_log.py — multi/executor 动作日志（jsonl 追加，不读不锁）
+exec_log.py — multi/executor 动作日志
 
-设计目标：
-- 每次 executor 公开方法调用都留痕：角色/账户/动作/参数/返回/耗时/异常
-- jsonl 格式天然 append-safe，多线程并发 fan-out 不冲突（OS open() O_APPEND 原子）
-- 单文件按行尾 newline append，无并发损坏
-- 提供 read_recent / format_for_tg 给 bot 和后续审查脚本用
+Phase A（2026-04-21）切换到 /root/logs/ 统一日志骨架：
+  旧写入：/root/maomao/data/exec_log.jsonl（5MB × 3，手写 JSONL）
+  新写入：/root/logs/exec/orders.jsonl（15MB × 10，logkit RotatingFileHandler）
 
-字段约定（每行一个 JSON 对象）：
-  ts        : float epoch
-  dt        : "MM-DD HH:MM:SS"
-  role      : "玄玄" / "天天" / "大猫" / "策略:bull_trailing" 等
-  account   : 规范化后账户名（"币安1" / "币安2"...）
-  action    : "open_market" / "close_market" / "place_stop_loss" 等
-  symbol    : 交易对（无关动作可省）
-  args      : 调用参数摘要（脱敏后）
-  ok        : True/False
-  result    : 成功摘要（orderId / qty / price / no_position 等）
-  error     : 异常信息（失败时）
-  ms        : 耗时毫秒
+统一 schema：ts(ISO8601+08) / trace_id(8hex) / level / module / event / payload
+payload 内含老字段（role/account/symbol/args/ok/result/error/ms）。
+
+trace_id 从 ContextVar 读；为空时 executor 首发调用处自动生成。
+上游 dispatch/信号推送后续会显式 set_trace_id（Phase A 后半 + B）。
+
+对外接口不变：
+  log_call(action_name=None)  装饰器
+  read_recent(...) / format_for_tg(...)  向后兼容，字段映射老 schema
+
+老日志文件保留不动，仅停写。
 """
 from __future__ import annotations
 
 import json
 import logging
+import sys
 import time
-from datetime import datetime
 from functools import wraps
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+# 让 /root/logs 能被 import（maomao.service 的 WorkingDirectory=/root/maomao，默认无 /root 在 path）
+if "/root" not in sys.path:
+    sys.path.insert(0, "/root")
 
-LOG_FILE = Path("/root/maomao/data/exec_log.jsonl")
-MAX_BYTES = 5 * 1024 * 1024  # 5MB 触发滚动
-ROTATE_KEEP = 3              # 保留最近 3 个滚动文件
+from logs.lib.logkit import get_logger, new_trace_id, set_trace_id, current_trace_id
 
+logger_std = logging.getLogger(__name__)
 
-def _rotate_if_needed():
-    try:
-        if LOG_FILE.exists() and LOG_FILE.stat().st_size > MAX_BYTES:
-            for i in range(ROTATE_KEEP - 1, 0, -1):
-                src = LOG_FILE.with_suffix(f".jsonl.{i}")
-                dst = LOG_FILE.with_suffix(f".jsonl.{i + 1}")
-                if src.exists():
-                    src.replace(dst)
-            LOG_FILE.replace(LOG_FILE.with_suffix(".jsonl.1"))
-    except Exception as e:
-        logger.warning(f"[exec_log] rotate 失败: {e}")
+# 新日志路径（只读用，写入走 logkit）
+NEW_LOG_FILE = Path("/root/logs/exec/orders.jsonl")
+
+# logkit logger（模块级单例）
+_exec_logger = get_logger("exec", "orders")
 
 
-def _write(entry: dict):
-    try:
-        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _rotate_if_needed()
-        with LOG_FILE.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except Exception as e:
-        logger.warning(f"[exec_log] 写入失败: {e}")
+def _safe(v):
+    if isinstance(v, (int, float, bool, type(None))):
+        return v
+    s = str(v)
+    return s if len(s) < 200 else s[:200] + "..."
 
 
-def _summarize_args(action: str, args: tuple, kwargs: dict) -> dict:
-    """从位置参数+关键字提取摘要，脱敏（无 secret，但可能太长截断）。"""
-    # executor 公开方法签名首位都是 (role, account, ...)；前两位单独提取
+def _summarize_args(args: tuple, kwargs: dict) -> dict:
     out = {}
     try:
         if len(args) >= 1:
@@ -77,31 +64,20 @@ def _summarize_args(action: str, args: tuple, kwargs: dict) -> dict:
     return out
 
 
-def _safe(v):
-    if isinstance(v, (int, float, bool, type(None))):
-        return v
-    s = str(v)
-    return s if len(s) < 200 else s[:200] + "..."
-
-
 def _summarize_result(result):
-    """成功返回的关键字段摘要；失败返回 error。"""
     if not isinstance(result, dict):
         return {"raw": _safe(result)}
     keys = ["ok", "orderId", "qty", "price", "side", "leverage",
             "margin", "notional", "hedge", "no_position",
             "closed", "errors", "type", "tranId", "amount",
             "stopPrice", "tpPrice"]
-    out = {k: result[k] for k in keys if k in result}
-    return out
+    return {k: result[k] for k in keys if k in result}
 
 
 def log_call(action_name: str | None = None):
-    """装饰器：包 executor 公开方法，自动写日志。
+    """装饰器：包 executor 公开方法，写 /root/logs/exec/orders.jsonl。
 
-    action_name 默认取被装饰函数 __name__。
-    role 从 args[0] 取（executor 约定）。
-    account 从 args[1] 取，但日志写"未规范化"原值，因为 executor 内部会自己 resolve。
+    trace_id 优先读 ContextVar，未设则自动生成（executor 首发）。
     """
     def deco(fn):
         name = action_name or fn.__name__
@@ -109,39 +85,53 @@ def log_call(action_name: str | None = None):
         @wraps(fn)
         def wrapper(*args, **kwargs):
             t0 = time.time()
-            entry = {
-                "ts": t0,
-                "dt": datetime.fromtimestamp(t0).strftime("%m-%d %H:%M:%S"),
-                "action": name,
-                "role": args[0] if args else kwargs.get("role"),
-                "account": args[1] if len(args) >= 2 else kwargs.get("account"),
-                "args": _summarize_args(name, args, kwargs),
-            }
-            # 提取 symbol（如有）
+
+            tid = current_trace_id()
+            if not tid:
+                tid = new_trace_id()
+                set_trace_id(tid)
+
+            role = args[0] if args else kwargs.get("role")
+            account = args[1] if len(args) >= 2 else kwargs.get("account")
             sym = kwargs.get("symbol")
             if sym is None and len(args) >= 3 and isinstance(args[2], str):
                 sym = args[2]
-            if sym:
-                entry["symbol"] = sym
+
+            payload_head = {
+                "role": role,
+                "account": account,
+                "symbol": sym,
+                "args": _summarize_args(args, kwargs),
+            }
+
             try:
                 result = fn(*args, **kwargs)
-                entry["ms"] = int((time.time() - t0) * 1000)
+                elapsed_ms = int((time.time() - t0) * 1000)
+                payload = {**payload_head, "ms": elapsed_ms}
                 if isinstance(result, dict):
-                    entry["ok"] = bool(result.get("ok"))
+                    payload["ok"] = bool(result.get("ok"))
                     if result.get("error"):
-                        entry["error"] = _safe(result["error"])
-                    entry["result"] = _summarize_result(result)
+                        payload["error"] = _safe(result["error"])
+                    payload["result"] = _summarize_result(result)
                 else:
-                    entry["ok"] = True
-                    entry["result"] = {"raw": _safe(result)}
-                _write(entry)
+                    payload["ok"] = True
+                    payload["result"] = {"raw": _safe(result)}
+                _exec_logger.event(name, payload, trace_id=tid)
                 return result
             except Exception as e:
-                entry["ms"] = int((time.time() - t0) * 1000)
-                entry["ok"] = False
-                entry["error"] = _safe(e)
-                entry["exception_type"] = type(e).__name__
-                _write(entry)
+                elapsed_ms = int((time.time() - t0) * 1000)
+                _exec_logger.event(
+                    name,
+                    {
+                        **payload_head,
+                        "ms": elapsed_ms,
+                        "ok": False,
+                        "error": _safe(str(e)),
+                        "exception_type": type(e).__name__,
+                    },
+                    trace_id=tid,
+                    level="ERROR",
+                )
                 raise
 
         return wrapper
@@ -149,17 +139,20 @@ def log_call(action_name: str | None = None):
 
 
 # ──────────────────────────────────────────
-# 读取 / 展示
+# 读取 / 展示（新 schema 映射回老字段，调用方无感）
 # ──────────────────────────────────────────
 
 def read_recent(limit: int = 50, action_filter: str | None = None,
                 account_filter: str | None = None) -> list[dict]:
-    """倒序读最近 limit 条（仅当前 jsonl，不翻 .1/.2）。"""
-    if not LOG_FILE.exists():
+    """倒序读最近 limit 条（仅当前 orders.jsonl，不翻轮转备份）。
+
+    字段映射：event→action, payload.role→role, payload.account→account 等。
+    """
+    if not NEW_LOG_FILE.exists():
         return []
     out = []
     try:
-        with LOG_FILE.open("r", encoding="utf-8") as f:
+        with NEW_LOG_FILE.open("r", encoding="utf-8") as f:
             lines = f.readlines()
         for line in reversed(lines):
             line = line.strip()
@@ -169,15 +162,30 @@ def read_recent(limit: int = 50, action_filter: str | None = None,
                 e = json.loads(line)
             except Exception:
                 continue
-            if action_filter and e.get("action") != action_filter:
+            p = e.get("payload") or {}
+            view = {
+                "ts": e.get("ts"),
+                "dt": e.get("ts", ""),
+                "trace_id": e.get("trace_id"),
+                "action": e.get("event"),
+                "role": p.get("role"),
+                "account": p.get("account"),
+                "symbol": p.get("symbol"),
+                "args": p.get("args"),
+                "ok": p.get("ok"),
+                "error": p.get("error"),
+                "result": p.get("result") or {},
+                "ms": p.get("ms"),
+            }
+            if action_filter and view["action"] != action_filter:
                 continue
-            if account_filter and e.get("account") not in (account_filter, None):
+            if account_filter and view["account"] not in (account_filter, None):
                 continue
-            out.append(e)
+            out.append(view)
             if len(out) >= limit:
                 break
     except Exception as ex:
-        logger.warning(f"[exec_log] 读取失败: {ex}")
+        logger_std.warning(f"[exec_log] 读取失败: {ex}")
     return out
 
 
@@ -187,18 +195,26 @@ def format_for_tg(entries: list[dict]) -> str:
     lines = []
     for e in entries:
         icon = "✅" if e.get("ok") else "❌"
-        dt = e.get("dt", "")
+        ts = e.get("dt") or ""
+        # ISO8601 → "MM-DD HH:MM:SS" 展示
+        if isinstance(ts, str) and "T" in ts:
+            try:
+                date_part, time_part = ts.split("T", 1)
+                ts = f"{date_part[5:10]} {time_part[:8]}"
+            except Exception:
+                pass
         action = e.get("action", "?")
         role = e.get("role", "?")
         account = e.get("account") or "-"
         symbol = e.get("symbol") or ""
         ms = e.get("ms", 0)
-        head = f"{icon} <b>{dt}</b> {action} {symbol}"
-        body = f"  {role}@{account} ({ms}ms)"
+        tid = e.get("trace_id") or ""
+        head = f"{icon} <b>{ts}</b> {action} {symbol}"
+        body = f"  {role}@{account} ({ms}ms) tid={tid}"
         if e.get("error"):
-            body += f"\n  err: {e['error'][:120]}"
+            body += f"\n  err: {str(e['error'])[:120]}"
         else:
-            r = e.get("result", {})
+            r = e.get("result") or {}
             tail_bits = []
             for k in ("orderId", "qty", "price", "leverage", "no_position"):
                 if k in r:
@@ -210,15 +226,4 @@ def format_for_tg(entries: list[dict]) -> str:
 
 
 if __name__ == "__main__":
-    # 自检：写一条测试 + 读回
-    _write({
-        "ts": time.time(),
-        "dt": datetime.now().strftime("%m-%d %H:%M:%S"),
-        "action": "_self_test",
-        "role": "test",
-        "account": "test",
-        "ok": True,
-        "result": {"msg": "exec_log 自检通过"},
-        "ms": 0,
-    })
     print(format_for_tg(read_recent(5)))
