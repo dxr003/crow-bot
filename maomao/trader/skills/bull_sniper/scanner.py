@@ -24,6 +24,12 @@ from reject_tracker import record_exit as _record_reject, update_peaks as _updat
 from news_score import get_smart_money_score
 from _atomic import atomic_write_json
 
+# 通用前置过滤器注册表（config.yaml: pre_filters 列表按顺序串联，任一拒即剔）
+from filters import exchange_info as _ei_filter
+_PRE_FILTERS = {
+    "exchange_info": _ei_filter,
+}
+
 BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
 LOG_DIR  = BASE_DIR / "logs"
@@ -71,34 +77,31 @@ def _hot_reload_config():
 
 FAPI_BASE = "https://fapi.binance.com"
 
-# 合约交易状态缓存（排除 SETTLING / 下架币）
-_trading_symbols: set = set()
-_trading_symbols_ts: float = 0
+# 前置过滤拒入日志（jsonl，rolling）
+_FILTER_LOG_PATH = DATA_DIR / "filter_log.jsonl"
+_FILTER_LOG_MAX_BYTES = 5 * 1024 * 1024   # 5MB 后切片
+
+
+def _log_filter_reject(symbol: str, filter_name: str, reason: str) -> None:
+    """前置过滤拒入写 jsonl，超过 5MB 自动备份切片。"""
+    try:
+        rec = {
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "symbol": symbol,
+            "filter": filter_name,
+            "reason": reason,
+        }
+        if _FILTER_LOG_PATH.exists() and _FILTER_LOG_PATH.stat().st_size > _FILTER_LOG_MAX_BYTES:
+            _FILTER_LOG_PATH.rename(_FILTER_LOG_PATH.with_suffix(".jsonl.1"))
+        with _FILTER_LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception as e:
+        logger.debug(f"[filter_log] 写入失败: {e}")
 
 
 # ══════════════════════════════════════════
 # 币安API
 # ══════════════════════════════════════════
-
-def _refresh_trading_symbols() -> set:
-    """从 exchangeInfo 获取当前 TRADING 状态的合约，10分钟缓存"""
-    global _trading_symbols, _trading_symbols_ts
-    now = time.time()
-    if _trading_symbols and now - _trading_symbols_ts < 600:
-        return _trading_symbols
-    try:
-        resp = requests.get(f"{FAPI_BASE}/fapi/v1/exchangeInfo", timeout=15)
-        resp.raise_for_status()
-        symbols = set()
-        for s in resp.json().get("symbols", []):
-            if s.get("status") == "TRADING" and s["symbol"].endswith("USDT"):
-                symbols.add(s["symbol"])
-        _trading_symbols = symbols
-        _trading_symbols_ts = now
-        logger.info(f"[交易状态] 刷新完毕，{len(symbols)}个TRADING合约")
-    except Exception as e:
-        logger.warning(f"[交易状态] exchangeInfo获取失败: {e}")
-    return _trading_symbols
 
 
 # ── 市值排名排除（CoinGecko） ──
@@ -131,17 +134,27 @@ def _refresh_mcap_exclude() -> set:
 
 
 def get_all_tickers() -> list:
-    """获取全市场合约24h行情（自动排除非TRADING状态币）"""
-    trading = _refresh_trading_symbols()
+    """获取全市场合约24h行情，过 config.yaml 的 pre_filters 链。"""
     resp = requests.get(f"{FAPI_BASE}/fapi/v1/ticker/24hr", timeout=10)
     resp.raise_for_status()
+    pre_filters = CFG.get("pre_filters") or []
     tickers = []
     for t in resp.json():
         sym = t["symbol"]
         if not sym.endswith("USDT"):
             continue
-        # 排除 SETTLING / 下架 / 非TRADING状态
-        if trading and sym not in trading:
+        # 通用前置过滤链（按 config.yaml 顺序，任一拒即剔，写 filter_log.jsonl）
+        rejected = False
+        for fname in pre_filters:
+            f = _PRE_FILTERS.get(fname)
+            if not f:
+                continue
+            ok, reason = f.is_tradeable(sym)
+            if not ok:
+                _log_filter_reject(sym, fname, reason)
+                rejected = True
+                break
+        if rejected:
             continue
         try:
             tickers.append({
