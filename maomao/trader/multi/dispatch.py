@@ -221,8 +221,6 @@ def try_dispatch(role: str, text: str) -> tuple[str | None, str]:
 
     # 第四关：权限快速拦截，给清晰回执
     needed_action = "trade"
-    if action in ("cancel_orders",):
-        needed_action = "trade"
     if not check(role, needed_action, account):
         _dialog_ledger.event("dispatch_denied", {
             "role": role, "account": account, "action": action, "symbol": symbol,

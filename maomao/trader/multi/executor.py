@@ -628,12 +628,14 @@ def cancel_all(role: str, account: str, symbol: str) -> dict:
     c = get_futures_client(account)
 
     normal_ok, normal_err = True, None
+    normal_was_empty = False  # 仅 -2011 命中才算"本来就没普通挂单"
     try:
         c.cancel_open_orders(symbol=symbol)
     except Exception as e:
         msg = str(e)
-        # -2011 / Unknown order：本来就没普通挂单，视为成功
-        if not ("-2011" in msg or "Unknown order" in msg or "no open orders" in msg.lower()):
+        if "-2011" in msg or "Unknown order" in msg or "no open orders" in msg.lower():
+            normal_was_empty = True
+        else:
             normal_ok, normal_err = False, msg
 
     algo_cancelled = []
@@ -662,9 +664,9 @@ def cancel_all(role: str, account: str, symbol: str) -> dict:
 
     # 检查 algo 部分是否有撤单失败的子项（dispatch/玄玄据此判断要不要再撤一次）
     algo_failed = [a for a in algo_cancelled if not a.get("ok")]
-    no_orders = normal_ok and not normal_err and not algo_cancelled and not algo_err
+    no_orders = normal_was_empty and not algo_cancelled and not algo_err
     return {
-        "ok": not algo_failed and normal_ok,
+        "ok": not algo_failed and normal_ok and not algo_err,
         "no_orders": no_orders,
         "account": account, "symbol": symbol,
         "normal_cleared": normal_ok,
@@ -907,9 +909,6 @@ def _norm_wallet(name: str) -> str:
     k = (name or "").strip().lower()
     if k in _WALLET_ALIASES:
         return _WALLET_ALIASES[k]
-    # 原始值再映射一次（处理中文 "现货" 不走 lower）
-    if name in _WALLET_ALIASES:
-        return _WALLET_ALIASES[name]
     raise ValueError(f"未知钱包: {name}（支持：现货/合约/资金）")
 
 
