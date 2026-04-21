@@ -1,6 +1,6 @@
 ---
 name: crow-review
-description: 审 crow-bot 代码，带铁律和架构约束。当用户要求审查 /root/maomao、/root/damao、/root/scripts 下代码，或说"扫 xxx"、"review xxx"时使用。
+description: 审 crow-bot 代码，带铁律和架构约束。**只在用户明确输入 `/crow-review` 斜杠命令时启用**；自然语言（"扫 xxx"、"review xxx"、"看看有没有 bug"）一律不自动触发——回溯分析问题、查日志、定位问题都按对话处理，不进 skill。
 ---
 
 # crow-review：乌鸦家代码审查
@@ -10,8 +10,29 @@ description: 审 crow-bot 代码，带铁律和架构约束。当用户要求审
 - 5 条架构约束（+i/TG shell/多账户/模块开关/DRY）
 - 三段式报告格式（Bug/效率/清洁）
 
-使用方式：`/crow-review <文件或模块路径>` 或直接说自然语言（见下方别名映射）
-例：`/crow-review bull_sniper.py`、`/crow-review trader/multi/`、「扫交易策略」
+---
+
+## TRIGGER（必读，误触发零容忍）
+
+**只在以下情况启用 crow-review：**
+- 用户消息以 `/crow-review` 开头（斜杠命令显式调用）
+- 用户消息形如 `/crow-review <args>`，或对话里出现 `crow-review:xxx` 显式调用
+
+**严禁自动触发的情形：**
+- 用户问"为什么 X 没进来 / 为什么 Y 没触发 / 哪里没跑通" → 这是**回溯分析请求**，
+  不是代码审查；按正常对话查数据、查日志、查代码定位，不跑三段式
+- 用户问"扫 X 有没有 bug" → 仅当明确说"审查/review"才进 skill；说"看看"/"查查"一律按对话处理
+- 任何未带 `/crow-review` 前缀的自然语言——即使听起来像代码审查——**必须先问用户**
+  "要跑 /crow-review 吗？"，用户确认后再启动，不允许脑补启动
+
+### 反面例（真实事故 2026-04-21 10:03）
+用户：「EDU 最终上去了，为什么没进来？在 25% 前为什么没达到？」
+错误响应：启动 crow-review 三段式，加载 Phase 0 ground truth，输出 Bug/效率/清洁报告
+正确响应：查 `/root/maomao/trader/skills/bull_sniper/data/reject_tracker.json` +
+          `score_history.jsonl` + scanner.log，定位 EDU 当时在哪个阶段、触发了哪条过滤
+         / 评分没达到，直接用数据回答
+
+记住：**回溯分析 ≠ 代码审查**。前者是看日志讲故事，后者是按铁律扫 bug。
 
 ---
 
@@ -76,6 +97,16 @@ description: 审 crow-bot 代码，带铁律和架构约束。当用户要求审
 ## Phase 2：三维度并行审查
 
 用 Agent 工具**并行**启动三个审查代理（同一条消息里多个 tool call）。每个代理独立工作，最后汇总。
+
+### 共同证据纪律（三个 Agent 都遵守）
+
+所有 finding 必须给出代码证据：
+- 指明文件:行号
+- 贴出问题代码片段（≤5 行）
+- 说明违反的是哪条规则（铁律 N / 架构约束 N / Phase 0 ground truth 第 X 条）
+- 禁止使用推测词：「天然 / 大概 / 估计 / 通常 / 应该 / 可能 / 也许 / 似乎」
+
+没证据的 finding 一律丢弃，不进报告。宁可漏报 1 条飘忽的，不要 10 条幻觉的。
 
 ### Agent 1：⭕ Bug 审查
 
