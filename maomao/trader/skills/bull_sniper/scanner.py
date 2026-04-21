@@ -11,11 +11,17 @@ bull_sniper scanner.py — 做多阻击扫描器 v3.1
 import datetime as _dt
 import json
 import logging
+import sys
 import time
 import yaml
 import requests
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
+
+if "/root" not in sys.path:
+    sys.path.insert(0, "/root")
+from ledger import get_ledger, new_trace_id, set_trace_id
 
 from analyzer import analyze
 from notifier import send_signal, send_health_report, send_status_card, send_trade_report, send_pool_entry
@@ -41,10 +47,18 @@ logging.basicConfig(
     level=logging.INFO,
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler(LOG_DIR / "scanner.log", encoding="utf-8"),
+        RotatingFileHandler(
+            LOG_DIR / "scanner.log",
+            maxBytes=20 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        ),
     ],
 )
 logger = logging.getLogger("bull_scanner")
+
+# L0 事件账本：进池/退出/信号/买入 结构化落盘（/root/logs/signal/bull_sniper.jsonl）
+_ledger = get_ledger("signal", "bull_sniper")
 
 
 # ══════════════════════════════════════════
@@ -816,6 +830,13 @@ def scan_once(state: dict, tickers: list) -> dict:
         if pct_24h > max_24h:
             _RECENT_24H_REJECTS[symbol] = _now_ts + _REJECT_TTL_SEC
             logger.info(f"[否决进池] {symbol} 24h已涨{pct_24h:.1f}% > {max_24h}%，跳过（{int(_REJECT_TTL_SEC/60)}min内不再算）")
+            _ledger.event("pool_rejected", {
+                "symbol": symbol,
+                "reason": "24h_gate",
+                "pct_24h": round(pct_24h, 2),
+                "max_24h": max_24h,
+                "entry_reason": entry_reason,
+            }, trace_id=new_trace_id())
             continue
 
         max_pool = CFG.get("watchpool_max", 30)
@@ -838,6 +859,7 @@ def scan_once(state: dict, tickers: list) -> dict:
         except Exception:
             pass
 
+        pool_tid = new_trace_id()
         state["watchpool"][symbol] = {
             "entered_at":    now,
             "entry_price":   t["price"],
@@ -852,6 +874,7 @@ def scan_once(state: dict, tickers: list) -> dict:
             "last_analyze_time":  0,
             "base_avg_vol":  base_avg_vol,
             "entry_reason":  entry_reason,
+            "trace_id":      pool_tid,
         }
         state["stats"]["pool_entries"] += 1
         events["new_pool"].append(symbol)
@@ -863,6 +886,17 @@ def scan_once(state: dict, tickers: list) -> dict:
             f"[进池] {symbol} [{entry_reason}] {trigger_info} OI:{oi/1e6:.1f}M "
             f"1h+{change_1h:.1f}% 价格:{t['price']} 基准量:{base_avg_vol:.0f}"
         )
+        _ledger.event("pool_entry", {
+            "symbol": symbol,
+            "entry_reason": entry_reason,
+            "entry_price": t["price"],
+            "change_1m": c1m, "change_3m": c3m, "change_5m": c5m, "change_15m": c15m,
+            "oi_usdt": oi,
+            "volume_usdt": t["volume_usdt"],
+            "change_1h": change_1h,
+            "base_avg_vol": base_avg_vol,
+            "drop_from_ath": ath_data["drop_from_ath"],
+        }, trace_id=pool_tid)
 
         try:
             send_pool_entry({
@@ -911,6 +945,16 @@ def scan_once(state: dict, tickers: list) -> dict:
             _record_reject(symbol, "timeout_24h", pool.get("last_score", 0),
                            cur_price, entry_price, gain_since_entry,
                            pool.get("last_breakdown", ""))
+            _ledger.event("pool_exit", {
+                "symbol": symbol,
+                "reason": "timeout_24h",
+                "elapsed_min": round(elapsed_min, 1),
+                "ttl_hours": _pool_ttl_h,
+                "last_score": pool.get("last_score", 0),
+                "gain_since_entry": round(gain_since_entry, 2),
+                "entry_price": entry_price,
+                "exit_price": cur_price,
+            }, trace_id=pool.get("trace_id", ""))
             del state["watchpool"][symbol]
             events["pool_exits"].append({"symbol": symbol, "reason": f"观察{_pool_ttl_h}h未触发信号，超时退出"})
             logger.info(f"[退出] {symbol} 观察{elapsed_min:.0f}分钟>{_pool_ttl_h}h，超时退出")
@@ -1046,6 +1090,7 @@ def scan_once(state: dict, tickers: list) -> dict:
                 "oi_change_pct": market_data.get("oi_change_pct", 0),
                 "volume_ratio":  market_data.get("volume_ratio", 0),
             }
+            signal_tid = pool.get("trace_id") or new_trace_id()
             state["signals"].append(signal)
             state["stats"]["signals"] += 1
             state["cooldowns"][symbol] = {
@@ -1060,6 +1105,20 @@ def scan_once(state: dict, tickers: list) -> dict:
                 f"[信号] {symbol} 1h+{change_1h:.1f}% "
                 f"原因:{signal['reason']} score={signal['score']}"
             )
+            _ledger.event("signal", {
+                "symbol": symbol,
+                "action": signal["action"],
+                "reason": signal["reason"],
+                "score": signal["score"],
+                "entry_price": signal["entry_price"],
+                "cur_price": signal["cur_price"],
+                "gain_pct": signal["gain_pct"],
+                "change_1h": signal["change_1h"],
+                "oi_change_pct": signal["oi_change_pct"],
+                "volume_ratio": signal["volume_ratio"],
+                "elapsed_min": signal["elapsed_min"],
+                "ai_reason": signal["ai_reason"],
+            }, trace_id=signal_tid)
 
             # 推送信号通知
             try:
@@ -1070,7 +1129,14 @@ def scan_once(state: dict, tickers: list) -> dict:
             # 执行买入（下架反拉只推送不下单，SETTLING无法开仓）
             if analyze_result.get("reason") == "下架反拉":
                 logger.info(f"[买入] {symbol} 下架反拉信号，只推送不下单")
+                _ledger.event("buy_skipped", {
+                    "symbol": symbol,
+                    "reason": "delisting_rebound_no_trade",
+                }, trace_id=signal_tid)
             else:
+                # 把 signal trace_id 通过 ContextVar 传给 executor，
+                # executor 那边 @log_call 会继承为 parent-child 同链。
+                set_trace_id(signal_tid)
                 try:
                     buy_result = buyer_execute(
                         symbol=symbol,
@@ -1104,8 +1170,21 @@ def scan_once(state: dict, tickers: list) -> dict:
                             "sl_algo_id": buy_result.get("sl_algo_id"),
                             "tp_algo_id": buy_result.get("tp_order_id"),
                             "accounts": executed_accts,
+                            "trace_id": signal_tid,
                         }
                         logger.info(f"[仓位] {symbol} 已录入positions (账户: {', '.join(executed_accts) if executed_accts else '默认'})")
+
+                    _ledger.event("buy_result", {
+                        "symbol": symbol,
+                        "status": buy_result.get("status"),
+                        "reason": buy_result.get("reason"),
+                        "order_id": buy_result.get("order_id"),
+                        "entry_price": cur_price,
+                        "accounts": {
+                            n: {"status": r.get("status"), "reason": r.get("reason")}
+                            for n, r in (acct_results or {}).items()
+                        } if acct_results else {},
+                    }, trace_id=signal_tid)
 
                     # 推送成交详情报告给乌鸦
                     try:
@@ -1114,6 +1193,11 @@ def scan_once(state: dict, tickers: list) -> dict:
                         logger.warning(f"成交报告推送失败 {symbol}: {e2}")
                 except Exception as e:
                     logger.error(f"买入执行失败 {symbol}: {e}")
+                    _ledger.event("buy_exception", {
+                        "symbol": symbol,
+                        "error": str(e),
+                        "exception_type": type(e).__name__,
+                    }, trace_id=signal_tid, level="ERROR")
 
         # ── 利空否决 ──
         elif analyze_result["action"] == "veto":

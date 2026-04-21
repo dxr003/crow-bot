@@ -28,7 +28,12 @@ from __future__ import annotations
 
 import logging
 import re
+import sys
 from typing import Optional
+
+if "/root" not in sys.path:
+    sys.path.insert(0, "/root")
+from ledger import get_ledger, new_trace_id, set_trace_id, current_trace_id
 
 from trader.parser import parse, is_trade_command
 from trader.multi import executor
@@ -36,6 +41,9 @@ from trader.multi.permissions import check
 from trader.multi.registry import resolve_name
 
 logger = logging.getLogger(__name__)
+
+# L0 对话事件账本：dialog/commands.jsonl
+_dialog_ledger = get_ledger("dialog", "commands")
 
 
 # ──────────────────────────────────────────
@@ -174,11 +182,20 @@ def try_dispatch(role: str, text: str) -> tuple[str | None, str]:
     if not text or not text.strip():
         return None, "none"
 
+    # 每次对话生成 trace_id，贯穿到 executor（@log_call 会从 ContextVar 继承）
+    tid = new_trace_id()
+    set_trace_id(tid)
+
     # 第一关：是否像交易指令（用 parser 既有判断，避免误吞日常对话）
     # 但 is_trade_command 看前 3 个 token；如果首 token 是账户前缀，
     # 要拨开账户前缀再判断
     _, stripped_for_check = _extract_account(text)
     if not is_trade_command(stripped_for_check or text):
+        _dialog_ledger.event("dispatch_miss", {
+            "role": role,
+            "text": text[:200],
+            "reason": "not_trade_command",
+        }, trace_id=tid)
         return None, "none"
 
     # 第二关：决定账户
@@ -187,11 +204,19 @@ def try_dispatch(role: str, text: str) -> tuple[str | None, str]:
     # 第三关：解析订单
     order = parse(stripped)
     if order is None:
+        _dialog_ledger.event("dispatch_miss", {
+            "role": role, "account": account,
+            "text": text[:200], "reason": "parse_failed",
+        }, trace_id=tid)
         return None, "none"
 
     action = order.get("action")
     symbol = order.get("symbol")
     if not action:
+        _dialog_ledger.event("dispatch_miss", {
+            "role": role, "account": account,
+            "text": text[:200], "reason": "no_action",
+        }, trace_id=tid)
         return None, "none"
 
     # 第四关：权限快速拦截，给清晰回执
@@ -199,7 +224,16 @@ def try_dispatch(role: str, text: str) -> tuple[str | None, str]:
     if action in ("cancel_orders",):
         needed_action = "trade"
     if not check(role, needed_action, account):
+        _dialog_ledger.event("dispatch_denied", {
+            "role": role, "account": account, "action": action, "symbol": symbol,
+            "reason": "permission_deny",
+        }, trace_id=tid, level="WARNING")
         return f"⛔ [{account}] {role} 无权 {needed_action}（权限层拦截）", "err"
+
+    _dialog_ledger.event("dispatch_hit", {
+        "role": role, "account": account, "action": action, "symbol": symbol,
+        "src": src, "text": text[:200],
+    }, trace_id=tid)
 
     # ─── 路由到 executor ───
     try:
@@ -218,9 +252,17 @@ def try_dispatch(role: str, text: str) -> tuple[str | None, str]:
         # 不支持的动作（roll/trailing 等）→ 不处理，让 AI 接管走专用模块
         return None, "none"
     except PermissionError as e:
+        _dialog_ledger.event("dispatch_error", {
+            "role": role, "account": account, "action": action, "symbol": symbol,
+            "error": str(e), "exception_type": "PermissionError",
+        }, trace_id=tid, level="ERROR")
         return f"⛔ [{account}] 权限拒绝: {e}", "err"
     except Exception as e:
         logger.exception(f"[dispatch] {role}@{account} {action} {symbol} 异常")
+        _dialog_ledger.event("dispatch_error", {
+            "role": role, "account": account, "action": action, "symbol": symbol,
+            "error": str(e), "exception_type": type(e).__name__,
+        }, trace_id=tid, level="ERROR")
         return f"❌ [{account}] {action} {symbol} 异常: {e}", "err"
 
 

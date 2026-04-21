@@ -30,15 +30,15 @@ from pathlib import Path
 if "/root" not in sys.path:
     sys.path.insert(0, "/root")
 
-from logs.lib.logkit import get_logger, new_trace_id, set_trace_id, current_trace_id
+from ledger import get_ledger, new_trace_id, set_trace_id, current_trace_id
 
 logger_std = logging.getLogger(__name__)
 
-# 新日志路径（只读用，写入走 logkit）
+# 新日志路径（只读用，写入走 ledger）
 NEW_LOG_FILE = Path("/root/logs/exec/orders.jsonl")
 
-# logkit logger（模块级单例）
-_exec_logger = get_logger("exec", "orders")
+# L0 账本单例
+_exec_logger = get_ledger("exec", "orders")
 
 
 def _safe(v):

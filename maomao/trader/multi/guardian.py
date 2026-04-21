@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import subprocess
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
@@ -25,10 +26,17 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
+if "/root" not in sys.path:
+    sys.path.insert(0, "/root")
+from ledger import get_ledger, new_trace_id
+
 from trader.multi.registry import list_accounts, get_futures_client
 from trader.multi._atomic import atomic_write_json
 
 logger = logging.getLogger(__name__)
+
+# L0 系统运维账本：system/guardian.jsonl
+_sys_ledger = get_ledger("system", "guardian")
 
 _env_loaded = False
 
@@ -175,6 +183,7 @@ def mark_alert(state: dict, key: str) -> None:
 
 def run() -> dict:
     now = datetime.now(TZ_BJ)
+    tid = new_trace_id()
     report = {
         "ts": now.isoformat(),
         "accounts": check_accounts(),
@@ -207,6 +216,16 @@ def run() -> dict:
             )
         anomaly_keys.append("hb:bull_sniper")
 
+    # 每次巡检落一条 heartbeat 事件（有/无异常都记），方便回溯运维时间线
+    _sys_ledger.event("heartbeat", {
+        "accounts_ok": sum(1 for a in report["accounts"] if a["ok"]),
+        "accounts_total": len(report["accounts"]),
+        "services_ok": sum(1 for s in report["services"] if s["ok"]),
+        "services_total": len(report["services"]),
+        "bull_sniper_age_sec": hb.get("age_sec"),
+        "anomaly_count": len(report["anomalies"]),
+    }, trace_id=tid, level="WARNING" if report["anomalies"] else "INFO")
+
     # 告警（去重）
     state = load_state()
     if report["anomalies"]:
@@ -215,8 +234,18 @@ def run() -> dict:
             lines = [f"⚠️ <b>夜间守护告警</b>  {now.strftime('%H:%M:%S')}"]
             for msg in report["anomalies"]:
                 lines.append(f"  • {msg}")
-            if send_admin("\n".join(lines)):
+            alert_text = "\n".join(lines)
+            if send_admin(alert_text):
                 mark_alert(state, anomaly_key)
+                _sys_ledger.event("alert_sent", {
+                    "anomalies": report["anomalies"],
+                    "key": anomaly_key,
+                }, trace_id=tid, level="WARNING")
+            else:
+                _sys_ledger.event("alert_send_failed", {
+                    "anomalies": report["anomalies"],
+                    "key": anomaly_key,
+                }, trace_id=tid, level="ERROR")
 
     state["last_run"] = report["ts"]
     state["last_report"] = report
