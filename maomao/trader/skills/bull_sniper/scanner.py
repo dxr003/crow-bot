@@ -1324,9 +1324,9 @@ def run():
             except Exception as e:
                 logger.warning(f"状态卡片推送失败: {e}")
 
-        # :02 健康报告（私信乌鸦，与状态卡错开）
+        # 每 4 小时 :02 健康报告（私信乌鸦，与状态卡错开；触发时刻 00/04/08/12/16/20）
         current_min = _dt.datetime.now().minute
-        if current_min == 2 and current_hour != last_health_hour:
+        if current_hour % 4 == 0 and current_min == 2 and current_hour != last_health_hour:
             try:
                 send_health_report(state, state.get("filter_log", []))
                 state["stats"] = {"scans": 0, "pool_entries": 0, "signals": 0}
