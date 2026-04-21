@@ -109,7 +109,11 @@ def log_call(action_name: str | None = None):
                 elapsed_ms = int((time.time() - t0) * 1000)
                 payload = {**payload_head, "ms": elapsed_ms}
                 if isinstance(result, dict):
-                    payload["ok"] = bool(result.get("ok"))
+                    # 动作类返 {ok:True/False}；查询类不带 ok —— 按"显式 False 或有 error 才算失败"判
+                    if "ok" in result:
+                        payload["ok"] = bool(result["ok"])
+                    else:
+                        payload["ok"] = not bool(result.get("error"))
                     if result.get("error"):
                         payload["error"] = _safe(result["error"])
                     payload["result"] = _summarize_result(result)
