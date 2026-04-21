@@ -300,9 +300,20 @@ cat /root/changelog/$(ls /root/changelog/ | grep -v README | sort | tail -1)
 
 ### 铁律6：完成一块测一块
 
-### 铁律7：不触碰Claude Code系统规则
-写功能和脚本不涉及Claude Code本身的系统配置、权限、规则。
-出现需要动Code系统层面的问题，先报告乌鸦，不自己处理。
+### 铁律7a：Claude Code 系统红线（不许碰）
+以下是 Claude Code 运行时的硬底座，写功能/脚本一律绕开。需要动先报告乌鸦，
+等明确批准才能操作：
+- `~/.claude/settings.json` / `settings.local.json`（权限、hooks、env）
+- `/root/CLAUDE.md` 团队规则本身
+- MCP 配置（`.mcp.json` / MCP server 注册）
+- `.env` 文件（API key / 私钥 / 敏感配置）
+
+### 铁律7b：自建 skill / 规则文件（可改，必须先出 diff）
+以下是乌鸦团队自己写的、允许大猫动的规则/skill 文件，改动流程：
+先读 → 出 diff 发乌鸦 → 等批 → 再落地。不许直接改。
+- `~/.claude/skills/<skill>/SKILL.md`（crow-review 等自建 skill）
+- `~/.claude/rules/*.md`（共享笔记/运维/交易等规则）
+- `/root/maomao/.claude/rules/*.md`（玄玄规则）
 
 ### 铁律8：大猫执行前必须报告计划
 未经乌鸦明确指令，禁止修改任何文件。
