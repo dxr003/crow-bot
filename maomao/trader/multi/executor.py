@@ -20,16 +20,26 @@ executor.py — 多账户执行适配层 v1.0（2026-04-19）
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal, ROUND_DOWN
+from urllib.parse import urlencode
+
+import requests
 
 from trader.multi.registry import (
-    get_futures_client, get_spot_client, resolve_name, list_accounts,
+    get_credentials, get_futures_client, get_spot_client,
+    resolve_name, list_accounts,
 )
 from trader.multi.permissions import require, check
+from trader.multi.exec_log import log_call
+
+_FAPI_BASE = "https://fapi.binance.com"
+_ALGO_TIMEOUT = 10  # 秒
 
 logger = logging.getLogger(__name__)
 
@@ -160,11 +170,13 @@ def _pos_side_for_close(position_amt: float) -> str:
 # 查询
 # ══════════════════════════════════════════
 
+@log_call("get_balance")
 def get_balance(role: str, account: str) -> dict:
     """查合约+现货+资金三项（铁律：余额默认三项都查）"""
     return get_full_balance(role, account)
 
 
+@log_call("get_futures_only")
 def get_futures_only(role: str, account: str) -> dict:
     """只查合约（guardian/内部调用用）"""
     require(role, "query", account)
@@ -179,6 +191,7 @@ def get_futures_only(role: str, account: str) -> dict:
     }
 
 
+@log_call("get_full_balance")
 def get_full_balance(role: str, account: str) -> dict:
     """查合约+现货+资金账户（3 路 REST 并行；spot/funding 失败静默跳过，合约是主数据）"""
     require(role, "query", account)
@@ -249,6 +262,7 @@ def get_full_balance(role: str, account: str) -> dict:
     return out
 
 
+@log_call("get_positions")
 def get_positions(role: str, account: str, symbol: str | None = None) -> list[dict]:
     """查持仓（仅非零）"""
     require(role, "query", account)
@@ -258,26 +272,125 @@ def get_positions(role: str, account: str, symbol: str | None = None) -> list[di
     return [p for p in raw if float(p.get("positionAmt", 0)) != 0]
 
 
+@log_call("get_open_orders")
 def get_open_orders(role: str, account: str, symbol: str | None = None) -> list[dict]:
+    """合并返回普通挂单 + algo 条件单（止损/止盈）。
+
+    每条统一带：
+        kind:   "normal" | "algo"
+        id:     orderId 或 algoId（撤单要这个）
+        type:   LIMIT/MARKET/STOP_MARKET/TAKE_PROFIT_MARKET 等
+        side:   BUY/SELL
+        positionSide: LONG/SHORT/BOTH
+        symbol: SOLUSDT
+        price:  挂单价（普通单的 price，algo 留空）
+        stopPrice: 触发价（algo / STOP-类）
+        origQty: 数量（algo closePosition=True 时为 0）
+        closePosition: bool
+    """
     require(role, "query", account)
     account = resolve_name(account)
     c = get_futures_client(account)
-    return c.get_orders(symbol=symbol) if symbol else c.get_orders()
+
+    out: list[dict] = []
+
+    # 1) 普通挂单（失败时记日志，不再静默——避免误报"无挂单"）
+    try:
+        normal = c.get_orders(symbol=symbol) if symbol else c.get_orders()
+    except Exception as e:
+        normal = []
+        logger.warning(f"[get_open_orders] {account} {symbol or '*'} 普通挂单查询失败: {e}")
+    for o in normal or []:
+        out.append({
+            "kind": "normal",
+            "id": o.get("orderId"),
+            "type": o.get("type"),
+            "side": o.get("side"),
+            "positionSide": o.get("positionSide"),
+            "symbol": o.get("symbol"),
+            "price": o.get("price"),
+            "stopPrice": o.get("stopPrice"),
+            "origQty": o.get("origQty"),
+            "closePosition": o.get("closePosition"),
+            "raw": o,
+        })
+
+    # 2) algo 条件单（STOP_MARKET / TAKE_PROFIT_MARKET / TRAILING_STOP_MARKET）
+    try:
+        code, body = _algo_request(account, "GET", "/fapi/v1/openAlgoOrders", {})
+        items = body if isinstance(body, list) else (body.get("orders") if isinstance(body, dict) else None)
+        if code != 200:
+            logger.warning(f"[get_open_orders] {account} {symbol or '*'} algo 列举失败 code={code} body={body}")
+        elif isinstance(items, list):
+            for o in items:
+                if symbol and o.get("symbol") != symbol:
+                    continue
+                out.append({
+                    "kind": "algo",
+                    "id": o.get("algoId"),
+                    "type": o.get("orderType"),
+                    "side": o.get("side"),
+                    "positionSide": o.get("positionSide"),
+                    "symbol": o.get("symbol"),
+                    "price": None,
+                    "stopPrice": o.get("triggerPrice"),
+                    "origQty": o.get("quantity"),
+                    "closePosition": o.get("closePosition"),
+                    "raw": o,
+                })
+    except Exception as e:
+        logger.warning(f"[get_open_orders] {account} {symbol or '*'} algo 异常: {e}")
+
+    return out
+
+
+@log_call("cancel_order")
+def cancel_order(role: str, account: str, symbol: str,
+                  kind: str, oid: int | str) -> dict:
+    """按 ID 撤单。
+
+    kind="normal" → DELETE /fapi/v1/order  by orderId
+    kind="algo"   → DELETE /fapi/v1/algoOrder  by algoId
+    """
+    require(role, "trade", account)
+    account = resolve_name(account)
+    k = (kind or "").lower()
+    if k == "normal":
+        c = get_futures_client(account)
+        try:
+            r = c.cancel_order(symbol=symbol, orderId=int(oid))
+            return {"ok": True, "account": account, "symbol": symbol,
+                    "kind": "normal", "id": oid, "raw": r}
+        except Exception as e:
+            return {"error": str(e)}
+    elif k == "algo":
+        try:
+            code, body = _algo_request(account, "DELETE", "/fapi/v1/algoOrder",
+                                        {"algoId": str(oid)})
+            if code == 200:
+                return {"ok": True, "account": account, "symbol": symbol,
+                        "kind": "algo", "id": oid, "raw": body}
+            return {"error": f"algo 撤单失败 ({body.get('code', code) if isinstance(body, dict) else code}): {body}"}
+        except Exception as e:
+            return {"error": str(e)}
+    else:
+        return {"error": f"非法 kind: {kind}（应为 normal/algo）"}
 
 
 # ══════════════════════════════════════════
 # 下单
 # ══════════════════════════════════════════
 
+@log_call("open_market")
 def open_market(role: str, account: str, symbol: str, side: str,
                 margin: float, leverage: int,
-                margin_type: str = "ISOLATED") -> dict:
+                margin_type: str = "CROSSED") -> dict:
     """
     市价开仓。
     - side: "BUY"(做多) / "SELL"(做空)
     - margin: 保证金 U（不含杠杆）
     - leverage: 杠杆倍数
-    - margin_type: "ISOLATED"(逐仓) / "CROSSED"(全仓)
+    - margin_type: "CROSSED"(全仓 · 默认) / "ISOLATED"(逐仓)
     """
     require(role, "trade", account)
     account = resolve_name(account)
@@ -340,10 +453,13 @@ def open_market(role: str, account: str, symbol: str, side: str,
         return {"error": str(e)}
 
 
+@log_call("close_market")
 def close_market(role: str, account: str, symbol: str,
-                 pct: float = 100.0) -> dict:
+                 pct: float = 100.0, direction: str | None = None) -> dict:
     """市价平仓。pct=100 全平，50 平一半。
-    hedge mode 下若同时持多空两侧，逐一平掉。"""
+    direction='多'/'空'/'long'/'short'：仅平指定方向（hedge mode 下区分）。
+    无持仓时返回 {"ok": False, "no_position": True, ...}，调用方据此区分"已平/本来就空"。
+    """
     require(role, "trade", account)
     account = resolve_name(account)
     c = get_futures_client(account)
@@ -351,7 +467,24 @@ def close_market(role: str, account: str, symbol: str,
     positions = [p for p in c.get_position_risk(symbol=symbol)
                  if float(p.get("positionAmt", 0)) != 0]
     if not positions:
-        return {"error": f"{symbol} 无持仓"}
+        return {"ok": False, "no_position": True,
+                "account": account, "symbol": symbol,
+                "error": f"{account} 无 {symbol} 持仓（未发起平仓动作）"}
+
+    # 方向过滤
+    if direction:
+        d = direction.lower()
+        want_long = d in ("多", "long", "buy")
+        want_short = d in ("空", "short", "sell")
+        if not (want_long or want_short):
+            return {"ok": False, "error": f"非法方向: {direction}"}
+        positions = [p for p in positions
+                     if (float(p["positionAmt"]) > 0) == want_long]
+        if not positions:
+            dir_text = "多" if want_long else "空"
+            return {"ok": False, "no_position": True,
+                    "account": account, "symbol": symbol,
+                    "error": f"{account} {symbol} 无{dir_text}仓可平"}
 
     flt = _get_filters(c, symbol)
     hedge = _is_hedge(c, account)
@@ -395,10 +528,41 @@ _TRIGGER_KIND = {
 }
 
 
+# ══════════════════════════════════════════
+# algoOrder（条件单）— 多账户签名调用
+# 币安 2025-12-09 起 STOP_MARKET/TAKE_PROFIT_MARKET 必须走 /fapi/v1/algoOrder，
+# 不能再用 UMFutures.new_order，否则报 -4120
+# ══════════════════════════════════════════
+
+def _algo_sign(secret: str, params: dict) -> str:
+    return hmac.new(
+        secret.encode("utf-8"),
+        urlencode(params).encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _algo_request(account: str, method: str, path: str, params: dict) -> tuple[int, dict | list]:
+    """对账户做 algoOrder 端点的签名请求；返回 (status_code, body)。"""
+    ak, sk = get_credentials(account)
+    p = dict(params)
+    p["timestamp"] = str(int(time.time() * 1000))
+    p["signature"] = _algo_sign(sk, p)
+    headers = {"X-MBX-APIKEY": ak}
+    fn = getattr(requests, method.lower())
+    resp = fn(f"{_FAPI_BASE}{path}", params=p, headers=headers, timeout=_ALGO_TIMEOUT)
+    try:
+        body = resp.json()
+    except Exception:
+        body = {"raw": resp.text}
+    return resp.status_code, body
+
+
 def _place_close_trigger(role: str, account: str, symbol: str,
                           trigger_price: float, direction: str,
                           kind: str) -> dict:
-    """止损/止盈共用实现：方向解析 + tickSize 对齐 + hedge positionSide。"""
+    """止损/止盈共用实现：方向解析 + tickSize 对齐 + hedge positionSide。
+    走 /fapi/v1/algoOrder（CONDITIONAL）。"""
     require(role, "trade", account)
     account = resolve_name(account)
     c = get_futures_client(account)
@@ -415,19 +579,30 @@ def _place_close_trigger(role: str, account: str, symbol: str,
     flt = _get_filters(c, symbol)
     trigger_price = _fix(trigger_price, flt["tickSize"])
 
-    kwargs = {"symbol": symbol, "side": close_side, "type": order_type,
-              "stopPrice": trigger_price, "closePosition": True}
+    params = {
+        "algoType": "CONDITIONAL",
+        "symbol": symbol,
+        "side": close_side,
+        "type": order_type,
+        "triggerPrice": str(trigger_price),
+        "closePosition": "true",
+    }
     if _is_hedge(c, account):
-        kwargs["positionSide"] = pos_side
+        params["positionSide"] = pos_side
 
     try:
-        order = c.new_order(**kwargs)
+        code, body = _algo_request(account, "POST", "/fapi/v1/algoOrder", params)
+        if code != 200:
+            return {"error": f"algoOrder 失败 ({body.get('code', code)}): {body.get('msg', body)}"}
         return {"ok": True, "account": account, "symbol": symbol,
-                price_field: trigger_price, "orderId": order.get("orderId")}
+                price_field: trigger_price,
+                "algoId": body.get("algoId") or body.get("orderId"),
+                "raw": body}
     except Exception as e:
         return {"error": str(e)}
 
 
+@log_call("place_stop_loss")
 def place_stop_loss(role: str, account: str, symbol: str,
                     stop_price: float, direction: str) -> dict:
     """挂止损单（STOP_MARKET, closePosition）。
@@ -437,36 +612,79 @@ def place_stop_loss(role: str, account: str, symbol: str,
     return _place_close_trigger(role, account, symbol, stop_price, direction, "stop")
 
 
+@log_call("place_take_profit")
 def place_take_profit(role: str, account: str, symbol: str,
                       tp_price: float, direction: str) -> dict:
     """挂止盈单（TAKE_PROFIT_MARKET, closePosition）。"""
     return _place_close_trigger(role, account, symbol, tp_price, direction, "tp")
 
 
+@log_call("cancel_all")
 def cancel_all(role: str, account: str, symbol: str) -> dict:
-    """撤销某币种所有挂单（无挂单时也返回 ok）"""
+    """撤销某币种全部挂单：普通单（LIMIT/MARKET）+ algo 条件单（STOP/TP）。
+    无挂单时也返回 ok。"""
     require(role, "trade", account)
     account = resolve_name(account)
     c = get_futures_client(account)
+
+    normal_ok, normal_err = True, None
     try:
         c.cancel_open_orders(symbol=symbol)
-        return {"ok": True, "account": account, "symbol": symbol}
     except Exception as e:
         msg = str(e)
-        # -2011 / Unknown order：本来就没挂单，视为成功
-        if "-2011" in msg or "Unknown order" in msg or "no open orders" in msg.lower():
-            return {"ok": True, "account": account, "symbol": symbol, "no_orders": True}
-        return {"error": msg}
+        # -2011 / Unknown order：本来就没普通挂单，视为成功
+        if not ("-2011" in msg or "Unknown order" in msg or "no open orders" in msg.lower()):
+            normal_ok, normal_err = False, msg
+
+    algo_cancelled = []
+    algo_err = None
+    try:
+        code, body = _algo_request(account, "GET", "/fapi/v1/openAlgoOrders", {})
+        items = body if isinstance(body, list) else (body.get("orders") if isinstance(body, dict) else None)
+        if code == 200 and isinstance(items, list):
+            for o in items:
+                if o.get("symbol") != symbol:
+                    continue
+                algo_id = o.get("algoId") or o.get("orderId")
+                if not algo_id:
+                    continue
+                dcode, dbody = _algo_request(account, "DELETE", "/fapi/v1/algoOrder",
+                                              {"algoId": str(algo_id)})
+                algo_cancelled.append({"algoId": algo_id, "ok": dcode == 200,
+                                       "resp": dbody if dcode != 200 else None})
+        elif code != 200:
+            algo_err = f"列举 algoOrders 失败 ({body.get('code', code) if isinstance(body, dict) else code}): {body}"
+    except Exception as e:
+        algo_err = str(e)
+
+    if not normal_ok and not algo_cancelled:
+        return {"error": normal_err or algo_err or "cancel failed"}
+
+    # 检查 algo 部分是否有撤单失败的子项（dispatch/玄玄据此判断要不要再撤一次）
+    algo_failed = [a for a in algo_cancelled if not a.get("ok")]
+    no_orders = normal_ok and not normal_err and not algo_cancelled and not algo_err
+    return {
+        "ok": not algo_failed and normal_ok,
+        "no_orders": no_orders,
+        "account": account, "symbol": symbol,
+        "normal_cleared": normal_ok,
+        "normal_error": normal_err,
+        "algo_cancelled": algo_cancelled,
+        "algo_failed": algo_failed,
+        "algo_error": algo_err,
+    }
 
 
+@log_call("open_limit")
 def open_limit(role: str, account: str, symbol: str, side: str,
                margin: float, leverage: int, price: float,
-               margin_type: str = "ISOLATED") -> dict:
+               margin_type: str = "CROSSED") -> dict:
     """
     限价开仓（GTC）。
     - side: BUY(做多)/SELL(做空)
     - margin: 保证金 U；数量 = margin*leverage/price
     - price: 挂单价（按 tickSize 对齐）
+    - margin_type: 默认 CROSSED（全仓），可改 ISOLATED
     """
     require(role, "trade", account)
     account = resolve_name(account)
@@ -523,6 +741,7 @@ def open_limit(role: str, account: str, symbol: str, side: str,
         return {"error": str(e)}
 
 
+@log_call("add_to_position")
 def add_to_position(role: str, account: str, symbol: str, margin: float) -> dict:
     """加仓：自动识别现有持仓方向和杠杆，按市价加 margin U。
     hedge 模式且双向都持仓时拒绝（语义不明）。"""
@@ -549,12 +768,14 @@ _LIQ_MMR = 0.005
 _LIQ_SLIPPAGE = 0.01
 
 
+@log_call("open_liq")
 def open_liq(role: str, account: str, symbol: str, side: str,
              wallet: float, liq_price: float,
-             margin_type: str = "ISOLATED") -> dict:
+             margin_type: str = "CROSSED") -> dict:
     """
     强平价反推开仓：给定保证金 wallet 和目标强平价 liq_price，
     自动算 qty 和派生杠杆。MMR=0.005，留 1% 滑点缓冲。
+    margin_type 默认 CROSSED（全仓）。
     """
     require(role, "trade", account)
     account = resolve_name(account)
@@ -657,11 +878,13 @@ def _fanout(role: str, fn) -> dict:
     return out
 
 
+@log_call("get_all_balances")
 def get_all_balances(role: str) -> dict:
     """聚合查询所有角色有权的账户余额（合约+现货+资金），并行"""
     return _fanout(role, get_full_balance)
 
 
+@log_call("get_all_positions")
 def get_all_positions(role: str) -> dict:
     """聚合查询所有角色有权的账户持仓，并行"""
     return _fanout(role, get_positions)
@@ -690,6 +913,7 @@ def _norm_wallet(name: str) -> str:
     raise ValueError(f"未知钱包: {name}（支持：现货/合约/资金）")
 
 
+@log_call("transfer")
 def transfer(role: str, account: str, amount: float,
              from_wallet: str, to_wallet: str, asset: str = "USDT") -> dict:
     """
