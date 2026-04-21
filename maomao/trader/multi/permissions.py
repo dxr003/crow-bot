@@ -12,11 +12,16 @@
 """
 from __future__ import annotations
 
+import sys
 import threading
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+if "/root" not in sys.path:
+    sys.path.insert(0, "/root")
+from ledger import log_call as trace_call
 
 from trader.multi.registry import resolve_name
 
@@ -63,6 +68,7 @@ def _match(rules: list[str], account_official: str) -> bool:
     return account_official in rules
 
 
+@trace_call
 def check(role: str, action: str, account: str) -> bool:
     """
     判断 role 是否有权限对 account 执行 action。

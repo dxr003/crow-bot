@@ -37,6 +37,7 @@ from trader.multi.registry import (
 )
 from trader.multi.permissions import require, check
 from trader.multi.exec_log import log_call
+from ledger import log_call as trace_call
 
 _FAPI_BASE = "https://fapi.binance.com"
 _ALGO_TIMEOUT = 10  # 秒
@@ -381,6 +382,7 @@ def cancel_order(role: str, account: str, symbol: str,
 # 下单
 # ══════════════════════════════════════════
 
+@trace_call
 @log_call("open_market")
 def open_market(role: str, account: str, symbol: str, side: str,
                 margin: float, leverage: int,
@@ -453,6 +455,7 @@ def open_market(role: str, account: str, symbol: str, side: str,
         return {"error": str(e)}
 
 
+@trace_call
 @log_call("close_market")
 def close_market(role: str, account: str, symbol: str,
                  pct: float = 100.0, direction: str | None = None) -> dict:

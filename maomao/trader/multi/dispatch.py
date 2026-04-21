@@ -33,7 +33,7 @@ from typing import Optional
 
 if "/root" not in sys.path:
     sys.path.insert(0, "/root")
-from ledger import get_ledger, new_trace_id, set_trace_id, current_trace_id
+from ledger import get_ledger, new_trace_id, set_trace_id, current_trace_id, log_call as trace_call
 
 from trader.parser import parse, is_trade_command
 from trader.multi import executor
@@ -171,6 +171,7 @@ def _fmt_simple(account: str, action: str, symbol: str, result: dict, source: st
 # 主入口
 # ──────────────────────────────────────────
 
+@trace_call
 def try_dispatch(role: str, text: str) -> tuple[str | None, str]:
     """尝试解析+派发对话指令。
 
@@ -268,6 +269,7 @@ def try_dispatch(role: str, text: str) -> tuple[str | None, str]:
 # 各 action 执行体
 # ──────────────────────────────────────────
 
+@trace_call
 def _do_open(role: str, account: str, src: str, order: dict) -> tuple[str, str]:
     symbol = order["symbol"]
     side = "BUY" if order["action"] == "open_long" else "SELL"
@@ -321,6 +323,7 @@ def _do_open(role: str, account: str, src: str, order: dict) -> tuple[str, str]:
     return reply, "ok"
 
 
+@trace_call
 def _do_close(role: str, account: str, src: str, order: dict) -> tuple[str, str]:
     symbol = order["symbol"]
     pct = order.get("pct") or 100.0

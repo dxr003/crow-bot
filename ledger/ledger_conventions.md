@@ -1,10 +1,11 @@
 # Ledger Conventions · 事件账本约定
 
-**版本**：v1.1（2026-04-21）
+**版本**：v1.2（2026-04-21）
 **定位**：乌鸦团队所有模块共用的 L0 事件账本约定文档
 **修改原则**：类 7b 规则——改前出 diff、乌鸦明批、再落地
 
 **CHANGELOG**
+- v1.2 (2026-04-21)：§8.1 挂点对齐真实代码（v1.0 列的 `order.py`/`risk.py` 不存在），改为 dispatch._do_open/_do_close + executor.open_market/close_market + permissions.check，共 6 点
 - v1.1 (2026-04-21)：result enum 扩至 7 态，新增 `timeout` / `rate_limited`，来源 Phase B 第 2 步实测冲突
 - v1.0 (2026-04-21)：起草首版
 
@@ -308,7 +309,7 @@ set_trace_id(incoming_payload["trace_id_out"])
 
 **module_called** · 金路径函数入口
 ```json
-{"ts":"...","trace_id":"bc157eed","level":"DEBUG","actor":"executor","event_type":"module_called","target":"dispatch_open","result":"n-a","payload":{"function":"trader.multi.executor.dispatch_open","args_summary":{"role":"玄玄","account":"币安1","symbol":"BTCUSDT"},"caller":"trader.multi.dispatch.try_dispatch"}}
+{"ts":"...","trace_id":"bc157eed","level":"DEBUG","actor":"executor","event_type":"module_called","target":"open_market","result":"n-a","payload":{"function":"trader.multi.executor.open_market","args_summary":{"role":"玄玄","account":"币安1","symbol":"BTCUSDT"},"caller":"trader.multi.dispatch._do_open"}}
 ```
 
 ---
@@ -339,12 +340,20 @@ ledger.event("xxx", payload, related_files=["trader/multi/executor.py"])
 
 ## 8. @log_call 装饰器
 
-### 8.1 初始挂载点（5 个，乌鸦 2026-04-21 批）
-1. `trader/multi/order.py::place_order`
-2. `trader/multi/order.py::cancel_order`
-3. `trader/multi/risk.py::check`
-4. `trader/multi/executor.py::dispatch_open`
-5. `trader/multi/executor.py::dispatch_close`
+### 8.1 初始挂载点（6 个，v1.2 对齐真实代码）
+
+> v1.0 原定 5 点里 `order.py::place_order` / `order.py::cancel_order` / `risk.py::check` / `executor.py::dispatch_open|close` 在真实代码中不存在——`multi/` 下无 `order.py`/`risk.py`，开仓分发在 `dispatch.py`、下单动作散在 `executor.py`。v1.2 对齐现实并补权限闸门一点。
+
+1. `trader/multi/dispatch.py::try_dispatch` — TG 指令总入口，trace_id 发源地
+2. `trader/multi/dispatch.py::_do_open` — 开仓分发
+3. `trader/multi/dispatch.py::_do_close` — 平仓分发
+4. `trader/multi/executor.py::open_market` — 市价开仓主力（REST 落地）
+5. `trader/multi/executor.py::close_market` — 市价平仓
+6. `trader/multi/permissions.py::check` — 权限闸门（role × action × account）
+
+**延伸挂点（不在初始批内，新增必须乌鸦明批）**：`executor.open_limit` / `open_liq` / `add_to_position` / `cancel_order` / `cancel_all` / `place_stop_loss` / `place_take_profit`。
+
+**未来目标**：若建立 `multi/order.py` + `multi/risk.py`，挂点迁移到 `place_order` / `risk.check`。当前以上表 6 个点为准。
 
 ### 8.2 装饰器行为
 - 函数入口落一条 `trace/module_called.jsonl`
@@ -433,4 +442,6 @@ jq 'select(.target=="BTCUSDT" and (.event_type | startswith("order_")))' /root/l
 
 ## 变更记录
 
+- 2026-04-21 v1.2 · §8.1 挂点对齐真实代码：dispatch._do_open/_do_close + executor.open_market/close_market + permissions.check，共 6 点
+- 2026-04-21 v1.1 · result enum 扩至 7 态（+timeout/rate_limited）
 - 2026-04-21 v1.0 · 乌鸦定方向为"动作账本不记成本"，起草首版

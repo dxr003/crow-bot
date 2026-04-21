@@ -1,7 +1,7 @@
 # Phase A · 第 3 步阻塞点报告
 
 **时间**：2026-04-21 15:50+08
-**状态**：阻塞 · 等乌鸦拍 A/B/C
+**状态**：✅ 已解决（2026-04-21 17:00）· 乌鸦选 A，conventions v1.2 对齐真实代码 + 6 挂点全部装好 · 冒烟 trace/module_called.jsonl 双条（pending/success）落盘通过
 
 ---
 
