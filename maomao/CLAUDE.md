@@ -110,19 +110,36 @@
 
 路径：/root/maomao/trader/
 
+### 对话入口（2026-04-21 起）
+**所有 TG 对话指令统一走 `trader.multi.dispatch.try_dispatch(role, text)`**，不再走老 `trader.router`。
+- 入口在 `/root/shared/core.py`（已封板），bot_dir 为 maomao→role=玄玄、tiantian→role=天天
+- dispatch 识别账户前缀（"币安2 做多 SOL ..."）→ 派发到 `trader.multi.executor`
+- 默认账户：玄玄/大猫=币安1，天天=币安2
+- 默认保证金模式 `margin_type="CROSSED"`（全仓），逐仓需显式说"逐仓"
+- 所有 executor 公开方法均带 `@log_call` 装饰，行为写到 `/root/logs/exec/orders.jsonl`（JSONL + ISO8601+08 时间戳 + trace_id，2026-04-21 Phase A 切换）
+
+### 模块表
+
 | 模块 | 状态 | 功能 |
 |------|------|------|
-| exchange.py | 🔒封板 | Binance对接，algoOrder条件单，多账户余额，划转 |
-| order.py | 🔒封板 | 开/平/加/止盈/止损/强平价/暗单/百分比平 |
-| parser.py | 🔒封板 | 自然语言→JSON，中文ASCII预处理 |
-| preview.py | 🔒封板 | 预览卡+确认流（文字确认/取消/60s超时） |
-| router.py | 🔒封板 | 交易关键词路由，直接动作vs预览动作 |
-| trailing.py | 🔒封板 | 移动止盈 v4.1，双方向+多账户，cron每分钟检查 |
-| rolling.py | 🔒封板 | 滚仓 v2.1，双方向+多账户，浮盈50%加仓，暗单执行 |
+| multi/dispatch.py | ✅ 主路径 | TG 对话指令派发，识别账户前缀+方向+保证金 |
+| multi/executor.py | ✅ 主路径 | 多账户开/平/加/挂单/查询，全动作日志 |
+| multi/exec_log.py | ✅ 主路径 | 行为日志 → /root/logs/exec/orders.jsonl（logkit，15MB×10，带 trace_id） |
+| multi/registry.py | ✅ | 账户注册+客户端缓存（双检锁） |
+| multi/permissions.py | ✅ | role × action × account 权限矩阵 |
+| multi/strategy_router.py | ✅ | 策略信号 → executor 派发（自动交易用） |
+| multi/guardian.py | ✅ | 4 账户连接巡检+5 服务健康+心跳 |
+| trailing.py | 🔒封板 | 移动止盈 v4.1，双方向+多账户，cron 每分钟 |
+| rolling.py | 🔒封板 | 滚仓 v2.1，双方向+多账户，浮盈 50% 加仓 |
+| exchange.py | 🔒兼容遗留 | 旧单账户接口；trailing/rolling 仍依赖，不参与对话路径 |
+| order.py | 🔒兼容遗留 | 旧单账户开平；不参与对话路径，待迁完后下线 |
+| parser.py | 🔒兼容遗留 | 旧 NL→JSON；不识别账户前缀，不参与对话路径 |
+| preview.py | 🔒兼容遗留 | 旧预览确认；新路径走"币种+方向+金额"直派，不用预览卡 |
+| router.py | 🔒兼容遗留 | 旧关键词路由；2026-04-21 已被 dispatch 替代 |
 | risk.py | ⏳ | 风控拦截（待开发） |
 
-> 封板文件已 `chattr +i`，不得直接修改。需改必须先报乌鸦，解锁后再动。
-> /root/shared/core.py 同步封板。
+> 封板文件 `chattr +i`，需改先报乌鸦解锁。`/root/shared/core.py` 同步封板。
+> "🔒兼容遗留" = 文件还在、依赖还在（trailing/rolling 用 exchange.get_client），但不再参与对话指令路径；后续迁完再考虑下线。
 
 ### 移动止盈 v3.1（最终定稿）
 单一动态规则，无档位。激活阈值可临时指定，默认40%。
