@@ -38,7 +38,6 @@ from ledger import get_ledger, new_trace_id, set_trace_id, current_trace_id, log
 from trader.parser import parse, is_trade_command
 from trader.multi import executor
 from trader.multi.permissions import check
-from trader.multi.registry import resolve_name
 
 logger = logging.getLogger(__name__)
 
@@ -284,14 +283,18 @@ def _do_open(role: str, account: str, src: str, order: dict) -> tuple[str, str]:
     if not margin:
         return f"❌ [{account}] 缺少保证金（如：做多 SOL 5x 20U）", "err"
 
-    # 强平价反推
-    if price_type == "liq" and order.get("liq_target"):
+    # 强平价反推（缺 target 直接报错，不许降级市价）
+    if price_type == "liq":
+        if not order.get("liq_target"):
+            return f"❌ [{account}] 强平价路径缺少目标价（如：做多 SOL 强平 68 20U）", "err"
         result = executor.open_liq(role, account, symbol, side,
                                    wallet=margin, liq_price=order["liq_target"],
                                    margin_type=margin_type)
         reply = _fmt_open(f"强平价{side_text}", account, symbol, side_text,
                           margin, result.get("leverage", 0), margin_type, result, src)
-    elif price_type == "limit" and order.get("price"):
+    elif price_type == "limit":
+        if not order.get("price"):
+            return f"❌ [{account}] 限价路径缺少挂单价（如：做多 SOL 5x 20U 限价 150）", "err"
         result = executor.open_limit(role, account, symbol, side,
                                      margin=margin, leverage=leverage,
                                      price=order["price"], margin_type=margin_type)
@@ -307,17 +310,25 @@ def _do_open(role: str, account: str, src: str, order: dict) -> tuple[str, str]:
     if not result.get("ok"):
         return reply, "err"
 
-    # 附加止盈止损
+    # 附加止盈止损：任何异常都吞进 extras，绝不能丢失主开仓成功回执（否则爸爸会手动补开造成双开）
     extras = []
     direction = "多" if side == "BUY" else "空"
     if sl:
-        sl_r = executor.place_stop_loss(role, account, symbol,
-                                        stop_price=sl, direction=direction)
-        extras.append(f"  止损 {sl}: {'✅' if sl_r.get('ok') else '❌ ' + str(sl_r.get('error', ''))}")
+        try:
+            sl_r = executor.place_stop_loss(role, account, symbol,
+                                            stop_price=sl, direction=direction)
+            extras.append(f"  止损 {sl}: {'✅' if sl_r.get('ok') else '❌ ' + str(sl_r.get('error', ''))}")
+        except Exception as e:
+            logger.exception(f"[dispatch] {account} {symbol} 挂止损异常")
+            extras.append(f"  止损 {sl}: ❌ 挂单异常 {type(e).__name__}: {e}")
     if tp:
-        tp_r = executor.place_take_profit(role, account, symbol,
-                                          tp_price=tp, direction=direction)
-        extras.append(f"  止盈 {tp}: {'✅' if tp_r.get('ok') else '❌ ' + str(tp_r.get('error', ''))}")
+        try:
+            tp_r = executor.place_take_profit(role, account, symbol,
+                                              tp_price=tp, direction=direction)
+            extras.append(f"  止盈 {tp}: {'✅' if tp_r.get('ok') else '❌ ' + str(tp_r.get('error', ''))}")
+        except Exception as e:
+            logger.exception(f"[dispatch] {account} {symbol} 挂止盈异常")
+            extras.append(f"  止盈 {tp}: ❌ 挂单异常 {type(e).__name__}: {e}")
     if extras:
         reply += "\n" + "\n".join(extras)
     return reply, "ok"

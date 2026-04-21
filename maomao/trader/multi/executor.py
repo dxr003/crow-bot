@@ -171,9 +171,11 @@ def _pos_side_for_close(position_amt: float) -> str:
 # 查询
 # ══════════════════════════════════════════
 
-@log_call("get_balance")
 def get_balance(role: str, account: str) -> dict:
-    """查合约+现货+资金三项（铁律：余额默认三项都查）"""
+    """查合约+现货+资金三项（铁律：余额默认三项都查）
+
+    薄委托：日志交给 get_full_balance 写一次，避免 orders.jsonl 双写。
+    """
     return get_full_balance(role, account)
 
 
@@ -647,29 +649,40 @@ def cancel_all(role: str, account: str, symbol: str) -> dict:
         code, body = _algo_request(account, "GET", "/fapi/v1/openAlgoOrders", {})
         items = body if isinstance(body, list) else (body.get("orders") if isinstance(body, dict) else None)
         if code == 200 and isinstance(items, list):
+            targets = []
             for o in items:
                 if o.get("symbol") != symbol:
                     continue
                 algo_id = o.get("algoId") or o.get("orderId")
-                if not algo_id:
-                    continue
-                dcode, dbody = _algo_request(account, "DELETE", "/fapi/v1/algoOrder",
-                                              {"algoId": str(algo_id)})
-                algo_cancelled.append({"algoId": algo_id, "ok": dcode == 200,
-                                       "resp": dbody if dcode != 200 else None})
+                if algo_id:
+                    targets.append(algo_id)
+            if targets:
+                def _del(aid):
+                    dcode, dbody = _algo_request(account, "DELETE", "/fapi/v1/algoOrder",
+                                                  {"algoId": str(aid)})
+                    return {"algoId": aid, "ok": dcode == 200,
+                            "resp": dbody if dcode != 200 else None}
+                with ThreadPoolExecutor(max_workers=min(len(targets), 4)) as pool:
+                    algo_cancelled = list(pool.map(_del, targets))
         elif code != 200:
             algo_err = f"列举 algoOrders 失败 ({body.get('code', code) if isinstance(body, dict) else code}): {body}"
     except Exception as e:
         algo_err = str(e)
 
-    if not normal_ok and not algo_cancelled:
-        return {"error": normal_err or algo_err or "cancel failed"}
-
-    # 检查 algo 部分是否有撤单失败的子项（dispatch/玄玄据此判断要不要再撤一次）
+    # 失败汇总：任何非成功路径都要有一条可读的 error，避免上游 fallback 成 "未知错误"
     algo_failed = [a for a in algo_cancelled if not a.get("ok")]
+    ok = (not algo_failed) and normal_ok and (not algo_err)
+    flat_error = None
+    if not ok:
+        if algo_failed:
+            flat_error = f"{len(algo_failed)} 笔 algo 撤单失败: " + "; ".join(
+                str(a.get("resp") or a.get("algoId")) for a in algo_failed[:3]
+            )
+        flat_error = normal_err or algo_err or flat_error
     no_orders = normal_was_empty and not algo_cancelled and not algo_err
     return {
-        "ok": not algo_failed and normal_ok and not algo_err,
+        "ok": ok,
+        "error": flat_error,
         "no_orders": no_orders,
         "account": account, "symbol": symbol,
         "normal_cleared": normal_ok,
