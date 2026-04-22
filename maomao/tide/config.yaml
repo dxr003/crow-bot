@@ -1,0 +1,258 @@
+system:
+  name: "潮汐(Tide)"
+  version: "0.1"
+  mode: "observe"           # observe=只推卡片不下单, active=推卡片等确认, auto=仅breach自动
+
+box:
+  small:
+    lower: 73000
+    upper: 78000
+    center: 75500
+
+  mother:
+    lower: 60000
+    upper: 90000
+
+# 九区段定义（半开区间 [lower, upper)）
+zones:
+  - name: "mother_breach_up"
+    label: "母箱破上"
+    lower: 90000
+    upper: 99999999
+    action: "FORCE_FLAT"
+    emoji: "🚨"
+
+  - name: "far_side"
+    label: "触及对岸"
+    lower: 79000
+    upper: 90000
+    action: "REDUCE_70"
+    emoji: "🔴"
+
+  - name: "near_side"
+    label: "接近对岸"
+    lower: 76000
+    upper: 79000
+    action: "REDUCE_50"
+    emoji: "🟠"
+
+  - name: "above_center"
+    label: "过中点"
+    lower: 75500
+    upper: 76000
+    action: "REDUCE_30"
+    emoji: "🟡"
+
+  - name: "center_zone"
+    label: "中心轴均衡"
+    lower: 74500
+    upper: 75500
+    action: "NO_ACTION"
+    emoji: "⚖️"
+
+  - name: "lower_mid"
+    label: "下半区上段"
+    lower: 70000
+    upper: 74500
+    action: "NO_ACTION"
+    emoji: "🟢"
+
+  - name: "lower_entry"
+    label: "下沿区"
+    lower: 65000
+    upper: 70000
+    action: "ADD_1X"
+    emoji: "🟩"
+
+  - name: "mother_top"
+    label: "母箱顶"
+    lower: 60000
+    upper: 65000
+    action: "ADD_1_5X"
+    emoji: "💚"
+
+  - name: "mother_mid"
+    label: "母箱中段"
+    lower: 55000
+    upper: 60000
+    action: "ADD_2X"
+    emoji: "💙"
+
+  - name: "mother_bottom"
+    label: "母箱底"
+    lower: 50000
+    upper: 55000
+    action: "ADD_3X"
+    emoji: "💎"
+
+  - name: "mother_breach_down"
+    label: "母箱破下"
+    lower: 0
+    upper: 60000
+    action: "FORCE_FLAT"
+    emoji: "🚨"
+
+notifications:
+  telegram:
+    env_file: "/root/baobao/.env"
+    bot_token_key: "BOT_TOKEN"
+    chat_id_key: "BROADCAST_CHAT_ID"
+
+logging:
+  main_log: "/root/maomao/tide/logs/main.log"
+  level: "INFO"
+
+# ============ 执行模式 ============
+execution_mode:
+  global_default: advisory
+  per_action:
+    open_position: advisory
+    mechanical_dca: advisory
+    position_driven_add: advisory
+    mechanical_take_profit: advisory
+    position_driven_reduce: advisory
+    breach_force_flat: auto           # 唯一自动：破箱不等确认
+    margin_refill: advisory
+    active_surrender: advisory
+
+# ============ 标的 ============
+symbols:
+  BTCUSDT:
+    enabled: true
+    leverage: 2                       # 启动时设为 2x
+
+# ============ 资金账户 ============
+account:
+  in_play_balance_usd: 1000           # 在场资金
+  reserve_balance_usd: 3000           # 场外预备
+  total_capital_usd: 4000
+
+# ============ 仓位管理 ============
+position:
+  base_usd: 100                       # 单笔基础仓位
+  max_layers: 5                       # 最多加 5 层
+  max_total_usd: 800                  # 总仓位上限
+  trigger_drawdown_pct: 1.5           # 浮亏 1.5% 触发机械加仓兜底
+
+# ============ 止盈配置 ============
+take_profit:
+  step_usd: 30                        # 浮盈 $30 触发阶梯止盈
+  min_profit_usd: 15                  # 单笔实际利润 ≥ $15（防手续费陷阱）
+  size_ratio: 0.3                     # 每次平 30%
+  min_residual_pct: 5                 # 永不归零下限
+
+# ============ 破箱判断（4 因子共振） ============
+breach:
+  factors_required: 4
+  factors:
+    price_breach_pct: 1.5             # 价格突破 zone ≥ 1.5%
+    volume_spike_x: 2.0               # 成交量放大 ≥ 2x
+    oi_change_pct: 5.0                # OI 变化 ≥ ±5%
+    funding_rate_extreme: 0.05        # 资金费率绝对值 > 0.05%
+  cooldown_hours: 24
+
+# ============ 风控 ============
+risk:
+  margin_safety_ratio: 3.0            # 保证金 ≥ 单笔 × 3
+  daily_max_loss_usd: 200
+  total_max_drawdown_pct: 30
+  reserve_min_usd: 200
+
+# ============ 保证金管理 ============
+margin_pool:
+  reserve_min_ratio: 3.0
+  refill:
+    trigger_margin_ratio: 1.5
+    trigger_distance_to_liq_pct: 15
+    amount_per_event_usd: 300
+    max_per_day: 900
+  active_surrender:
+    rule_1_drawdown_pct: 50           # 单仓浮亏 50% 主动平
+    rule_2_reserve_min_usd: 200       # 场外见底主动平
+    rule_3_max_hold_days: 60          # 持仓超 60 天人工评估
+
+# ============ 模式 ============
+mode:
+  default: "ms1_normal"
+  switch_cooldown_minutes: 5
+
+# ============ 57项因子开关 ============
+modules:
+  # SJ 数据层
+  sj1: true    # 1m K线/价格
+  sj2: false   # 订单簿深度（二期）
+  sj3: false   # OI未平仓量（二期）
+  sj4: false   # 资金费率（二期）
+  sj5: false   # 新闻事件（二期）
+
+  # XT 箱体层
+  xt1: true    # 手动输入箱体
+  xt2: false   # AI识别箱体（二期）
+  xt3: false   # 箱体健康评分（二期）
+  xt4: false   # 自动微调边界（二期）
+  xt5: true    # 破箱检测
+  xt6: false   # 行情模式识别（二期）
+
+  # RC 入场层
+  rc1: true    # 位置区段触发
+  rc2: false   # 首单时机过滤（待建）
+  rc3: false   # 流动性检测（待建）
+  rc4: false   # 趋势方向确认（二期）
+  rc5: false   # 时段过滤（待建）
+  rc6: false   # 首单冷却（待建）
+  rc7: false   # AI首单检查（二期）
+  rc8: false   # 新闻过滤（二期）
+
+  # JC 加仓层
+  jc1: true    # 位置驱动加仓
+  jc2: true    # 机械DCA兜底
+  jc3: false   # 动量加速加仓（二期）
+  jc4: true    # 加仓守门员
+
+  # JS 减仓层
+  js1: true    # 位置驱动减仓
+  js2: true    # 机械阶梯止盈
+  js3: false   # 移动止盈（二期）
+  js4: true    # 减仓守门员
+
+  # CW 仓位层
+  cw1: true    # 基础仓位
+  cw2: true    # 分层DCA规模
+  cw3: false   # Kelly仓位（二期）
+  cw4: true    # 分批止盈
+  cw5: true    # 留尾仓
+  cw6: true    # 触岸反手
+  cw7: false   # 仓位再平衡（二期）
+
+  # PC 平仓层
+  pc1: true    # 阶梯止盈
+  pc2: false   # 移动止盈全平（二期）
+  pc3: true    # 破箱止损
+  pc4: false   # 时间止损（待建）
+  pc5: false   # 新闻紧急平仓（二期）
+  pc6: true    # 主动认输全平
+
+  # FK 风控层
+  fk1: true    # 保证金安全比
+  fk2: true    # 日亏熔断
+  fk3: true    # 总回撤熔断
+  fk4: false   # 强平价预警（待建）
+  fk5: true    # 场外见底熔断
+
+  # AI 顾问层
+  ai1: false   # 首单评估（二期）
+  ai2: false   # 加仓评估（二期）
+  ai3: false   # 新闻解读（二期）
+  ai4: false   # 对岸调头判断（二期）
+  ai5: false   # 周报复盘（二期）
+
+  # MS 模式层
+  ms1: true    # 正常模式
+  ms2: false   # 降级模式（待建）
+  ms3: false   # 观察模式（待建）
+  ms4: false   # 收割模式（二期）
+
+  # MR 保证金层
+  mr1: true    # 场外保证金池
+  mr2: true    # 补保证金触发
+  mr3: true    # 主动认输三档
