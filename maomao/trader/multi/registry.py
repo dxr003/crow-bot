@@ -119,32 +119,6 @@ def get_meta(name: str) -> dict:
     return _load_config()["accounts"][official] | {"name": official}
 
 
-def is_enabled(name: str) -> bool:
-    try:
-        return bool(get_meta(name).get("enabled"))
-    except KeyError:
-        return False
-
-
-def has_capability(name: str, cap: str) -> bool:
-    """检查账户是否有某项能力（futures/spot/transfer）"""
-    try:
-        meta = get_meta(name)
-    except KeyError:
-        return False
-    return bool(meta.get("enabled")) and bool((meta.get("capabilities") or {}).get(cap))
-
-
-def require_capability(name: str, cap: str) -> dict:
-    """权限检查，失败抛 PermissionError，成功返回 meta"""
-    meta = get_meta(name)
-    if not meta.get("enabled"):
-        raise PermissionError(f"账户 {meta['name']} 未启用（enabled=false）")
-    if not (meta.get("capabilities") or {}).get(cap):
-        raise PermissionError(f"账户 {meta['name']} 无 {cap} 权限")
-    return meta
-
-
 def get_credentials(name: str) -> tuple[str, str]:
     """加载账户的 (api_key, api_secret)，按需加载 env_file"""
     meta = get_meta(name)
@@ -219,24 +193,3 @@ def get_spot_client(name: str):
         return client
 
 
-# ══════════════════════════════════════════
-# 格式化（给玄玄/群组展示用）
-# ══════════════════════════════════════════
-
-def format_accounts() -> str:
-    """中文展示账户清单"""
-    accounts = list_accounts()
-    lines = [f"📋 账户清单（共 {len(accounts)} 个）"]
-    for a in accounts:
-        status = "🟢启用" if a["enabled"] else "⚪停用"
-        caps = a["capabilities"]
-        cap_tags = []
-        if caps.get("futures"): cap_tags.append("合约")
-        if caps.get("spot"): cap_tags.append("现货")
-        if caps.get("transfer"): cap_tags.append("划转")
-        cap_str = "/".join(cap_tags) if cap_tags else "无"
-        alias = f"（别名: {', '.join(a['alias'])}）" if a["alias"] else ""
-        lines.append(f"  {status} {a['name']}{alias}  [{cap_str}]")
-        if a["note"]:
-            lines.append(f"      {a['note']}")
-    return "\n".join(lines)

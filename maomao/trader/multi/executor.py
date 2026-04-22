@@ -158,20 +158,6 @@ def _maybe_clear_hedge_on_4061(account: str, err: Exception) -> None:
                 logger.warning(f"[_hedge_cache] {account} -4061 触发，清缓存等待下次重拉")
 
 
-def clear_hedge_cache(role: str, account: str | None = None):
-    """切换持仓模式后清缓存。
-    account 指定：按该账户 admin 校验，只清该账户。
-    account=None（清空所有）：以全部启用账户为权限闸门，避免空缓存时无校验。"""
-    with _cache_lock:
-        if account:
-            require(role, "admin", account)
-            _hedge_cache.pop(resolve_name(account), None)
-            return
-        for a in list_accounts(enabled_only=True):
-            require(role, "admin", a["name"])
-        _hedge_cache.clear()
-
-
 def _pos_side_for_open(side: str) -> str:
     """开仓：BUY→LONG / SELL→SHORT（hedge mode 下必传）"""
     return "LONG" if side.upper() == "BUY" else "SHORT"
@@ -538,7 +524,7 @@ def close_market(role: str, account: str, symbol: str,
     return {
         "ok": True, "account": account, "symbol": symbol, "pct": pct,
         "closed": results, "errors": errors or None, "hedge": hedge,
-        # 兼容旧返回：多侧时取第一条摘要给老代码
+        # trailing.py（封板）读 r.get("orderId")，保留第一条摘要；新调用方走 closed[]
         "qty": results[0]["qty"], "direction": results[0]["direction"],
         "orderId": results[0]["orderId"],
     }
@@ -921,12 +907,6 @@ def _fanout(role: str, fn) -> dict:
 def get_all_balances(role: str) -> dict:
     """聚合查询所有角色有权的账户余额（合约+现货+资金），并行"""
     return _fanout(role, get_full_balance)
-
-
-@log_call("get_all_positions")
-def get_all_positions(role: str) -> dict:
-    """聚合查询所有角色有权的账户持仓，并行"""
-    return _fanout(role, get_positions)
 
 
 # ══════════════════════════════════════════
