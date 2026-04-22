@@ -71,11 +71,25 @@ _ROLE_DEFAULT_ACCOUNT = {
 }
 
 
+# 中文/数字账户名：命中即剥，不需边界（不会和币种/自然语言冲突）
+_ACCOUNT_TOKENS_STRICT = {
+    "币安1", "币安2", "币安3", "币安4",
+    "1号", "2号", "3号", "4号",
+    "一号", "二号", "三号", "四号",
+    "玄玄", "震天响", "李红兵", "专攻组六", "组六",
+}
+
+_BOUNDARY_CHARS = " \t\u3000，,.:："
+
+
 def _extract_account(text: str) -> tuple[Optional[str], str]:
     """从消息里识别账户前缀，返回 (账户名|None, 剥离前缀后的文本)。
 
     匹配规则：从整段文字开头做"最长前缀"匹配，命中后剥离该前缀+紧邻空白/标点。
     不依赖空白分词（避免 parser 的中英拆分把"币安2"切成"币安 2"）。
+    - 中文/数字账户名（币安1-4 / 1号~4号 / 玄玄 / 震天响 等）命中即剥
+    - 英文别名（main/test/lhb/zgl/zts）后面必须跟空白/标点/结尾，否则跳过
+      （防"lhbcoin""mainnet"这类币种名被误当作账户前缀）
     """
     raw = text.strip()
     if not raw:
@@ -84,11 +98,14 @@ def _extract_account(text: str) -> tuple[Optional[str], str]:
     # 按 key 长度倒序，先匹配最长（避免"币安1号"被"币安1"截断）
     for key in sorted(_ACCOUNT_TOKENS.keys(), key=len, reverse=True):
         kl = key.lower()
-        if low.startswith(kl):
-            # 后面必须跟空白/标点/字符串末尾，否则可能是币种名一部分（如 lhbcoin）
-            tail = raw[len(key):]
-            if tail == "" or tail[0] in " \t\u3000，,.:：":
-                return _ACCOUNT_TOKENS[key], tail.lstrip(" \t\u3000，,.:：")
+        if not low.startswith(kl):
+            continue
+        tail = raw[len(key):]
+        if key not in _ACCOUNT_TOKENS_STRICT:
+            # 英文别名走严格 boundary（避免 lhbcoin 等）
+            if tail != "" and tail[0] not in _BOUNDARY_CHARS:
+                continue
+        return _ACCOUNT_TOKENS[key], tail.lstrip(_BOUNDARY_CHARS)
     return None, raw
 
 
