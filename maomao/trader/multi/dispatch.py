@@ -137,7 +137,7 @@ def _norm_margin(parser_value: str | None) -> str:
 # 文本回执格式
 # ──────────────────────────────────────────
 
-def _fmt_open(action: str, account: str, symbol: str, side_text: str,
+def _fmt_open(action: str, account: str, symbol: str,
               margin: float, leverage: int, margin_type: str,
               result: dict, source: str) -> str:
     if not result.get("ok"):
@@ -149,7 +149,7 @@ def _fmt_open(action: str, account: str, symbol: str, side_text: str,
     src_text = " (默认账户)" if source == "default" else ""
     lines = [
         f"✅ [{account}] {action}{src_text}",
-        f"   {symbol} {side_text} {leverage}x | {mode_text}",
+        f"   {symbol} {leverage}x | {mode_text}",
         f"   保证金 {margin}U → 数量 {qty}",
     ]
     if price:
@@ -307,7 +307,7 @@ def _do_open(role: str, account: str, src: str, order: dict) -> tuple[str, str]:
         result = executor.open_liq(role, account, symbol, side,
                                    wallet=margin, liq_price=order["liq_target"],
                                    margin_type=margin_type)
-        reply = _fmt_open(f"强平价{side_text}", account, symbol, side_text,
+        reply = _fmt_open(f"强平价{side_text}", account, symbol,
                           margin, result.get("leverage", 0), margin_type, result, src)
     elif price_type == "limit":
         if not order.get("price"):
@@ -315,13 +315,13 @@ def _do_open(role: str, account: str, src: str, order: dict) -> tuple[str, str]:
         result = executor.open_limit(role, account, symbol, side,
                                      margin=margin, leverage=leverage,
                                      price=order["price"], margin_type=margin_type)
-        reply = _fmt_open(f"限价{side_text}", account, symbol, side_text,
+        reply = _fmt_open(f"限价{side_text}", account, symbol,
                           margin, leverage, margin_type, result, src)
     else:
         result = executor.open_market(role, account, symbol, side,
                                       margin=margin, leverage=leverage,
                                       margin_type=margin_type)
-        reply = _fmt_open(f"市价{side_text}", account, symbol, side_text,
+        reply = _fmt_open(f"市价{side_text}", account, symbol,
                           margin, leverage, margin_type, result, src)
 
     if not result.get("ok"):

@@ -64,6 +64,16 @@ def _summarize_args(args: tuple, kwargs: dict) -> dict:
     return out
 
 
+_LIST_CAP = 20
+
+
+def _cap_list(v):
+    """list 字段按 20 条截断防单行 chunk 爆表；落成 {'n':总数, 'sample':[前20条]}。"""
+    if isinstance(v, list) and len(v) > _LIST_CAP:
+        return {"n": len(v), "sample": v[:_LIST_CAP]}
+    return v
+
+
 def _summarize_result(result):
     if not isinstance(result, dict):
         return {"raw": _safe(result)}
@@ -71,7 +81,7 @@ def _summarize_result(result):
             "margin", "notional", "hedge", "no_position",
             "closed", "errors", "type", "tranId", "amount",
             "stopPrice", "tpPrice"]
-    return {k: result[k] for k in keys if k in result}
+    return {k: _cap_list(result[k]) for k in keys if k in result}
 
 
 def log_call(action_name: str | None = None):
