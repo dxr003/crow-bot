@@ -67,7 +67,7 @@ def _summarize_args(args: tuple, kwargs: dict) -> dict:
 def _summarize_result(result):
     if not isinstance(result, dict):
         return {"raw": _safe(result)}
-    keys = ["ok", "orderId", "qty", "price", "side", "leverage",
+    keys = ["ok", "orderId", "algoId", "qty", "price", "side", "leverage",
             "margin", "notional", "hedge", "no_position",
             "closed", "errors", "type", "tranId", "amount",
             "stopPrice", "tpPrice"]

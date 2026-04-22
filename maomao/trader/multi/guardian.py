@@ -1,15 +1,12 @@
-"""guardian.py — 夜间守护 v1.0（2026-04-19）
+"""guardian.py — 夜间守护 v1.0
 
 每次运行做三项检查并输出报告：
-  1. 4 个账户 API 可达性（启用的才查）
+  1. 启用账户的 API 可达性
   2. systemd 服务状态（maomao/damao/tiantian/baobao/bull-sniper）
   3. bull_sniper 心跳（scanner.log 最近活动时间）
 
-异常时推爸爸私信（通过贝贝 Bot PUSH_BOT_TOKEN）。
-无异常时写 guardian_state.json 静默。
-
-建议 cron：每 10 分钟跑一次
-  */10 * * * * cd /root/maomao && python3 -m trader.multi.guardian >> /root/maomao/data/guardian.log 2>&1
+异常时推 ADMIN 私信（通过 PUSH_BOT_TOKEN），无异常时只写 guardian_state.json。
+部署命令与 cron 约定见部署手册，不在此处维护。
 """
 from __future__ import annotations
 

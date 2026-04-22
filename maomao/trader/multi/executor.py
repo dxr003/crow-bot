@@ -120,27 +120,42 @@ def _mark_price(client, symbol: str) -> float:
 
 
 # ══════════════════════════════════════════
-# 持仓模式缓存（hedge mode 自动识别）
+# 持仓模式缓存（hedge mode 自动识别，TTL 300s + -4061 失效）
 # ══════════════════════════════════════════
-_hedge_cache: dict[str, bool] = {}
+_HEDGE_TTL = 300.0
+_hedge_cache: dict[str, tuple[bool, float]] = {}
 
 
 def _is_hedge(client, account: str) -> bool:
-    """返回账户是否为双向持仓模式（dualSidePosition=True）。成功才缓存——
+    """返回账户是否为双向持仓模式（dualSidePosition=True）。
+    成功才缓存，TTL 300s；TTL 过期或 -4061 错误码触发时都会重拉。
     失败时不写 cache 防止首连抖动把 hedge 账户永久判成单向，导致后续下单漏 positionSide。"""
-    if account in _hedge_cache:
-        return _hedge_cache[account]
+    now = time.time()
+    cached = _hedge_cache.get(account)
+    if cached and now - cached[1] < _HEDGE_TTL:
+        return cached[0]
     with _cache_lock:
-        if account in _hedge_cache:
-            return _hedge_cache[account]
+        cached = _hedge_cache.get(account)
+        if cached and now - cached[1] < _HEDGE_TTL:
+            return cached[0]
         try:
             r = client.get_position_mode()
             hedge = bool(r.get("dualSidePosition", False))
-            _hedge_cache[account] = hedge
+            _hedge_cache[account] = (hedge, time.time())
             return hedge
         except Exception as e:
             logger.warning(f"[_is_hedge] {account} get_position_mode 失败，本次按单向走，不缓存以便下次重试: {e}")
             return False
+
+
+def _maybe_clear_hedge_on_4061(account: str, err: Exception) -> None:
+    """币安 -4061 'Order's position side does not match user's setting' → 持仓模式已被外部改过，
+    清掉该账户 hedge cache 下次重拉。"""
+    msg = str(err)
+    if "-4061" in msg or "position side does not match" in msg.lower():
+        with _cache_lock:
+            if _hedge_cache.pop(account, None) is not None:
+                logger.warning(f"[_hedge_cache] {account} -4061 触发，清缓存等待下次重拉")
 
 
 def clear_hedge_cache(role: str, account: str | None = None):
@@ -454,6 +469,7 @@ def open_market(role: str, account: str, symbol: str, side: str,
             "hedge": hedge,
         }
     except Exception as e:
+        _maybe_clear_hedge_on_4061(account, e)
         return {"error": str(e)}
 
 
@@ -514,6 +530,7 @@ def close_market(role: str, account: str, symbol: str,
                 "orderId": order.get("orderId"),
             })
         except Exception as e:
+            _maybe_clear_hedge_on_4061(account, e)
             errors.append({"direction": "多" if amt > 0 else "空", "error": str(e)})
 
     if not results:
@@ -598,12 +615,16 @@ def _place_close_trigger(role: str, account: str, symbol: str,
     try:
         code, body = _algo_request(account, "POST", "/fapi/v1/algoOrder", params)
         if code != 200:
-            return {"error": f"algoOrder 失败 ({body.get('code', code)}): {body.get('msg', body)}"}
+            err_code = body.get("code", code) if isinstance(body, dict) else code
+            if err_code == -4061:
+                _maybe_clear_hedge_on_4061(account, Exception(f"-4061 {body}"))
+            return {"error": f"algoOrder 失败 ({err_code}): {body.get('msg', body) if isinstance(body, dict) else body}"}
         return {"ok": True, "account": account, "symbol": symbol,
                 price_field: trigger_price,
                 "algoId": body.get("algoId") or body.get("orderId"),
                 "raw": body}
     except Exception as e:
+        _maybe_clear_hedge_on_4061(account, e)
         return {"error": str(e)}
 
 

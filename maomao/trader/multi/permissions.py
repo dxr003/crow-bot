@@ -133,11 +133,11 @@ if __name__ == "__main__":
         ("天天", "query", "币安3", True),
         ("天天", "trade", "币安1", False),
         ("天天", "trade", "币安2", True),
-        ("天天", "trade", "币安4", False),       # 2026-04-20 收紧：天天 trade 仅限币安2
+        ("天天", "trade", "币安4", False),
         ("天天", "admin", "币安2", False),
         # 别名
         ("天天", "trade", "main", False),        # main = 币安1
-        ("天天", "trade", "李红兵", False),       # = 币安3，2026-04-20 收紧后被拒
+        ("天天", "trade", "李红兵", False),       # 李红兵 = 币安3
         # 未登记角色
         ("路人", "query", "币安1", False),
     ]
