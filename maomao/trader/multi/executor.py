@@ -163,6 +163,18 @@ def _pos_side_for_open(side: str) -> str:
     return "LONG" if side.upper() == "BUY" else "SHORT"
 
 
+def _prepare_open(role: str, account: str, side: str):
+    """三个 open_* 共享前奏：权限 + 账户 resolve + side 规范 + client。
+    返回 (account, side_upper, client, err_or_None)。"""
+    require(role, "trade", account)
+    account = resolve_name(account)
+    side = side.upper()
+    if side not in ("BUY", "SELL"):
+        return account, side, None, {"error": f"非法方向: {side}（应为 BUY/SELL）"}
+    c = get_futures_client(account)
+    return account, side, c, None
+
+
 def _pos_side_for_close(position_amt: float) -> str:
     """平仓：持有多单→LONG / 持有空单→SHORT"""
     return "LONG" if position_amt > 0 else "SHORT"
@@ -397,13 +409,9 @@ def open_market(role: str, account: str, symbol: str, side: str,
     - leverage: 杠杆倍数
     - margin_type: "CROSSED"(全仓 · 默认) / "ISOLATED"(逐仓)
     """
-    require(role, "trade", account)
-    account = resolve_name(account)
-    side = side.upper()
-    if side not in ("BUY", "SELL"):
-        return {"error": f"非法方向: {side}（应为 BUY/SELL）"}
-
-    c = get_futures_client(account)
+    account, side, c, err = _prepare_open(role, account, side)
+    if err:
+        return err
 
     # 5 个独立 REST 并行：margin_mode / leverage / filters / mark_price / position_mode
     with ThreadPoolExecutor(max_workers=5) as ex:
@@ -711,13 +719,9 @@ def open_limit(role: str, account: str, symbol: str, side: str,
     - price: 挂单价（按 tickSize 对齐）
     - margin_type: 默认 CROSSED（全仓），可改 ISOLATED
     """
-    require(role, "trade", account)
-    account = resolve_name(account)
-    side = side.upper()
-    if side not in ("BUY", "SELL"):
-        return {"error": f"非法方向: {side}（应为 BUY/SELL）"}
-
-    c = get_futures_client(account)
+    account, side, c, err = _prepare_open(role, account, side)
+    if err:
+        return err
 
     with ThreadPoolExecutor(max_workers=4) as ex:
         f_mm = ex.submit(_set_margin_mode, c, symbol, margin_type)
@@ -763,6 +767,7 @@ def open_limit(role: str, account: str, symbol: str, side: str,
             "hedge": hedge, "type": "LIMIT",
         }
     except Exception as e:
+        _maybe_clear_hedge_on_4061(account, e)
         return {"error": str(e)}
 
 
@@ -802,17 +807,13 @@ def open_liq(role: str, account: str, symbol: str, side: str,
     自动算 qty 和派生杠杆。MMR=0.005，留 1% 滑点缓冲。
     margin_type 默认 CROSSED（全仓）。
     """
-    require(role, "trade", account)
-    account = resolve_name(account)
-    side = side.upper()
-    if side not in ("BUY", "SELL"):
-        return {"error": f"非法方向: {side}（应为 BUY/SELL）"}
+    account, side, c, err = _prepare_open(role, account, side)
+    if err:
+        return err
     if wallet <= 0:
         return {"error": f"保证金必须 > 0: {wallet}"}
     if liq_price <= 0:
         return {"error": f"强平价必须 > 0: {liq_price}"}
-
-    c = get_futures_client(account)
 
     with ThreadPoolExecutor(max_workers=3) as ex:
         f_ft = ex.submit(_get_filters, c, symbol)
@@ -876,6 +877,7 @@ def open_liq(role: str, account: str, symbol: str, side: str,
             "hedge": hedge,
         }
     except Exception as e:
+        _maybe_clear_hedge_on_4061(account, e)
         return {"error": str(e)}
 
 

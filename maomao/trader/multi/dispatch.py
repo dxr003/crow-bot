@@ -36,7 +36,7 @@ if "/root" not in sys.path:
 from ledger import get_ledger, new_trace_id, set_trace_id, current_trace_id, log_call as trace_call
 
 from trader.parser import parse, is_trade_command
-from trader.multi import executor
+from trader.multi import executor, registry
 from trader.multi.permissions import check
 
 logger = logging.getLogger(__name__)
@@ -49,20 +49,6 @@ _dialog_ledger = get_ledger("dialog", "commands")
 # 账户识别（消息前缀里的账户名/别名）
 # ──────────────────────────────────────────
 
-# 与 accounts.yaml 的 alias 对齐 + 一些自然语言常用词
-_ACCOUNT_TOKENS = {
-    # 币安1（玄玄主号）
-    "币安1": "币安1", "main": "币安1", "玄玄": "币安1", "1号": "币安1", "一号": "币安1",
-    # 币安2（震天响 / 测试场）
-    "币安2": "币安2", "test": "币安2", "震天响": "币安2", "zts": "币安2",
-    "2号": "币安2", "二号": "币安2",
-    # 币安3（李红兵）
-    "币安3": "币安3", "lhb": "币安3", "李红兵": "币安3", "3号": "币安3", "三号": "币安3",
-    # 币安4（专攻组六）
-    "币安4": "币安4", "zgl": "币安4", "专攻组六": "币安4", "组六": "币安4",
-    "4号": "币安4", "四号": "币安4",
-}
-
 # role → 默认账户（无前缀时落点）
 _ROLE_DEFAULT_ACCOUNT = {
     "玄玄": "币安1",
@@ -70,16 +56,49 @@ _ROLE_DEFAULT_ACCOUNT = {
     "天天": "币安2",
 }
 
-
-# 中文/数字账户名：命中即剥，不需边界（不会和币种/自然语言冲突）
-_ACCOUNT_TOKENS_STRICT = {
-    "币安1", "币安2", "币安3", "币安4",
-    "1号", "2号", "3号", "4号",
-    "一号", "二号", "三号", "四号",
-    "玄玄", "震天响", "李红兵", "专攻组六", "组六",
+# dispatch 层补充的自然语言 token（不在 accounts.yaml 的 alias 里，但老板/玄玄习惯用）
+_EXTRA_ALIASES = {
+    "震天响": "币安2", "zts": "币安2",
+    "组六": "币安4",
 }
 
+_NUM_ZH = {"1": "一", "2": "二", "3": "三", "4": "四", "5": "五", "6": "六", "7": "七", "8": "八", "9": "九"}
 _BOUNDARY_CHARS = " \t\u3000，,.:："
+
+
+def _has_chinese(s: str) -> bool:
+    return any("\u4e00" <= ch <= "\u9fff" for ch in s)
+
+
+def _build_account_tokens() -> tuple[dict[str, str], set[str]]:
+    """从 registry 动态构建 {token: official} + strict 集合（中文/数字类 token）。
+    registry 自带 mtime 热重载，accounts.yaml 改了这里自动跟。"""
+    tokens: dict[str, str] = {}
+    strict: set[str] = set()
+    for acc in registry.list_accounts(enabled_only=True):
+        official = acc["name"]
+        tokens[official] = official
+        if _has_chinese(official):
+            strict.add(official)
+        # "币安N" → 派生 "N号" / "N中文号"
+        m = re.match(r"^币安(\d+)$", official)
+        if m:
+            n = m.group(1)
+            for token in (f"{n}号", f"{_NUM_ZH.get(n, n)}号"):
+                tokens[token] = official
+                strict.add(token)
+        for alias in acc.get("alias") or []:
+            if not isinstance(alias, str) or not alias:
+                continue
+            tokens[alias] = official
+            if _has_chinese(alias):
+                strict.add(alias)
+    # 合并 dispatch 层自定义 token（不在 yaml 里）
+    for token, official in _EXTRA_ALIASES.items():
+        tokens[token] = official
+        if _has_chinese(token):
+            strict.add(token)
+    return tokens, strict
 
 
 def _extract_account(text: str) -> tuple[Optional[str], str]:
@@ -95,17 +114,18 @@ def _extract_account(text: str) -> tuple[Optional[str], str]:
     if not raw:
         return None, raw
     low = raw.lower()
+    tokens, strict = _build_account_tokens()
     # 按 key 长度倒序，先匹配最长（避免"币安1号"被"币安1"截断）
-    for key in sorted(_ACCOUNT_TOKENS.keys(), key=len, reverse=True):
+    for key in sorted(tokens.keys(), key=len, reverse=True):
         kl = key.lower()
         if not low.startswith(kl):
             continue
         tail = raw[len(key):]
-        if key not in _ACCOUNT_TOKENS_STRICT:
+        if key not in strict:
             # 英文别名走严格 boundary（避免 lhbcoin 等）
             if tail != "" and tail[0] not in _BOUNDARY_CHARS:
                 continue
-        return _ACCOUNT_TOKENS[key], tail.lstrip(_BOUNDARY_CHARS)
+        return tokens[key], tail.lstrip(_BOUNDARY_CHARS)
     return None, raw
 
 
@@ -251,21 +271,12 @@ def try_dispatch(role: str, text: str) -> tuple[str | None, str]:
     }, trace_id=tid)
 
     # ─── 路由到 executor ───
-    try:
-        if action in ("open_long", "open_short"):
-            return _do_open(role, account, src, order)
-        if action in ("close", "close_long", "close_short"):
-            return _do_close(role, account, src, order)
-        if action == "tp":
-            return _do_tp(role, account, src, order)
-        if action == "sl":
-            return _do_sl(role, account, src, order)
-        if action == "cancel_orders":
-            return _do_cancel(role, account, src, order)
-        if action == "add":
-            return _do_add(role, account, src, order)
+    handler = _ACTION_HANDLERS.get(action)
+    if not handler:
         # 不支持的动作（roll/trailing 等）→ 不处理，让 AI 接管走专用模块
         return None, "none"
+    try:
+        return handler(role, account, src, order)
     except PermissionError as e:
         _dialog_ledger.event("dispatch_error", {
             "role": role, "account": account, "action": action, "symbol": symbol,
@@ -365,33 +376,34 @@ def _do_close(role: str, account: str, src: str, order: dict) -> tuple[str, str]
     return _fmt_close(account, symbol, result, src), status
 
 
-def _do_tp(role: str, account: str, src: str, order: dict) -> tuple[str, str]:
+_TRIGGER_SPEC = {
+    "tp": {"label": "止盈", "price_key": "tp_price", "exec_fn": "place_take_profit", "exec_kw": "tp_price"},
+    "sl": {"label": "止损", "price_key": "sl_price", "exec_fn": "place_stop_loss", "exec_kw": "stop_price"},
+}
+
+
+def _do_trigger(kind: str, role: str, account: str, src: str, order: dict) -> tuple[str, str]:
+    """止盈/止损公用实现。kind ∈ {'tp','sl'}。"""
+    spec = _TRIGGER_SPEC[kind]
     symbol = order["symbol"]
-    price = order.get("tp_price") or order.get("price")
+    price = order.get(spec["price_key"]) or order.get("price")
     if not price:
-        return f"❌ [{account}] 缺少止盈价", "err"
-    # 自动从持仓判断方向
+        return f"❌ [{account}] 缺少{spec['label']}价", "err"
     direction = _infer_direction(role, account, symbol)
     if not direction:
-        return f"⚠️ [{account}] {symbol} 无持仓，无法挂止盈", "err"
-    result = executor.place_take_profit(role, account, symbol,
-                                        tp_price=price, direction=direction)
-    return _fmt_simple(account, f"止盈 @ {price}", symbol, result, src), \
+        return f"⚠️ [{account}] {symbol} 无持仓,无法挂{spec['label']}", "err"
+    fn = getattr(executor, spec["exec_fn"])
+    result = fn(role, account, symbol, **{spec["exec_kw"]: price, "direction": direction})
+    return _fmt_simple(account, f"{spec['label']} @ {price}", symbol, result, src), \
         ("ok" if result.get("ok") else "err")
+
+
+def _do_tp(role: str, account: str, src: str, order: dict) -> tuple[str, str]:
+    return _do_trigger("tp", role, account, src, order)
 
 
 def _do_sl(role: str, account: str, src: str, order: dict) -> tuple[str, str]:
-    symbol = order["symbol"]
-    price = order.get("sl_price") or order.get("price")
-    if not price:
-        return f"❌ [{account}] 缺少止损价", "err"
-    direction = _infer_direction(role, account, symbol)
-    if not direction:
-        return f"⚠️ [{account}] {symbol} 无持仓，无法挂止损", "err"
-    result = executor.place_stop_loss(role, account, symbol,
-                                      stop_price=price, direction=direction)
-    return _fmt_simple(account, f"止损 @ {price}", symbol, result, src), \
-        ("ok" if result.get("ok") else "err")
+    return _do_trigger("sl", role, account, src, order)
 
 
 def _do_cancel(role: str, account: str, src: str, order: dict) -> tuple[str, str]:
@@ -413,6 +425,20 @@ def _do_add(role: str, account: str, src: str, order: dict) -> tuple[str, str]:
     result = executor.add_to_position(role, account, symbol, margin=margin)
     return _fmt_simple(account, f"加仓 {margin}U", symbol, result, src), \
         ("ok" if result.get("ok") else "err")
+
+
+# action → handler 路由表（try_dispatch 用）
+_ACTION_HANDLERS = {
+    "open_long": _do_open,
+    "open_short": _do_open,
+    "close": _do_close,
+    "close_long": _do_close,
+    "close_short": _do_close,
+    "tp": _do_tp,
+    "sl": _do_sl,
+    "cancel_orders": _do_cancel,
+    "add": _do_add,
+}
 
 
 def _infer_direction(role: str, account: str, symbol: str) -> str | None:
