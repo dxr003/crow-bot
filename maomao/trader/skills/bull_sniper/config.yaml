@@ -95,7 +95,7 @@ bull_sniper:
   # ── 分析器总闸 ──
   analyzer:
     enabled: true
-    signal_threshold: 35       # v3.4 A提权配套上调：A+B=30不够单独过，需至少一个辅助因子
+    signal_threshold: 60       # v3.5-minimalist: DN55+WL15+TP20+DD15=105满分，60分=至少DN+一个辅助
 
   # ── 信号最后一道防线：1m翻阴直接跳过本轮 ──
   signal_reject_1m_below: -1   # 1m涨幅<-1%判定回落中

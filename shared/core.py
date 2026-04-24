@@ -135,7 +135,8 @@ async def claudecode_gen(prompt, add_dir="/root", bot_dir="damao", model=None):
         proc = await asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE, cwd=add_dir,
-            env={k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"})
+            env={k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"},
+            limit=1024 * 1024 * 32)
         final_result = ""
         async def _read():
             nonlocal final_result
