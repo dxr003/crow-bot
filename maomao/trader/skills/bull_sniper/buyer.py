@@ -230,7 +230,7 @@ def _execute_auto(symbol: str, price: float, analyze_result: dict, cfg: dict,
                   secret_env: str = "BINANCE2_API_SECRET") -> dict:
 
     # ── 1. 持仓数检查 ──
-    max_positions = cfg.get("max_concurrent_positions", 10)
+    max_positions = cfg.get("max_concurrent_positions", 5)
     long_positions = _get_long_positions(key_env, secret_env)
 
     if len(long_positions) >= max_positions:

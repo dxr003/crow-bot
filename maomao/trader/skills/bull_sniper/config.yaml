@@ -175,7 +175,7 @@ bull_sniper:
     profit_ratio: 0.6          # 加仓60%利润（v3.1）
 
   # ── 风控 ──
-  max_concurrent_positions: 10
+  max_concurrent_positions: 5
   daily_loss_limit_usd: 5000
   btc_circuit_breaker_pct: 2
 
