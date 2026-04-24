@@ -408,177 +408,81 @@ def is_delist_target(symbol: str, cfg: dict) -> bool:
 
 def score_signal(symbol: str, gain_pct: float, market_data: dict, cfg: dict) -> dict:
     """
-    综合打分 v3.2（7因子：动能+趋势+量比+OI费率+社交聪明钱+链上+公告）
-    A-C互斥取最高，D独立叠加，E链上含否决，G独立
-    v3.2: A降门槛 B加低档拓甜蜜区 C减轻惩罚 D修OI窗口+加费率波动
+    综合打分 v3.5-minimalist（4因子：DN动能 + WL位置 + TP突破 + DD量能）
+    满分 105：DN55 + WL15 + TP20 + DD15；信号阈值 60 分
+    硬触发：AF Alpha+2 / GG 公告+3或-5
     """
     scoring = cfg.get("scoring", {})
     breakdown = {}
     score = 0
 
-    # ── A. 价格动能（互斥取最高，v3.2降门槛） ──
-    change_1m = market_data.get("change_1m", 0)
-    change_3m = market_data.get("change_3m", 0)
-    change_5m = market_data.get("change_5m", 0)
+    # ── DN. 动能涨幅（v3.5 互斥取最高，阈值 7/5/4/8，分值 55/42/33/22） ──
+    change_1m  = market_data.get("change_1m",  0)
+    change_3m  = market_data.get("change_3m",  0)
+    change_5m  = market_data.get("change_5m",  0)
+    change_15m = market_data.get("change_15m", 0)
 
-    burst_1m_th = scoring.get("burst_1m_threshold", 6)
-    burst_3m_th = scoring.get("burst_3m_threshold", 4)
-    burst_5m_th = scoring.get("burst_5m_threshold", 3)
-
-    if change_1m > burst_1m_th:
-        pts = scoring.get("burst_1m", 8)
-        breakdown[f"A.1m爆发+{change_1m:.1f}%"] = pts
-        score += pts
-    elif change_3m > burst_3m_th:
-        pts = scoring.get("burst_3m", 7)
-        breakdown[f"A.3m爆发+{change_3m:.1f}%"] = pts
-        score += pts
-    elif change_5m > burst_5m_th:
-        pts = scoring.get("burst_5m", 6)
-        breakdown[f"A.5m爆发+{change_5m:.1f}%"] = pts
-        score += pts
-
-    # ── B. 池内涨幅（互斥取最高）—— 2026-04-19 恢复 04-13 赚钱期设计：早期卡位最高分，追高降分 ──
-    if 5 <= gain_pct < 10:
-        pts = scoring.get("gain_5_10", 10)
-        breakdown[f"B.涨幅初期+{gain_pct:.1f}%"] = pts
-        score += pts
-    elif 10 <= gain_pct < 15:
-        pts = scoring.get("gain_10_15", 8)
-        breakdown[f"B.涨幅中期+{gain_pct:.1f}%"] = pts
-        score += pts
-    elif 15 <= gain_pct < 25:
-        pts = scoring.get("gain_15_25", 7)
-        breakdown[f"B.涨幅强势+{gain_pct:.1f}%"] = pts
-        score += pts
-    elif 25 <= gain_pct < 40:
-        pts = scoring.get("gain_25_40", 5)
-        breakdown[f"B.涨幅过热+{gain_pct:.1f}%"] = pts
-        score += pts
-    # gain_pct < 5 或 >= 40: B=0（追低/追高拒绝加分）
-
-    # ── C. 动能加速度 v4.0（2026-04-19 替换量比倍数） ──
-    # 数据：short_accel(2m vs 3m前)、mid_accel(5m vs 10m前)、buy_ratio_5m、back_2m_buy_usdt
-    # 前置闸门：买占比<55% 或 最近2m买入<20万U → C=0（砸盘/冷币否决）
-    # 评分：互斥取最高档
-    short_accel = market_data.get("short_accel", 1.0)
-    mid_accel = market_data.get("mid_accel", 1.0)
-    buy_ratio = market_data.get("buy_ratio_5m", 0.0)
-    back_2m_buy = market_data.get("back_2m_buy_usdt", 0.0)
-
-    # 从 cfg 读闸门（v4.0 修复：原先 from scanner import CFG 造成循环引用+热重载失效）
-    _br_gate = cfg.get("c_buy_ratio_gate", 0.55)
-    _b2m_floor = cfg.get("c_min_back_2m_usdt", 200000)
-
-    pts = 0
-    c_tag = ""
-    # 闸门1：买占比（差5%以内标[险过]，方便人工评估）
-    if buy_ratio < _br_gate:
-        pts = 0
-        _close = "[险过]" if buy_ratio >= _br_gate - 0.05 else ""
-        c_tag = f"C.买占比{buy_ratio*100:.0f}%<{_br_gate*100:.0f}%闸门否{_close}"
-    # 闸门2：绝对量底线（差25%以内标[险过]）
-    elif back_2m_buy < _b2m_floor:
-        pts = 0
-        _close = "[险过]" if back_2m_buy >= _b2m_floor * 0.75 else ""
-        c_tag = f"C.后2m买{back_2m_buy/10000:.0f}万<{_b2m_floor/10000:.0f}万闸门否{_close}"
-    # 衰减（任一<1x）
-    elif short_accel < 1.0 or mid_accel < 1.0:
-        pts = scoring.get("c_decay", -3)
-        c_tag = f"C.衰减(短{short_accel:.1f}x/中{mid_accel:.1f}x)"
-    # 双共振爆发
-    elif short_accel >= 3 and mid_accel >= 3:
-        pts = scoring.get("c_dual_super", 10)
-        c_tag = f"C.双共振爆发(短{short_accel:.1f}x/中{mid_accel:.1f}x)"
-    # 接近双共振（一边≥3x 另一边≥2x）
-    elif (short_accel >= 3 and mid_accel >= 2) or (short_accel >= 2 and mid_accel >= 3):
-        pts = scoring.get("c_near_dual", 8)
-        c_tag = f"C.接近双共振(短{short_accel:.1f}x/中{mid_accel:.1f}x)"
-    # 双共振强势
-    elif short_accel >= 2 and mid_accel >= 2:
-        pts = scoring.get("c_dual_strong", 7)
-        c_tag = f"C.双共振强势(短{short_accel:.1f}x/中{mid_accel:.1f}x)"
-    # 单维度爆发（任一≥3x）
-    elif short_accel >= 3:
-        pts = scoring.get("c_one_super", 5)
-        c_tag = f"C.闪电爆发(短{short_accel:.1f}x)"
-    elif mid_accel >= 3:
-        pts = scoring.get("c_one_super", 5)
-        c_tag = f"C.阶梯慢涨(中{mid_accel:.1f}x)"
-    # 短强中温 / 短温中强
-    elif (short_accel >= 2 and mid_accel >= 1.5) or (short_accel >= 1.5 and mid_accel >= 2):
-        pts = scoring.get("c_mixed", 4)
-        c_tag = f"C.短强中温/短温中强(短{short_accel:.1f}x/中{mid_accel:.1f}x)"
-    # 温和启动（任一≥1.5x）
-    elif short_accel >= 1.5 or mid_accel >= 1.5:
-        pts = scoring.get("c_mild", 2)
-        c_tag = f"C.温和启动(短{short_accel:.1f}x/中{mid_accel:.1f}x)"
-    # 平稳
+    dn_pts = 0
+    dn_reverse = scoring.get("dn_reverse_guard", -1)
+    if change_1m < dn_reverse:
+        # 反转守门：1m 已在回撤，DN 归零
+        breakdown["DN.反转守门"] = 0
     else:
-        pts = scoring.get("c_flat", 0)
-        c_tag = f"C.平稳(短{short_accel:.1f}x/中{mid_accel:.1f}x)"
+        dn_1m_th  = scoring.get("dn_burst_1m",  7)
+        dn_3m_th  = scoring.get("dn_burst_3m",  5)
+        dn_5m_th  = scoring.get("dn_burst_5m",  4)
+        dn_15m_th = scoring.get("dn_burst_15m", 8)
 
-    breakdown[c_tag] = pts
-    score += pts
+        if change_1m > dn_1m_th:
+            dn_pts = scoring.get("dn_score_1m", 55)
+            breakdown[f"DN.1m爆发+{change_1m:.1f}%"] = dn_pts
+        elif change_3m > dn_3m_th:
+            dn_pts = scoring.get("dn_score_3m", 42)
+            breakdown[f"DN.3m爆发+{change_3m:.1f}%"] = dn_pts
+        elif change_5m > dn_5m_th:
+            dn_pts = scoring.get("dn_score_5m", 33)
+            breakdown[f"DN.5m爆发+{change_5m:.1f}%"] = dn_pts
+        elif change_15m > dn_15m_th:
+            dn_pts = scoring.get("dn_score_15m", 22)
+            breakdown[f"DN.15m爆发+{change_15m:.1f}%"] = dn_pts
+    score += dn_pts
 
-    # ── D. OI与资金费率（独立可叠加，v3.2改OI窗口+降门槛+加费率波动） ──
-    oi_change = market_data.get("oi_change_pct", 0)
-    if oi_change > 20:
-        pts = scoring.get("oi_up_super", 8)
-        breakdown[f"D.OI超涨+{oi_change:.1f}%"] = pts
-        score += pts
-    elif oi_change > 5:
-        pts = scoring.get("oi_up_strong", 5)
-        breakdown[f"D.OI大涨+{oi_change:.1f}%"] = pts
-        score += pts
-    elif oi_change > 0.5:
-        pts = scoring.get("oi_up_mild", 3)
-        breakdown[f"D.OI上涨+{oi_change:.1f}%"] = pts
-        score += pts
-    elif oi_change < -5:
-        pts = scoring.get("oi_down", -3)
-        breakdown[f"D.OI下跌{oi_change:.1f}%"] = pts
-        score += pts
+    # ── WL. 位置（v3.5 互斥取最高，基准=entry_price_in_pool，4档: 15/12/8/3） ──
+    wl_pts = 0
+    if 5 <= gain_pct < 10:
+        wl_pts = scoring.get("wl_score_tier1", 15)
+        breakdown[f"WL.早期+{gain_pct:.1f}%"] = wl_pts
+    elif 10 <= gain_pct < 15:
+        wl_pts = scoring.get("wl_score_tier2", 12)
+        breakdown[f"WL.中期+{gain_pct:.1f}%"] = wl_pts
+    elif 15 <= gain_pct < 25:
+        wl_pts = scoring.get("wl_score_tier3", 8)
+        breakdown[f"WL.强势+{gain_pct:.1f}%"] = wl_pts
+    elif 25 <= gain_pct < 40:
+        wl_pts = scoring.get("wl_score_tier4", 3)
+        breakdown[f"WL.过热+{gain_pct:.1f}%"] = wl_pts
+    # <5% 或 ≥40% → 0（太早/过热）
+    score += wl_pts
 
-    lsr = market_data.get("long_short_ratio", 1.0)
-    if lsr < 0.8:
-        pts = scoring.get("lsr_short_dominant", 2)
-        breakdown[f"D.挤空{lsr:.2f}"] = pts
-        score += pts
-
-    funding = market_data.get("funding_rate", 0)
-    funding_threshold = scoring.get("funding_extreme_threshold", 0.0005)
-    if abs(funding) >= funding_threshold:
-        pts = scoring.get("funding_extreme", 3)
-        direction = "负" if funding < 0 else "正"
-        breakdown[f"D.费率{direction}{funding*100:.3f}%"] = pts
-        score += pts
-
-    # 费率波动幅度（v3.2新增）
-    funding_swing = market_data.get("funding_swing", 0)
-    if funding_swing >= 0.0005:
-        pts = scoring.get("funding_swing_high", 4)
-        breakdown[f"D.费率波动{funding_swing*100:.3f}%"] = pts
-        score += pts
-    elif funding_swing >= 0.0002:
-        pts = scoring.get("funding_swing_low", 2)
-        breakdown[f"D.费率波动{funding_swing*100:.3f}%"] = pts
-        score += pts
-
-    # ── E. 捉妖因子（链上数据，含否决） ──
+    # ── TP. 突破因子（v3.5，1H 收盘突破前高 + 量 + 上影过滤） ──
     try:
-        from chain_score import get_chain_score
-        cs = get_chain_score(symbol, cfg)
-        if cs.get("vetoed"):
-            return {
-                "score": score, "breakdown": breakdown,
-                "vetoed": True, "veto_reason": f"E因子否决:{cs['veto_reason']}",
-            }
-        if cs["score"] != 0:
-            breakdown[f"E.{cs['reason']}"] = cs["score"]
-            score += cs["score"]
+        from tp_score import score_tp
+        tp_pts, tp_reason = score_tp(symbol, cfg)
+        if tp_pts > 0:
+            breakdown[f"TP.{tp_reason}"] = tp_pts
+            score += tp_pts
     except Exception as e:
-        logger.warning(f"[E因子] {symbol} 跳过: {e}")
+        logger.warning(f"[TP层] {symbol} 跳过: {e}")
+
+    # ── DD. 有方向的量能（v3.5，aggTrades 5 分钟 taker 买卖比） ──
+    try:
+        from dd_score import score_dd
+        dd_pts, dd_reason = score_dd(symbol, cfg)
+        if dd_pts > 0:
+            breakdown[f"DD.{dd_reason}"] = dd_pts
+            score += dd_pts
+    except Exception as e:
+        logger.warning(f"[DD层] {symbol} 跳过: {e}")
 
     # ── G. 公告因子（读缓存） ──
     try:

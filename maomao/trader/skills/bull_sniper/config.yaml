@@ -60,43 +60,33 @@ bull_sniper:
     - DOTUSDT
   mcap_exclude_top: 100          # CoinGecko 市值前100自动排除（24h刷新，2026-04-17 60→100）
 
-  # ── Z-2 启动硬顶（每轮扫描第一道过滤）──
-  startup_max_change_pct: 30     # 任意时段涨幅>30%排除（v3.6 50→30）
-  min_listing_days: 2            # 新币<2天不碰
-  ath_exempt_days: 180           # 180天内ATH豁免
-  exclude_daily_vol_below: 20000000  # 24h成交额<2000万U排除（2026-04-19 1000万→2000万）
-  min_oi_startup: 5000000        # OI<500万U排除（v3.6 死亡区400-800万一刀切）
-  min_drop_from_ath: 60          # 距ATH跌<60%排除（2026-04-19 0→60 恢复"未腰斩不碰"）
-  max_24h_change_pct: 25         # 24h涨幅>25%排除（v3.4 50→25，不追高）
+  # ── RC-1 基础门 ──
+  rc1_min_24h_volume_usdt: 20000000   # 24h 成交额 ≥ 2000万 U
+  rc1_min_listing_days: 5             # 上线 ≥ 5 天
+  rc1_min_oi_usdt: 5000000            # OI ≥ 500万 U
 
-  # ── Z-3 进池三选二（过 Z-2 的候选币满足≥2条才进池，2026-04-19 v3.7 恢复04-13赚钱期门槛）──
-  # 条件1：瞬时爆发（任一）
-  pool_burst_1m: 12              # 1m涨>12%（2026-04-19 10→12）
-  pool_burst_3m: 8               # 3m涨>8%（2026-04-19 6→8）
-  pool_burst_5m: 7               # 5m涨>7%（2026-04-19 5→7）
-  pool_burst_15m: 12             # 15m涨>12%（2026-04-19 10→12）
-  # 条件1补充：阶梯慢涨侧门（同时满足这两条也算条件1）
-  pool_stair_15m: 8              # 15m涨>8%（2026-04-19 5→8）
-  pool_stair_vol_ratio: 2.0      # 量比>2x（2026-04-19 1.5→2.0）
-  # 条件2：量比异常
-  pool_vol_ratio_min: 2.0        # 量比≥2x
-  # 条件3：聪明钱买入
-  pool_smart_money_min_score: 4  # 聪明钱评分≥4（buy=4 多地址=6 大额=10）
+  # ── RC-2 进池触发（满足任一即进池）──
+  rc2_burst_1m: 7                     # 1m > 7%
+  rc2_burst_3m: 5                     # 3m > 5%
+  rc2_burst_5m: 4                     # 5m > 4%
+  rc2_burst_15m: 8                    # 15m > 8%
+  rc2_stair_15m: 6                    # 慢涨侧门：15m > 6%
+  rc2_stair_vol_ratio: 2.0            # + 量比 > 2x
 
-  # ── Z-4 池内管理（不踢出，管评分冻结）──
-  pool_freeze_gain_pct: 20       # 池内涨幅>20%冻结评分，继续跟踪但不再攒分
-  pool_unfreeze_gain_pct: 10     # 回落≤10%解冻，10-20%缓冲带防震荡
+  # ── RC-3 趋势过滤（4H EMA20，放最后，最贵）──
+  rc3_trend_tf: "4h"
+  rc3_ema_period: 20
+  rc3_cache_minutes: 60               # 4H K线缓存 60 分钟
 
-  # ═══════════════════════════════════════════════════════════════
-  # AI 判断（可选，当前关闭）
-  # ═══════════════════════════════════════════════════════════════
-  ai:
-    enabled: false
-    provider: anthropic
-    model: claude-haiku-4-5-20251001
-    api_key_env: ANTHROPIC_API_KEY
-    timeout: 15
-    final_decision: true       # AI最终买入决策
+  # ── RC-4 反弹识别（便宜，先于 RC-3）──
+  rc4_lookback_hours: 4
+  rc4_max_drawdown_pct: 12
+  rc4_rebound_threshold: 0.92
+
+  # ── 池内管理 ──
+  pool_freeze_gain_pct: 20       # 池内涨幅>20%冻结评分
+  pool_ttl_hours: 24             # 进池后 24h 无信号踢出
+
 
   # ═══════════════════════════════════════════════════════════════
   # 分析层（过 Z 进池后，A-H 评分 → analyzer → 信号）
@@ -105,7 +95,7 @@ bull_sniper:
   # ── 分析器总闸 ──
   analyzer:
     enabled: true
-    signal_threshold: 28       # 2026-04-19 14:34 爸爸：下跌时期 25→28，拔高一点只放真爆发（mode=alert 只提示不实盘）
+    signal_threshold: 35       # v3.4 A提权配套上调：A+B=30不够单独过，需至少一个辅助因子
 
   # ── 信号最后一道防线：1m翻阴直接跳过本轮 ──
   signal_reject_1m_below: -1   # 1m涨幅<-1%判定回落中
@@ -117,82 +107,42 @@ bull_sniper:
   c_buy_ratio_gate: 0.51              # 2026-04-19 18:40 55→51：55在池内微观结构下几乎永不亮，51让"明确偏多"进入档位评分（数据验证非FOMO）
   c_min_back_2m_usdt: 200000          # 最近2分钟主动买入<20万U → 冷清
 
-  # ── D 层 OI 比较窗口 ──
-  oi_compare_period: "15m"    # OI评分对比窗口（5m/15m/30m/1h/2h/4h）
-
-  # ── E 层：链上捉妖（chain_score.py 实现）──
-  e_factor:
-    enabled: true
-    version: 2
-    data_source: query-token-info-api3
-    # threshold 已删（2026-04-19 v3.7）：chain_score.py 未引用此字段，是死配置
-    api_timeout: 5
-    holders_snapshot: true
-    log_detail: true
-    e5_contract_safety: false
-
-  # ── 评分参数 v3.7（2026-04-19 恢复 04-13 赚钱期 A/B 设计：A=方向门闩 B=早期卡位）──
+  # ── 评分参数 v3.5-minimalist ──
   scoring:
-    # A. 价格动能（互斥取最高）—— 高门槛当方向过滤器，下跌波动反抽达不到即过滤
-    burst_1m_threshold: 12     # 1m涨>12%（2026-04-19 恢复 04-13 值，5→12）
-    burst_1m: 8
-    burst_3m_threshold: 8      # 3m涨>8%（2026-04-19 恢复 04-13 值，4→8）
-    burst_3m: 7
-    burst_5m_threshold: 7      # 5m涨>7%（2026-04-19 恢复 04-13 值，3→7）
-    burst_5m: 6
-    burst_15m_threshold: 12    # 15m涨>12%（2026-04-19 v3.7 新增，对齐 Z-3 pool_burst_15m 门闩）
-    burst_15m: 5               # 分值低于 5m(6)，不鼓励追慢涨
+    # DN. 动能涨幅（互斥取最高，阈值 7/5/4/8，分值 55/42/33/22）
+    dn_reverse_guard: -1       # 反转守门：1m < -1% → DN = 0
+    dn_burst_1m: 7             # 1m > 7%  → DN = 55
+    dn_score_1m: 55
+    dn_burst_3m: 5             # 3m > 5%  → DN = 42
+    dn_score_3m: 42
+    dn_burst_5m: 4             # 5m > 4%  → DN = 33
+    dn_score_5m: 33
+    dn_burst_15m: 8            # 15m > 8% → DN = 22
+    dn_score_15m: 22
 
-    # B. 池内涨幅（互斥取最高）—— 早期卡位最高分，追高降分，鼓励早进不追尾
-    gain_5_10: 10              # 初期5-10%：最高分（2026-04-19 恢复 04-13 设计）
-    gain_10_15: 8              # 中期10-15%（9→8，回 04-13）
-    gain_15_25: 7              # 强势15-25%（8→7，回 04-13）
-    gain_25_40: 5              # 过热25-40%（保留）
-    # 删除 gain_2_5 和 gain_40_plus：追低/追高的两个邀请函，关掉
+    # WL. 位置（互斥取最高，基准=进池价，早进高分追高降分）
+    wl_score_tier1: 15         # 5-10%  早期最优
+    wl_score_tier2: 12         # 10-15%
+    wl_score_tier3: 8          # 15-25%
+    wl_score_tier4: 3          # 25-40%
+    # <5% 或 ≥40% → 0
 
-    # C. 动能加速度 v4.0（2026-04-19 替换量比倍数）
-    # 互斥取最高档；前置闸门见 c_buy_ratio_gate / c_min_back_2m_usdt
-    c_dual_super:  10          # 短≥3x 且 中≥3x        双共振爆发
-    c_near_dual:   8           # 一边≥3x另一边≥2x      接近双共振
-    c_dual_strong: 7           # 短≥2x 且 中≥2x        双共振强势
-    c_one_super:   5           # 任一≥3x                单维度爆发（闪电/慢涨）
-    c_mixed:       4           # 一边≥2x另一边≥1.5x    短强中温/短温中强
-    c_mild:        2           # 任一≥1.5x              温和启动
-    c_flat:        0           # 1-1.5x之间             平稳
-    c_decay:       0           # 任一<1x 衰减（v4.0: -3→0，signal_reject_1m_below 已做最后防线，避免双重惩罚）
+    # TP. 突破因子（v3.5，1H 收盘突破前 6 根收盘高点）
+    tp_lookback_1h: 6              # 回看 6 根 1H K 线
+    tp_breakout_margin: 0.003      # 突破阈值 0.3%
+    tp_wick_ratio_max: 0.40        # 上影线/全幅 < 40%
+    tp_consolidation_range: 0.08   # 盘整判断：前高/前低-1 < 8%
+    tp_cache_minutes: 60           # K 线缓存 60 分钟
+    tp_super_score: 20             # 量≥2.5x + 盘整好
+    tp_strong_score: 15            # 量≥2.0x
+    tp_normal_score: 10            # 量≥1.5x
+    tp_weak_score: 5               # 量<1.5x（弱突破，仍加分）
 
-    # D. OI（v3.2: 比较窗口5分钟→1小时，降门槛）
-    oi_up_mild: 3              # 0.5-5%（v3.2: 门槛从5%降到0.5%）
-    oi_up_strong: 5            # 5-20%（v3.2: 8→5）
-    oi_up_super: 8             # >20%（v3.2: 门槛从30%降到20%）
-    oi_down: -3                # <-5%（v3.2: -5→-3）
-
-    # D. 多空比+费率
-    lsr_short_dominant: 2      # 多空比<0.8
-    funding_extreme_threshold: 0.0005  # 0.05%
-    funding_extreme: 3
-    # 费率波动幅度（v3.2新增，看变化不看刻度）
-    funding_swing_low: 2       # 1h波动>0.02%
-    funding_swing_high: 4      # 1h波动>0.05%（替代+2）
-
-    # E. 由chain_score.py的E因子实现（最高+31，含否决）
-    # 以下参数保留用于进池路径参考，评分走chain_score
-    smart_money_buy: 4
-    smart_money_multi: 6
-    smart_money_multi_threshold: 3
-    smart_money_large: 10
-    smart_money_large_threshold: 50000
-
-    # G. 公告因子
-    announce_new_listing: 5    # 新增合约
+    # GG. 公告因子
+    announce_new_listing: 3    # 新增合约（v3.4降权）
     announce_delist: -5        # 下架/SETTLING
 
-    # E因子小币抖动减震（v3.3，-2太重改-1）
-    e2b_binance_outflow_penalty: -1   # 币安净流出惩罚
-    e4a_sell_dominant_penalty: -1     # 1h卖方主导惩罚
-    e2c_smart_exit_penalty: -1        # 聪明钱流出惩罚（原一票否决改扣分）
-
-    # H. Alpha币加分（v3.3新增，搜到合约=二元+2）
+    # AF. Alpha币加分（搜到合约=+2）
     h_alpha_bonus: 2
 
   # ═══════════════════════════════════════════════════════════════
@@ -214,8 +164,8 @@ bull_sniper:
     pullback_trigger: 25
     tolerance: 3
   trailing_limit:
-    activation_profit_pct: 60  # 浮盈≥60%激活
-    pullback_pct: 40           # 回撤40%止盈
+    activation_profit_pct: 25  # 浮盈≥25%激活（2026-04-23 60→25）
+    pullback_pct: 20           # 回撤20%止盈（2026-04-23 40→20）
     poll_interval_sec: 30
     safety_above_entry: true   # 止盈价不低于开仓价
 
@@ -230,10 +180,10 @@ bull_sniper:
   btc_circuit_breaker_pct: 2
 
   # ── 冷却 ──
-  cooldown_after_tp_hours: 12
-  cooldown_after_sl_hours: 24
-  cooldown_after_timeout_hours: 6      # 2026-04-18 v3.4 0→6（超时币不再反复进出消耗扫描）
-  cooldown_after_veto_min: 30
+  cooldown_after_tp_hours: 0           # v3.4测试模式全清零
+  cooldown_after_sl_hours: 0           # v3.4测试模式全清零
+  cooldown_after_timeout_hours: 0      # v3.4测试模式全清零
+  cooldown_after_veto_min: 0           # v3.4测试模式全清零
   cooldown_price_release_pct: 0         # 2026-04-18 v3.4 100→0（关掉价格解除，避免止损后循环买入）
   cooldown_price_release_on_sl: false   # 2026-04-18 v3.4 true→false（止损冷却不受价格解除）
   position_timeout_hours: 24       # 持仓超时自动平仓
