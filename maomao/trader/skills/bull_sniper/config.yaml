@@ -195,3 +195,10 @@ bull_sniper:
   stop_loss_high_entry_after: 3      # 高位入场 30min 后止损 3%
   high_entry_threshold_24h: 30       # 24h 涨幅超过此值视为高位入场
   sl_upgrade_window_minutes: 30      # 升级止损的等待时间（分钟）
+
+  # ── Stage 5.3 两层移动止盈 ──
+  trail_poll_interval_sec: 10        # trail 线程轮询间隔（秒）
+  trail_layer1_activation_pct: 15    # Layer1 激活：浮盈峰值 ≥ 15%
+  trail_layer1_pullback_pct: 10      # Layer1 回撤：利润回撤 ≥ 10% 触发
+  trail_layer2_activation_pct: 35    # Layer2 激活：浮盈峰值 ≥ 35%（优先 layer1）
+  trail_layer2_pullback_pct: 15      # Layer2 回撤：利润回撤 ≥ 15% 触发

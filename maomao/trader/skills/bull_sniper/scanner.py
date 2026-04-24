@@ -11,7 +11,10 @@ bull_sniper scanner.py — 做多阻击扫描器 v3.1
 import datetime as _dt
 import json
 import logging
+import os
+import queue
 import sys
+import threading
 import time
 import yaml
 import requests
@@ -1320,9 +1323,66 @@ def run():
     last_card_hour     = -1
     last_health_hour   = -1
 
+    # ── Stage 5.3 两层移动止盈线程 ──
+    _trail_queue: queue.Queue = queue.Queue()
+    _trail_key    = os.environ.get("BINANCE2_API_KEY", "")
+    _trail_secret = os.environ.get("BINANCE2_API_SECRET", "")
+    if _trail_key and _trail_secret:
+        try:
+            from trail_manager import trail_loop
+            _t = threading.Thread(
+                target=trail_loop,
+                args=(state, lambda: CFG, _trail_queue, _trail_key, _trail_secret),
+                kwargs={"interval": CFG.get("trail_poll_interval_sec", 10)},
+                daemon=True,
+                name="trail_manager",
+            )
+            _t.start()
+            logger.info("[trail] 移动止盈线程已启动（10s轮询）")
+        except Exception as e:
+            logger.warning(f"[trail] 线程启动失败: {e}")
+    else:
+        logger.warning("[trail] BINANCE2 密钥缺失，移动止盈线程未启动")
+
     while True:
         now = time.time()
         current_hour = _dt.datetime.now().hour
+
+        # ── Stage 5.3 trail 队列消费（主线程独占写 state）──
+        try:
+            _trail_changed = False
+            while not _trail_queue.empty():
+                _item = _trail_queue.get_nowait()
+                _sym = _item.get("symbol", "")
+                _pos = state.get("positions", {}).get(_sym)
+                if not _pos:
+                    continue
+                if _item["type"] == "update_peak":
+                    _pos["peak_pnl_pct"] = _item["peak_pnl_pct"]
+                    _trail_changed = True
+                elif _item["type"] == "close" and _pos.get("status") == "holding":
+                    from trail_manager import _close_position
+                    _qty = _item.get("qty", 0)
+                    _layer = _item.get("layer", "?")
+                    _ok = _close_position(_sym, _qty, _trail_key, _trail_secret) if _qty > 0 else False
+                    if _ok:
+                        _pos["status"] = "trail_tp"
+                        _pos["exit_price"] = _item.get("mark_price", 0)
+                        logger.info(
+                            f"[trail] {_sym} {_layer} 平仓成功 "
+                            f"峰值+{_item['peak_pnl_pct']:.1f}% 现+{_item['cur_pnl_pct']:.1f}%"
+                        )
+                        _alert("trail_tp",
+                            f"🏁 {_sym.replace('USDT','')} {_layer} 移动止盈触发\n"
+                            f"峰值 +{_item['peak_pnl_pct']:.1f}% → 回撤至 +{_item['cur_pnl_pct']:.1f}%"
+                        )
+                    else:
+                        logger.warning(f"[trail] {_sym} {_layer} 平仓失败，等下轮重试")
+                    _trail_changed = True
+            if _trail_changed:
+                save_state(state)
+        except Exception as e:
+            logger.warning(f"[trail消费] 异常: {e}")
 
         # ── 配置热重载 ──
         _hot_reload_config()
