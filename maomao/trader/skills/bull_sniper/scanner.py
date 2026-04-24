@@ -1427,7 +1427,6 @@ def run():
         # ── Stage 5.2 止损升级（30分钟后宽松档位） ──
         try:
             from stop_loss_manager import upgrade_all_positions
-            import os
             _sl_key    = os.environ.get("BINANCE2_API_KEY", "")
             _sl_secret = os.environ.get("BINANCE2_API_SECRET", "")
             if _sl_key and _sl_secret:
