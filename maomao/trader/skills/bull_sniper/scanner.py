@@ -72,11 +72,6 @@ def load_config() -> dict:
 CFG = load_config()
 _cfg_mtime = (BASE_DIR / "config.yaml").stat().st_mtime
 
-# v4.0 短期24h已超限黑名单（避免同一币反复触发进池逻辑+重复24h查询）
-# 结构：{symbol: expire_at_ts}，10分钟过期
-_RECENT_24H_REJECTS: dict = {}
-_REJECT_TTL_SEC = 600
-
 def _hot_reload_config():
     """检查config.yaml是否被修改，有变化就热重载"""
     global CFG, _cfg_mtime
@@ -202,6 +197,104 @@ def get_klines_1d(symbol: str) -> list:
     )
     resp.raise_for_status()
     return resp.json()
+
+
+# ══════════════════════════════════════════
+# RC 前置门辅助函数
+# ══════════════════════════════════════════
+
+_kline_cache: dict = {}  # {"{symbol}_{interval}": (klines, expire_ts)}
+
+
+def _get_klines_cached(symbol: str, interval: str, limit: int, ttl_sec: int) -> list:
+    key = f"{symbol}_{interval}"
+    now = time.time()
+    hit = _kline_cache.get(key)
+    if hit and now < hit[1]:
+        return hit[0]
+    resp = requests.get(
+        f"{FAPI_BASE}/fapi/v1/klines",
+        params={"symbol": symbol, "interval": interval, "limit": limit},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    klines = resp.json()
+    _kline_cache[key] = (klines, now + ttl_sec)
+    return klines
+
+
+def _calc_ema(prices: list, period: int) -> float:
+    """EMA，返回最后一个值。数据不足时用 SMA 兜底。"""
+    if len(prices) < period:
+        return sum(prices) / len(prices)
+    k = 2 / (period + 1)
+    ema = sum(prices[:period]) / period
+    for p in prices[period:]:
+        ema = p * k + ema * (1 - k)
+    return ema
+
+
+def rc2_pass(c1m: float, c3m: float, c5m: float, c15m: float,
+             vol_ratio: float) -> tuple[bool, str]:
+    """RC-2: 进池触发 — 瞬时爆发 or 慢涨侧门（满足任一即进池）"""
+    b1  = CFG.get("rc2_burst_1m",  7)
+    b3  = CFG.get("rc2_burst_3m",  5)
+    b5  = CFG.get("rc2_burst_5m",  4)
+    b15 = CFG.get("rc2_burst_15m", 8)
+    s15 = CFG.get("rc2_stair_15m", 6)
+    svr = CFG.get("rc2_stair_vol_ratio", 2.0)
+
+    if c1m  > b1:  return True, f"burst_1m={c1m:.1f}%"
+    if c3m  > b3:  return True, f"burst_3m={c3m:.1f}%"
+    if c5m  > b5:  return True, f"burst_5m={c5m:.1f}%"
+    if c15m > b15: return True, f"burst_15m={c15m:.1f}%"
+    if c15m > s15 and vol_ratio > svr:
+        return True, f"stair={c15m:.1f}%+vol={vol_ratio:.1f}x"
+    return False, ""
+
+
+def rc3_pass(symbol: str) -> tuple[bool, str]:
+    """RC-3: 4H 趋势过滤 — 4H 收盘 > EMA20 才放行（缓存 60min）"""
+    try:
+        period = CFG.get("rc3_ema_period", 20)
+        ttl    = CFG.get("rc3_cache_minutes", 60) * 60
+        klines = _get_klines_cached(symbol, "4h", limit=period + 10, ttl_sec=ttl)
+        if len(klines) < period:
+            return True, ""  # 数据不足，fail-open
+        closes = [float(k[4]) for k in klines]
+        ema = _calc_ema(closes, period)
+        cur = closes[-1]
+        if cur <= ema:
+            return False, f"RC-3: 4H收盘{cur:.4f}≤EMA{period}={ema:.4f}"
+        return True, ""
+    except Exception as e:
+        logger.debug(f"[RC-3] {symbol} 跳过: {e}")
+        return True, ""  # fail-open
+
+
+def rc4_pass(symbol: str, ticker: dict) -> tuple[bool, str]:
+    """RC-4: 反弹识别 — 大跌后假反弹过滤"""
+    try:
+        lookback  = CFG.get("rc4_lookback_hours", 4)
+        max_dd    = CFG.get("rc4_max_drawdown_pct", 12) / 100
+        threshold = CFG.get("rc4_rebound_threshold", 0.92)
+
+        klines = _get_klines_cached(symbol, "1h", limit=lookback + 1, ttl_sec=300)
+        if not klines:
+            return True, ""
+        max_high = max(float(k[2]) for k in klines)
+        cur = ticker["price"]
+
+        drawdown     = (max_high - cur) / max_high if max_high > 0 else 0
+        is_rebounding = cur < max_high * threshold
+
+        if drawdown > max_dd and is_rebounding:
+            return False, (f"RC-4: 4H回撤{drawdown*100:.1f}% "
+                           f"当前{cur:.4f}<高点{max_high:.4f}×{threshold}")
+        return True, ""
+    except Exception as e:
+        logger.debug(f"[RC-4] {symbol} 跳过: {e}")
+        return True, ""  # fail-open
 
 
 def calc_1h_change(symbol: str) -> float:
@@ -535,28 +628,18 @@ def _load_oi_cached(symbol: str) -> float:
 
 
 def passes_filter(symbol: str, ticker: dict) -> tuple[bool, str]:
-    """
-    基础过滤 v3.6（2026-04-18）
-    成交额 + 上线天数 + ATH + OI 四道硬门槛
-    返回 (True, "") 或 (False, 原因)
-    """
-    min_vol = CFG["exclude_daily_vol_below"]
+    """RC-1 基础门 v3.5: 成交额 + 上线天数 + OI"""
+    min_vol = CFG.get("rc1_min_24h_volume_usdt", 20_000_000)
     if ticker["volume_usdt"] < min_vol:
         return False, f"成交额{ticker['volume_usdt']/1e6:.1f}M<{min_vol/1e6:.0f}M"
 
     ath_data = _load_ath(symbol)
     listing_days = ath_data["listing_days"]
-    if listing_days < CFG["min_listing_days"]:
-        return False, f"上线{listing_days}天<{CFG['min_listing_days']}天"
+    min_days = CFG.get("rc1_min_listing_days", 5)
+    if listing_days < min_days:
+        return False, f"上线{listing_days}天<{min_days}天"
 
-    ath_exempt = CFG.get("ath_exempt_days", 180)
-    if listing_days >= ath_exempt:
-        min_drop = CFG["min_drop_from_ath"]
-        if ath_data["drop_from_ath"] < min_drop:
-            return False, f"距ATH跌{ath_data['drop_from_ath']:.1f}%<{min_drop}%"
-
-    # OI 硬门槛（v3.6 从第二层上移，缓存5分钟）
-    min_oi = CFG.get("min_oi_startup", 5000000)
+    min_oi = CFG.get("rc1_min_oi_usdt", 5_000_000)
     oi = _load_oi_cached(symbol)
     if oi < min_oi:
         return False, f"OI{oi/1e6:.1f}M<{min_oi/1e6:.0f}M"
@@ -564,39 +647,6 @@ def passes_filter(symbol: str, ticker: dict) -> tuple[bool, str]:
     return True, ""
 
 
-# 启动时黑名单（任意时段>15%排除，2小时后过期可重新进池）
-_startup_blacklist: dict = {}  # {symbol: expire_ts}
-_startup_done: bool = False
-_BLACKLIST_TTL = 1800  # 30分钟（7200→1800）
-
-
-def build_startup_blacklist(tickers: list):
-    """启动时扫全市场，任意时段>15%加入黑名单（2小时过期）"""
-    global _startup_blacklist, _startup_done
-    if _startup_done:
-        return
-    expire_ts = time.time() + _BLACKLIST_TTL
-    threshold = CFG.get("startup_max_change_pct", 15)
-    for t in tickers:
-        symbol = t["symbol"]
-        ok, _ = passes_filter(symbol, t)
-        if not ok:
-            continue
-        try:
-            c1m = calc_1m_change(symbol)
-            c3m = calc_3m_change(symbol)
-            c5m = calc_5m_change(symbol)
-            c15m = calc_15m_change(symbol)
-            c1h = calc_1h_change(symbol)
-            c2h = calc_2h_change(symbol)
-            changes = [c1m, c3m, c5m, c15m, c1h, c2h]
-            if any(c > threshold for c in changes):
-                _startup_blacklist[symbol] = expire_ts
-                logger.info(f"[启动黑名单] {symbol} 排除2h: 1m={c1m:.1f}% 3m={c3m:.1f}% 5m={c5m:.1f}% 15m={c15m:.1f}% 1h={c1h:.1f}% 2h={c2h:.1f}%")
-        except Exception as e:
-            logger.debug(f"[启动黑名单] {symbol} 检查失败: {e}")
-    _startup_done = True
-    logger.info(f"[启动黑名单] 排除{len(_startup_blacklist)}个币: {list(_startup_blacklist)[:20]}")
 
 
 # ══════════════════════════════════════════
@@ -749,9 +799,6 @@ def scan_once(state: dict, tickers: list) -> dict:
         if symbol in _refresh_mcap_exclude():
             continue
 
-        if symbol in _startup_blacklist and _startup_blacklist[symbol] > now:
-            continue
-
         ok, reason = passes_filter(symbol, t)
         if not ok:
             state.setdefault("filter_log", []).append({
@@ -764,80 +811,37 @@ def scan_once(state: dict, tickers: list) -> dict:
 
         candidates.append(t)
 
-    # ── 3. 进池：三选二（爆发/量比/聪明钱）──
-    # v3.6：OI 门槛已上移到启动过滤（min_oi_startup），此层只判断三选二+阶梯
-    burst_1m_th = CFG.get("pool_burst_1m", 10)
-    burst_3m_th = CFG.get("pool_burst_3m", 6)
-    burst_5m_th = CFG.get("pool_burst_5m", 5)
-    burst_15m_th = CFG.get("pool_burst_15m", 10)
-
+    # ── 3. 进池：RC-2 → RC-4 → RC-3 ──
     for t in candidates:
         symbol = t["symbol"]
 
-        c1m = calc_1m_change(symbol)
-        c3m = calc_3m_change(symbol)
-        c5m = calc_5m_change(symbol)
+        c1m  = calc_1m_change(symbol)
+        c3m  = calc_3m_change(symbol)
+        c5m  = calc_5m_change(symbol)
         c15m = calc_15m_change(symbol)
+        vr   = calc_volume_ratio(symbol)
 
-        # ── 三选二：爆发 / 量比 / 聪明钱 ──
-        cond_burst = (c1m > burst_1m_th or c3m > burst_3m_th
-                      or c5m > burst_5m_th or c15m > burst_15m_th)
-        # 阶梯慢涨也算爆发满足
-        if not cond_burst and c15m > CFG.get("pool_stair_15m", 5):
-            vr_stair = calc_volume_ratio(symbol)
-            if vr_stair > CFG.get("pool_stair_vol_ratio", 1.5):
-                cond_burst = True
-
-        _vr = calc_volume_ratio(symbol)
-        cond_vol = (_vr >= CFG.get("pool_vol_ratio_min", 2.0))
-
-        cond_smart = False
-        _sm_reason = ""
-        try:
-            _sm = get_smart_money_score(symbol)
-            _sm_min = CFG.get("pool_smart_money_min_score", 4)
-            if _sm["score"] >= _sm_min:
-                cond_smart = True
-                _sm_reason = _sm["reason"]
-        except Exception:
-            pass
-
-        conditions = []
-        if cond_burst:  conditions.append("burst")
-        if cond_vol:    conditions.append("vol_ratio")
-        if cond_smart:  conditions.append("smart_money")
-
-        if len(conditions) < 2:
+        # RC-2: 瞬时爆发 or 慢涨侧门
+        ok2, entry_reason = rc2_pass(c1m, c3m, c5m, c15m, vr)
+        if not ok2:
             continue
 
-        # entry_reason = 所有满足的条件
-        entry_reason = "+".join(conditions)
-        logger.info(f"[进池] {symbol} 三选二触发: {entry_reason} "
-                     f"(1m={c1m:.1f}% 3m={c3m:.1f}% 5m={c5m:.1f}% 15m={c15m:.1f}% "
-                     f"量比={_vr:.1f}x 聪明钱={_sm_reason or 'N/A'})")
+        # RC-4: 反弹识别（便宜，先于 RC-3）
+        ok4, reason4 = rc4_pass(symbol, t)
+        if not ok4:
+            logger.info(f"[RC-4拦截] {symbol} {reason4}")
+            continue
 
-        # OI 已在启动过滤层拦过 500万U，此处复用缓存值
+        # RC-3: 4H EMA 趋势（最贵，放最后）
+        ok3, reason3 = rc3_pass(symbol)
+        if not ok3:
+            logger.info(f"[RC-3拦截] {symbol} {reason3}")
+            continue
+
+        logger.info(f"[进池] {symbol} RC-2触发: {entry_reason} "
+                    f"(1m={c1m:.1f}% 3m={c3m:.1f}% 5m={c5m:.1f}% 15m={c15m:.1f}% 量比={vr:.1f}x)")
+
         oi = _load_oi_cached(symbol)
-
-        # 24h已涨过滤（防拉完回抽进池）
-        # v4.0 短期黑名单：10min内已被24h过滤拒绝过的币直接跳过，省API省日志
-        _now_ts = time.time()
-        _exp = _RECENT_24H_REJECTS.get(symbol, 0)
-        if _exp > _now_ts:
-            continue  # 静默跳过，不再触发"否决进池"日志
-        pct_24h = t.get("change_pct", 0)
-        max_24h = CFG.get("max_24h_change_pct", 30)
-        if pct_24h > max_24h:
-            _RECENT_24H_REJECTS[symbol] = _now_ts + _REJECT_TTL_SEC
-            logger.info(f"[否决进池] {symbol} 24h已涨{pct_24h:.1f}% > {max_24h}%，跳过（{int(_REJECT_TTL_SEC/60)}min内不再算）")
-            _ledger.event("pool_rejected", {
-                "symbol": symbol,
-                "reason": "24h_gate",
-                "pct_24h": round(pct_24h, 2),
-                "max_24h": max_24h,
-                "entry_reason": entry_reason,
-            }, trace_id=new_trace_id())
-            continue
 
         max_pool = CFG.get("watchpool_max", 30)
         if len(state["watchpool"]) >= max_pool:
@@ -1042,24 +1046,6 @@ def scan_once(state: dict, tickers: list) -> dict:
             if symbol in state["cooldowns"] or symbol in state.get("positions", {}):
                 logger.info(f"[过滤] {symbol} 冷却/持仓中，跳过信号")
                 continue
-            # 24h涨幅过滤（不达标直接跳过，不记录信号、不推送、不显示）
-            try:
-                _ticker = requests.get(
-                    f"{FAPI_BASE}/fapi/v1/ticker/24hr",
-                    params={"symbol": symbol}, timeout=5,
-                ).json()
-                _pct_24h = float(_ticker.get("priceChangePercent", 0))
-                _max_24h = CFG.get("max_24h_change_pct", 30)
-                if _pct_24h > _max_24h:
-                    _record_reject(symbol, "over_20", analyze_result.get("score", 0),
-                                   cur_price, entry_price, gain_since_entry,
-                                   str(analyze_result.get("breakdown", "")))
-                    logger.info(f"[过滤] {symbol} 评分{analyze_result.get('score')}分但24h已涨{_pct_24h:.1f}%>{_max_24h}%，不记录不推送")
-                    continue
-            except Exception as _e:
-                logger.warning(f"[24h检查异常] {symbol}: {_e}，保守跳过")
-                continue
-
             # ── 回落过滤器 v2.0（2026-04-18 量比绝对值门槛上线后简化）──
             # 只保留 1m 翻阴判断。peak_drop 因 C 维度绝对买入额封顶已变多余，移除。
             _reject_1m = CFG.get("signal_reject_1m_below", -1)
@@ -1159,9 +1145,17 @@ def scan_once(state: dict, tickers: list) -> dict:
                     if buy_result["status"] == "executed":
                         # 收集成功执行的账户列表
                         executed_accts = [n for n, r in acct_results.items() if r.get("status") == "executed"] if acct_results else []
+                        actual_open_price = buy_result.get("actual_entry") or cur_price
                         state.setdefault("positions", {})[symbol] = {
                             "entry_price": cur_price,
                             "entry_time": now,
+                            # Stage 5.2: 止损分级 / trail 基准字段
+                            "position_open_price": actual_open_price,
+                            "position_open_time": now,
+                            "entry_24h_change_pct": t.get("change_pct", 0),
+                            "sl_upgraded": False,
+                            "sl_pct": None,
+                            # ──────────────────────────────
                             "order_id": buy_result.get("order_id"),
                             "score": analyze_result.get("score"),
                             "breakdown": analyze_result.get("breakdown", {}),
@@ -1370,14 +1364,23 @@ def run():
         except Exception as e:
             logger.warning(f"[仓位管理] 检查异常: {e}")
 
+        # ── Stage 5.2 止损升级（30分钟后宽松档位） ──
+        try:
+            from stop_loss_manager import upgrade_all_positions
+            import os
+            _sl_key    = os.environ.get("BINANCE2_API_KEY", "")
+            _sl_secret = os.environ.get("BINANCE2_API_SECRET", "")
+            if _sl_key and _sl_secret:
+                upgraded = upgrade_all_positions(state, CFG, _sl_key, _sl_secret)
+                if upgraded:
+                    save_state(state)
+        except Exception as e:
+            logger.warning(f"[止损升级] 检查异常: {e}")
+
         # 每30秒全市场扫描
         if now - last_full_scan >= CFG.get("scan_interval_sec", 30):
             try:
                 tickers = get_all_tickers()
-                # 首次扫描：生成启动黑名单
-                if not _startup_done:
-                    logger.info(f"[启动黑名单] 开始扫描 {len(tickers)} 个合约...")
-                    build_startup_blacklist(tickers)
                 logger.info(f"全市场扫描: {len(tickers)}个合约")
                 events = scan_once(state, tickers)
 

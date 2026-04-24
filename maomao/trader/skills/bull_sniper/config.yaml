@@ -187,3 +187,11 @@ bull_sniper:
   cooldown_price_release_pct: 0         # 2026-04-18 v3.4 100→0（关掉价格解除，避免止损后循环买入）
   cooldown_price_release_on_sl: false   # 2026-04-18 v3.4 true→false（止损冷却不受价格解除）
   position_timeout_hours: 24       # 持仓超时自动平仓
+
+  # ── Stage 5.2 基础止损分级 ──
+  stop_loss_30min_pct: 3             # 标准入场 30min 内止损 3%
+  stop_loss_after_pct: 5             # 标准入场 30min 后止损 5%
+  stop_loss_high_entry_30min: 2      # 高位入场（24h>30%）30min 内止损 2%
+  stop_loss_high_entry_after: 3      # 高位入场 30min 后止损 3%
+  high_entry_threshold_24h: 30       # 24h 涨幅超过此值视为高位入场
+  sl_upgrade_window_minutes: 30      # 升级止损的等待时间（分钟）
