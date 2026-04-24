@@ -1,0 +1,122 @@
+engine:
+  enabled: false   # cron 每分钟跑，但 enabled=false 时 engine 直接返回，零影响
+  shadow: true     # enabled=true 后先 shadow 观察，确认稳再改 false 进 live
+rules:
+- id: skeleton_smoke
+  enabled: true
+  trigger:
+    kind: demo
+    fire: false
+  side: short
+  symbol: BTCUSDT
+  account: 币安2
+  margin_usd: 100
+  leverage: 3
+  cooldown_sec: 900
+  note: 骨架验证，永不触发
+- id: btc_small_ceiling_short
+  enabled: false
+  trigger:
+    kind: ceiling
+    box_top: 78000
+    tolerance_pct: 1.0
+    require_fresh_entry: true
+  guards:
+  - kind: liq_safety
+    mother_upper: 88000
+  - kind: cooldown
+  side: short
+  symbol: BTCUSDT
+  account: 币安2
+  margin_usd: 100
+  leverage: 3
+  cooldown_sec: 1800
+  note: BTC 小箱顶 78000 附近加空
+- id: btc_small_floor_long
+  enabled: false
+  trigger:
+    kind: floor
+    box_bottom: 73000
+    tolerance_pct: 1.0
+    require_fresh_entry: true
+  guards:
+  - kind: liq_safety
+    mother_lower: 58000
+  - kind: cooldown
+  side: long
+  symbol: BTCUSDT
+  account: 币安2
+  margin_usd: 100
+  leverage: 3
+  cooldown_sec: 1800
+  note: BTC 小箱底 73000 附近加多
+- id: btc_entry_drop5_long
+  enabled: false
+  trigger:
+    kind: pct
+    ref: entry
+    direction: down
+    threshold_pct: 5
+  guards:
+  - kind: liq_safety
+    mother_lower: 58000
+  - kind: cooldown
+  side: long
+  symbol: BTCUSDT
+  account: 币安2
+  margin_usd: 50
+  leverage: 3
+  cooldown_sec: 3600
+  note: 入场价跌 5% 加一档多
+- id: tide_buyback_short
+  enabled: false
+  trigger:
+    kind: buyback
+    pct_below_sell: 1.0
+  guards:
+  - kind: liq_safety
+    mother_upper: 88000
+  - kind: cooldown
+  side: short
+  symbol: BTCUSDT
+  account: 币安2
+  margin_usd: 100
+  leverage: 3
+  cooldown_sec: 600
+  note: 潮汐减仓后 buyback，margin 暂用固定值，动态 sold_usd 待后续接入
+- id: tide_pullback_add_short
+  enabled: false
+  trigger:
+    kind: pullback
+    pct_below_sell: 2.0
+  guards:
+  - kind: liq_safety
+    mother_upper: 88000
+  - kind: cooldown
+  side: short
+  symbol: BTCUSDT
+  account: 币安2
+  margin_usd: 100
+  leverage: 3
+  cooldown_sec: 900
+  note: 潮汐 pullback 加仓
+- id: btc_ceiling_short_limit
+  enabled: false
+  trigger:
+    kind: ceiling
+    box_top: 78000
+    tolerance_pct: 1.0
+    require_fresh_entry: true
+  guards:
+  - kind: liq_safety
+    mother_upper: 88000
+  - kind: cooldown
+  side: short
+  symbol: BTCUSDT
+  account: 币安2
+  margin_usd: 100
+  leverage: 3
+  cooldown_sec: 1800
+  entry_type: limit
+  limit_offset_pct: 0.3    # 触发价向上 0.3% 挂空（回测时成交）
+  note: BTC 小箱顶限价加空，触发后挂在触发价+0.3%

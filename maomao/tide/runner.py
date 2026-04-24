@@ -29,6 +29,7 @@ sys.path.insert(0, str(BASE_DIR))
 from modules.data_layer import fetch_price, fetch_klines_1m, fetch_klines_4h, fetch_oi, fetch_funding_rate, read_state, write_state
 from modules.zone_layer import get_zone, distance_to_center, calc_small_box
 from modules.decision_engine import make_decision
+from modules.mock_short import push_mock_short
 
 
 TOTAL_CAPITAL = 500.0
@@ -47,11 +48,26 @@ def main():
     mode = cfg["system"]["mode"]
     log.info(f"潮汐 v{cfg['system']['version']} mode={mode} 启动")
 
+    # 启动时确保底仓存在（ensure_bottom 幂等：已有就跳过；shadow 只日志）
+    try:
+        if "/root/maomao" not in sys.path:
+            sys.path.insert(0, "/root/maomao")
+        from tide.exec.bottom_keeper import ensure_bottom
+        r = ensure_bottom()
+        log.info(f"[startup] bottom_keeper → {r.get('action')}: {r.get('detail')}")
+    except Exception as e:
+        log.error(f"[startup] bottom_keeper 异常: {e}")
+
     prev_segment = None
     last_small_box_update = 0  # epoch秒，0表示从未更新
 
     while True:
         try:
+            # 热调：每次循环重读 config，改 yaml 即时生效无需重启
+            with open(CONFIG_PATH) as f:
+                cfg = yaml.safe_load(f)
+            mode = cfg["system"]["mode"]
+
             # 每4小时更新小箱参数
             now_ts = time.time()
             if now_ts - last_small_box_update >= 4 * 3600:
@@ -140,6 +156,8 @@ def main():
                     f"{decision['action']} | {decision['reason']}"
                 )
                 log.info(f"[决策] {decision['label']} — {decision['reason']}")
+                state["last_decision_action"] = decision["action"]
+                state["mock_push_trigger"]    = decision["action"]
 
                 # 优先级决策：破箱 > 买回 > 减仓 > 加仓
                 from modules.close_layer import check_force_flat
@@ -179,6 +197,12 @@ def main():
                     log.info("[影子盘] 只记录，不执行")
 
                 prev_segment = zone["name"]
+
+            # ms1: 模拟空仓推送
+            try:
+                push_mock_short(cfg, price, zone, state, write_state)
+            except Exception as e:
+                log.warning(f"mock_short推送失败: {e}")
 
         except Exception as e:
             log.error(f"主循环异常: {e}")
