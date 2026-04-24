@@ -51,6 +51,11 @@ def sl_price_from_pct(open_price: float, sl_pct: float) -> float:
     return round(open_price * (1 - sl_pct / 100), 8)
 
 
+def is_sl_triggered(current_price: float, open_price: float, sl_pct: float) -> bool:
+    """当前价 <= 止损价时返回 True（双保险：algoOrder 失效时 VPS 侧检测）"""
+    return current_price <= sl_price_from_pct(open_price, sl_pct)
+
+
 def should_upgrade(position: dict, cfg: dict) -> bool:
     """
     判断是否应该升级止损：

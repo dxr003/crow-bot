@@ -11,6 +11,8 @@ from stop_loss_manager import (
     compute_upgraded_sl_pct,
     sl_price_from_pct,
     should_upgrade,
+    is_sl_triggered,
+    upgrade_stop_loss,
 )
 
 _CFG = {
@@ -121,3 +123,66 @@ def test_high_entry_upgraded_trigger():
     pct = compute_upgraded_sl_pct(35.0, _CFG)  # 3%
     price = sl_price_from_pct(100.0, pct)
     assert abs(price - 97.0) < 1e-6
+
+
+# ── 8 个时间+价格叠加边界（is_sl_triggered）──
+
+def test_standard_29min_drop_2p9_not_triggered():
+    """标准入场 29min内 止损3%，跌2.9%→97.1 > 97.0 → 不触发"""
+    assert is_sl_triggered(97.1, 100.0, 3.0) is False
+
+def test_standard_29min_drop_3p1_triggered():
+    """标准入场 29min内 止损3%，跌3.1%→96.9 < 97.0 → 触发"""
+    assert is_sl_triggered(96.9, 100.0, 3.0) is True
+
+def test_standard_31min_drop_3p1_not_triggered():
+    """标准入场 31min后 止损5%，跌3.1%→96.9 > 95.0 → 不触发"""
+    assert is_sl_triggered(96.9, 100.0, 5.0) is False
+
+def test_standard_31min_drop_5p1_triggered():
+    """标准入场 31min后 止损5%，跌5.1%→94.9 < 95.0 → 触发"""
+    assert is_sl_triggered(94.9, 100.0, 5.0) is True
+
+def test_high_entry_29min_drop_1p9_not_triggered():
+    """高位入场 29min内 止损2%，跌1.9%→98.1 > 98.0 → 不触发"""
+    assert is_sl_triggered(98.1, 100.0, 2.0) is False
+
+def test_high_entry_29min_drop_2p1_triggered():
+    """高位入场 29min内 止损2%，跌2.1%→97.9 < 98.0 → 触发"""
+    assert is_sl_triggered(97.9, 100.0, 2.0) is True
+
+def test_high_entry_31min_drop_2p9_not_triggered():
+    """高位入场 31min后 止损3%，跌2.9%→97.1 > 97.0 → 不触发"""
+    assert is_sl_triggered(97.1, 100.0, 3.0) is False
+
+def test_high_entry_31min_drop_3p1_triggered():
+    """高位入场 31min后 止损3%，跌3.1%→96.9 < 97.0 → 触发"""
+    assert is_sl_triggered(96.9, 100.0, 3.0) is True
+
+
+# ── 升级两步动作：cancel + place 各调用一次 ──
+
+def test_upgrade_calls_cancel_then_place():
+    """31min升级时：_cancel_algo_order 调用1次，_place_algo_stop_market 调用1次"""
+    from unittest.mock import patch, MagicMock
+
+    pos = {
+        "position_open_time": time.time() - 31 * 60,
+        "sl_upgraded": False,
+        "status": "holding",
+        "position_open_price": 100.0,
+        "entry_24h_change_pct": 25.0,
+        "sl_algo_id": "OLD_ID_123",
+    }
+
+    with patch("stop_loss_manager._cancel_algo_order", return_value=True) as mock_cancel, \
+         patch("stop_loss_manager._get_position_qty", return_value=1.0), \
+         patch("stop_loss_manager._place_algo_stop_market", return_value="NEW_ID_456") as mock_place:
+
+        result = upgrade_stop_loss("XYZUSDT", pos, _CFG, "key", "secret")
+
+    assert result is True
+    mock_cancel.assert_called_once_with("XYZUSDT", "OLD_ID_123", "key", "secret")
+    mock_place.assert_called_once()
+    assert pos["sl_upgraded"] is True
+    assert pos["sl_algo_id"] == "NEW_ID_456"
