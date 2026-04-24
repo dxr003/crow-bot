@@ -236,6 +236,8 @@ def send_signal(signal: dict):
     vol = signal.get("volume_usdt", 0)
     drop_ath = signal.get("drop_from_ath", 0)
     elapsed = signal.get("elapsed_min", 0)
+    score = signal.get("score", 0)
+    breakdown = signal.get("breakdown", {})
 
     lines = [
         f"⚡️ <b>小刃 · 交易阻击信号预警 · {time.strftime('%m-%d %H:%M')}</b>",
@@ -246,10 +248,16 @@ def send_signal(signal: dict):
         "<blockquote>",
         f"🪙 代币：<b>{_coin(symbol)}</b>",
         f"📈 进池价：<code>{_fmt_price(entry_price)}</code>",
-        f"📈 当前涨幅：<code>+{gain_pct}%</code>（从进池算）",
+        f"📈 当前涨幅：<code>+{gain_pct:.1f}%</code>（从进池算）",
         f"💹 24h成交量：<code>{_fmt_vol(vol)}</code>",
         f"📌 距历史高点：<code>-{drop_ath:.1f}%</code>",
         f"⏱ 观察时长：<code>{elapsed:.0f}分钟</code>",
+        "",
+        f"📊 综合评分：<b>{score}分</b>",
+    ]
+    for factor, pts in breakdown.items():
+        lines.append(f"  · {factor}：<code>+{pts}</code>")
+    lines += [
         "</blockquote>",
         "",
         "━━━━━━━━━━━━━━━━━━━━",
@@ -279,7 +287,7 @@ def send_pool_entry(pool_item: dict):
         f"📌 距高点：<code>-{drop_ath:.1f}%</code>\n"
         f"⏱ 开始观察：{time.strftime('%H:%M:%S')}"
         f"</blockquote>\n\n"
-        f"<i>观察中，等待AI决策符合条件时推信号</i>"
+        f"<i>观察中，达到评分阈值时推信号</i>"
     )
     _send_bb(text)
 
@@ -506,64 +514,21 @@ def send_trade_report(signal: dict, buy_result: dict, analyze_result: dict):
 
     # ── 触发通道 ──
     action = signal.get("action", "")
-    ai_reason = signal.get("ai_reason", "")
     score = signal.get("score")
 
-    if action == "signal_fast":
-        channel = "⚡ 快速通道"
-    elif action == "signal_scored":
-        channel = "🤖 AI决策通道"
-    else:
-        channel = f"📌 {action}"
+    channel = "📊 规则评分通道" if action == "signal_scored" else f"📌 {action}"
 
-    # ── 分析详情（贝贝完整版用） ──
-    analyze_lines = []
+    # ── 评分明细 ──
     analyze = analyze_result or {}
-    news = analyze.get("news", {})
-    if news:
-        sentiment = news.get("sentiment", "")
-        news_reason = news.get("reason", "")
-        titles = news.get("titles", [])
-        if sentiment:
-            analyze_lines.append(f"📰 新闻情绪：{sentiment}")
-        if news_reason:
-            analyze_lines.append(f"   判断：{html_mod.escape(news_reason[:80])}")
-        for t in titles[:2]:
-            analyze_lines.append(f"   · {html_mod.escape(t[:60])}")
-    delist = analyze.get("delist")
-    if delist:
-        analyze_lines.append(f"🚫 下架检测：{html_mod.escape(str(delist)[:60])}")
-    ai_decision = analyze.get("ai_decision", "")
-    ai_full_reason = analyze.get("ai_reason", "") or ai_reason
-    if ai_decision:
-        analyze_lines.append(f"🤖 AI决策：{ai_decision}")
-    if ai_full_reason:
-        analyze_lines.append(f"   理由：{html_mod.escape(ai_full_reason[:100])}")
-    btc_1h = analyze.get("btc_1h")
-    if btc_1h is not None:
-        analyze_lines.append(f"₿ BTC 1h：{btc_1h:+.2f}%")
-    breakdown = analyze.get("breakdown", {})
+    breakdown = analyze.get("breakdown", {}) or signal.get("breakdown", {})
+    analyze_lines = []
     if breakdown:
-        analyze_lines.append(f"📋 评分明细：")
+        analyze_lines.append("📋 评分明细：")
         for k, v in breakdown.items():
             analyze_lines.append(f"   {k}: {v:+d}")
         if score is not None:
             analyze_lines.append(f"   总分: {score}")
-    analyze_block = "\n".join(analyze_lines) if analyze_lines else "无详细分析数据"
-
-    # ── 市场数据（贝贝完整版用） ──
-    market = analyze.get("market_data", {})
-    market_lines = []
-    if market:
-        if "oi_change_pct" in market:
-            market_lines.append(f"OI变化: {market['oi_change_pct']:+.1f}%")
-        if "long_short_ratio" in market:
-            market_lines.append(f"多空比: {market['long_short_ratio']:.2f}")
-        if "funding_rate" in market:
-            market_lines.append(f"费率: {market['funding_rate']*100:.4f}%")
-        if "volume_ratio" in market:
-            market_lines.append(f"量比: {market['volume_ratio']:.1f}x")
-    market_block = " / ".join(market_lines) if market_lines else "—"
+    analyze_block = "\n".join(analyze_lines) if analyze_lines else "无评分明细"
 
     # ── 执行结果 ──
     status = buy_result.get("status", "?")
@@ -610,10 +575,8 @@ def send_trade_report(signal: dict, buy_result: dict, analyze_result: dict):
         f"距ATH: -{signal.get('drop_from_ath', 0):.1f}%\n"
         f"观察时长: {signal.get('elapsed_min', 0):.0f}分钟"
         f"</blockquote>\n\n"
-        f"<b>2️⃣ 分析过程</b>\n"
+        f"<b>2️⃣ 评分明细</b>\n"
         f"<blockquote>{analyze_block}</blockquote>\n\n"
-        f"<b>3️⃣ 市场数据</b>\n"
-        f"<blockquote>{market_block}</blockquote>\n\n"
         f"<blockquote>{exec_block}</blockquote>"
     )
 
