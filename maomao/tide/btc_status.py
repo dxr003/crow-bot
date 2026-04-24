@@ -128,16 +128,34 @@ def send_tg(token: str, chat_id: str, text: str):
 
 def run_once():
     cfg = load_config()
-    tg_cfg = cfg["notifications"]["telegram"]
-    env = load_env(tg_cfg["env_file"])
-    token = env.get(tg_cfg["bot_token_key"])
-    chat_id = env.get(tg_cfg["chat_id_key"])
+
+    # 从 maomao/.env 读 TG 凭证
+    env_path = BASE_DIR.parent / ".env"
+    env = load_env(str(env_path))
+    token = env.get("PUSH_BOT_TOKEN") or env.get("BOT_TOKEN")
+    chat_id = "-1001150897644"  # 草币社区抱团小队（贝贝播报群）
     if not token or not chat_id:
         raise RuntimeError("TG token 或 chat_id 未找到")
 
     price, pct = fetch_btc_price()
-    zone = get_zone(price, cfg["zones"])
+
+    # 用 zone_layer 模块（zones 已硬编码在模块内）
+    sys.path.insert(0, str(BASE_DIR))
+    from modules.zone_layer import get_zone as zl_get_zone, distance_to_center
+    zone_obj = zl_get_zone(price)
+    # 转换为 btc_status 期望的格式
+    zone = {
+        "name": zone_obj["name"],
+        "label": zone_obj["label"],
+        "action": zone_obj["action"],
+        "emoji": zone_obj["emoji"],
+        "lower": 0, "upper": 999999,
+    }
+    dist = distance_to_center(price)
+
     card = format_card(price, pct, zone, cfg)
+    # 在卡片末尾附加偏离信息
+    card += f"\n📐 偏离中心轴　{dist:+.1f}%"
     send_tg(token, chat_id, card)
     log.info(f"BTC ${price:,.0f} 区段={zone['name']} 卡片已推送")
 
