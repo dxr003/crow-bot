@@ -136,12 +136,10 @@ def _fetch_all_positions_parallel(cfg: dict):
 
 
 def _get_mark_price(symbol: str) -> float:
+    # 2026-04-27 Step 6-A 收尾: premiumIndex 走 api_hub 公开端点
     try:
-        resp = requests.get(
-            f"{FAPI_BASE}/fapi/v1/premiumIndex",
-            params={"symbol": symbol}, timeout=5,
-        )
-        return float(resp.json()["markPrice"])
+        from trader.api_hub.binance import fapi as _fapi
+        return float(_fapi.get_premium_index(symbol)["markPrice"])
     except Exception:
         return 0
 
