@@ -669,7 +669,38 @@ def send_health_report(state: dict, filter_log: list):
     health_icon = "✅" if all_ok else "⚠️"
     diag_block = "\n".join(diag_lines)
 
-    filter_count = len(filter_log) if filter_log else 0
+    # 2026-04-27: 改为"近 30 分钟过滤次数 + 按 reason 关键词分类"
+    # 原 len(filter_log) 永远 = ring buffer 50，毫无信息量
+    # 注意 scanner_state 里 filter_log 字段是 time（HH:MM:SS）+ symbol + reason，无 filter 字段
+    from datetime import timedelta as _td
+    from collections import Counter as _Counter
+    _now = datetime.now()
+    _cutoff_dt = _now - _td(minutes=30)
+    def _is_recent(_e):
+        _t = _e.get("time", "")
+        if not _t:
+            return False
+        try:
+            _t_dt = datetime.combine(_now.date(), datetime.strptime(_t, "%H:%M:%S").time())
+            # 跨天保护：若解析后比当前晚（说明是昨天 23:xx 数据），减一天
+            if _t_dt > _now:
+                _t_dt -= _td(days=1)
+            return _t_dt >= _cutoff_dt
+        except Exception:
+            return False
+    _recent_filt = [e for e in (filter_log or []) if _is_recent(e)]
+    filter_count = len(_recent_filt)
+    # 从 reason 提取分类关键词（前 4 字符简化）
+    def _bucket(r):
+        r = r or ""
+        if "成交额" in r: return "成交额低"
+        if "contract_" in r: return "美股合约"
+        if "status_" in r: return r.split("_")[1][:8] if "_" in r else "状态"
+        if "delisted" in r: return "已下架"
+        if r.startswith("mcap"): return "市值前N"
+        return r[:6] if r else "?"
+    _by_bucket = _Counter(_bucket(e.get("reason", "")) for e in _recent_filt)
+    _filter_breakdown = " ".join(f"{k}:{v}" for k, v in _by_bucket.most_common(3)) or "无"
 
     # ── 6) 策略状态总览（2026-04-27 老大要求融合）──
     strategy_lines = []
@@ -739,6 +770,6 @@ def send_health_report(state: dict, filter_log: list):
         f"{acct_block}\n"
         f"━━ 🩺 健康检查 ━━\n"
         f"{diag_block}\n"
-        f"⚠️ 近期过滤：{filter_count}个币未达标"
+        f"{'⚠️' if filter_count > 100 else 'ℹ️'} 近 30m 过滤：{filter_count} 次 ({_filter_breakdown})"
     )
     _send_admin(text)
