@@ -1,39 +1,23 @@
-"""GeckoTerminal trending_pools 拉数据 + 标准化字段"""
+"""GeckoTerminal trending_pools 拉数据 + 标准化字段
+2026-04-27 Step 6-C: 走 api_hub.data.geckoterminal 统一封装层"""
 from __future__ import annotations
 
 import logging
-import time
+import sys
 from datetime import datetime, timezone
 
-import requests
+# api_hub 引用（防御性 sys.path）
+if "/root/maomao" not in sys.path:
+    sys.path.insert(0, "/root/maomao")
+from trader.api_hub.data import geckoterminal as _gecko
 
 logger = logging.getLogger("onchain_007.fetcher")
 
-BASE = "https://api.geckoterminal.com/api/v2"
-TIMEOUT = 12
-
 
 def fetch_trending(network: str, limit: int = 20, retries: int = 3) -> list[dict]:
-    """拉一条链的 trending pools，返回标准化字段列表（429 自动退避重试）。"""
-    url = f"{BASE}/networks/{network}/trending_pools"
-    last_err = None
-    for attempt in range(retries):
-        try:
-            r = requests.get(url, timeout=TIMEOUT, params={"include": "base_token"},
-                             headers={"Accept": "application/json"})
-            if r.status_code == 429:
-                wait = 3 + attempt * 2
-                logger.warning(f"[{network}] 429 limit, retry in {wait}s")
-                time.sleep(wait)
-                continue
-            r.raise_for_status()
-            data = r.json()
-            break
-        except Exception as e:
-            last_err = e
-            time.sleep(2)
-    else:
-        raise last_err if last_err else RuntimeError("fetch failed")
+    """拉一条链的 trending pools，返回标准化字段列表。
+    429/网络重试已在 api_hub.data.geckoterminal 内部处理。"""
+    data = _gecko.get_trending_pools(network)
 
     # 建 token 索引（included 段）
     tokens: dict[str, dict] = {}

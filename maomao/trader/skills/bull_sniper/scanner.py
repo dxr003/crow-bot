@@ -129,21 +129,17 @@ _mcap_exclude: set = set()
 _mcap_exclude_ts: float = 0
 
 def _refresh_mcap_exclude() -> set:
-    """CoinGecko拉市值前N名，1小时缓存"""
+    """CoinGecko拉市值前N名，1小时缓存
+    2026-04-27 Step 6-C: 走 api_hub.data.coingecko 统一封装层"""
     global _mcap_exclude, _mcap_exclude_ts
     now = time.time()
     if _mcap_exclude and now - _mcap_exclude_ts < 86400:  # 24小时刷新一次
         return _mcap_exclude
     top_n = CFG.get("mcap_exclude_top", 50)
     try:
-        resp = requests.get(
-            "https://api.coingecko.com/api/v3/coins/markets",
-            params={"vs_currency": "usd", "order": "market_cap_desc",
-                    "per_page": top_n, "page": 1},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        symbols = {c["symbol"].upper() + "USDT" for c in resp.json()}
+        from trader.api_hub.data import coingecko as _cg
+        coins = _cg.get_top_coins(top_n=top_n)
+        symbols = {c["symbol"].upper() + "USDT" for c in coins}
         _mcap_exclude.clear()
         _mcap_exclude.update(symbols)
         _mcap_exclude_ts = now
