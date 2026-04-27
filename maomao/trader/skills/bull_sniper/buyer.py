@@ -30,6 +30,9 @@ if "/root/maomao" not in _sys.path:
     _sys.path.insert(0, "/root/maomao")
 from shared.control_loader import get_phantom_mode, get_phantom_accounts
 
+# 2026-04-27 Step 6-B: 走 api_hub 统一封装层（仅公开端点；signed 仍用本地 hmac）
+from trader.api_hub.binance import fapi as _fapi
+
 # 账户名 → control.yaml 短名映射（acccounts.bn1/2/3/4）
 _ACC_SHORT = {"币安1": "bn1", "币安2": "bn2", "币安3": "bn3", "币安4": "bn4"}
 
@@ -312,19 +315,11 @@ def _execute_auto(symbol: str, price: float, analyze_result: dict, cfg: dict,
         }
 
     # ── 6. 滑点检查（>2%直接放弃） ──
-    mark_resp = requests.get(
-        f"{FAPI_BASE}/fapi/v1/premiumIndex",
-        params={"symbol": symbol}, timeout=5,
-    )
-    mark = float(mark_resp.json()["markPrice"])
+    mark = float(_fapi.get_premium_index(symbol)["markPrice"])
     max_slippage = cfg.get("max_slippage_pct", 2)
 
     try:
-        book = requests.get(
-            f"{FAPI_BASE}/fapi/v1/depth",
-            params={"symbol": symbol, "limit": 5},
-            timeout=5,
-        ).json()
+        book = _fapi.get_depth(symbol, limit=5)
         best_ask = float(book["asks"][0][0])
         spread_pct = (best_ask - mark) / mark * 100
     except Exception:

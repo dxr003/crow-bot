@@ -3,13 +3,16 @@ TP 层：1H 收盘突破评分 v3.5-minimalist
 前置门：收盘突破 / 首次突破 / 上影<40%
 档位：vol 2.5x+盘整=20 / 2.0x=15 / 1.5x=10 / <1.5x=5（弱突破）
 """
+import sys
 import time
 import logging
-import requests
 
 logger = logging.getLogger("bull_sniper.tp_score")
 
-FAPI_BASE = "https://fapi.binance.com"
+# 2026-04-27 Step 6-B: 走 api_hub 统一封装层
+if "/root/maomao" not in sys.path:
+    sys.path.insert(0, "/root/maomao")
+from trader.api_hub.binance import fapi as _fapi
 
 _kline_cache: dict = {}  # {symbol: (klines, expire_ts)}
 
@@ -20,13 +23,7 @@ def _fetch_klines(symbol: str, limit: int, ttl_sec: int) -> list:
     hit = _kline_cache.get(key)
     if hit and now < hit[1]:
         return hit[0]
-    resp = requests.get(
-        f"{FAPI_BASE}/fapi/v1/klines",
-        params={"symbol": symbol, "interval": "1h", "limit": limit},
-        timeout=10,
-    )
-    resp.raise_for_status()
-    klines = resp.json()
+    klines = _fapi.get_klines(symbol, "1h", limit=limit)
     _kline_cache[key] = (klines, now + ttl_sec)
     return klines
 

@@ -5,6 +5,7 @@ notifier.py — 做多阻击推送模块 v2.0
 import html as html_mod
 import logging
 import os
+import sys
 import time
 import requests
 import yaml
@@ -12,6 +13,11 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from binance.um_futures import UMFutures
+
+# 2026-04-27 Step 6-B: 走 api_hub 统一封装层（保留 requests 给 TG send 等）
+if "/root/maomao" not in sys.path:
+    sys.path.insert(0, "/root/maomao")
+from trader.api_hub.binance import fapi as _fapi
 
 logger = logging.getLogger("bull_notifier")
 
@@ -167,9 +173,8 @@ def _fetch_prices(symbols: list) -> dict:
     if not symbols:
         return {}
     try:
-        resp = requests.get("https://fapi.binance.com/fapi/v1/ticker/price", timeout=8)
-        resp.raise_for_status()
-        return {t["symbol"]: float(t["price"]) for t in resp.json() if t["symbol"] in symbols}
+        all_px = _fapi.get_ticker_price()
+        return {t["symbol"]: float(t["price"]) for t in all_px if t["symbol"] in symbols}
     except Exception as e:
         logger.warning(f"[notifier] 拉取价格失败: {e}")
         return {}
@@ -612,13 +617,8 @@ def send_health_report(state: dict, filter_log: list):
 
     # 1) OI数据检查（v3.3: 改用币安历史API，抽检一次验证连通性）
     try:
-        import requests as _req
-        _oi_resp = _req.get(
-            "https://fapi.binance.com/futures/data/openInterestHist",
-            params={"symbol": "BTCUSDT", "period": "15m", "limit": 1},
-            timeout=5,
-        )
-        if _oi_resp.status_code == 200 and _oi_resp.json():
+        _oi_data = _fapi.get_open_interest_hist("BTCUSDT", period="15m", limit=1)
+        if _oi_data:
             diag_lines.append("✅ OI：历史API连通正常")
         else:
             diag_lines.append("⚠️ OI：历史API返回异常")

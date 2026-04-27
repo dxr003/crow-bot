@@ -19,16 +19,18 @@ exchange_info.py — 候选池前置过滤：下架 / SETTLING / 交割合约剔
 from __future__ import annotations
 
 import logging
+import sys
 import threading
 import time
 
-import requests
-
 logger = logging.getLogger(__name__)
 
-_FAPI_BASE = "https://fapi.binance.com"
+# 2026-04-27 Step 6-B: 走 api_hub 统一封装层
+if "/root/maomao" not in sys.path:
+    sys.path.insert(0, "/root/maomao")
+from trader.api_hub.binance import fapi as _fapi
+
 _TTL_SEC = 300           # 5 分钟
-_TIMEOUT = 10            # 秒
 _FAIL_CLOSE_THRESHOLD = 3
 
 _lock = threading.Lock()
@@ -41,9 +43,7 @@ def _refresh() -> bool:
     """拉 exchangeInfo 刷新缓存。成功返回 True，失败 False（且失败计数 +1）。"""
     global _cache, _cache_ts, _consecutive_fail
     try:
-        resp = requests.get(f"{_FAPI_BASE}/fapi/v1/exchangeInfo", timeout=_TIMEOUT)
-        resp.raise_for_status()
-        data = resp.json()
+        data = _fapi.get_exchange_info()
         new_cache = {}
         for s in data.get("symbols", []):
             sym = s.get("symbol")

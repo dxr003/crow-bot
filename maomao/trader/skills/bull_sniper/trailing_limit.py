@@ -12,6 +12,7 @@ import hmac
 import json
 import logging
 import os
+import sys
 import time
 from urllib.parse import urlencode
 from pathlib import Path
@@ -19,7 +20,12 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
-load_dotenv(Path("/root/.qixing_env"))
+# 2026-04-27 Step 5-E: KEY 源迁到 .env.master（原 /root/.qixing_env 已删）
+# 2026-04-27 Step 6-B: 公开端点走 api_hub；signed 仍走本地 hmac
+load_dotenv("/root/safe/.env.master")
+if "/root/maomao" not in sys.path:
+    sys.path.insert(0, "/root/maomao")
+from trader.api_hub.binance import fapi as _fapi
 
 logger = logging.getLogger("bull_sniper.trailing_limit")
 
@@ -65,21 +71,15 @@ def _bn2_signed(method: str, path: str, params: dict,
 
 def _get_mark_price(symbol: str) -> float:
     try:
-        resp = requests.get(
-            f"{FAPI_BASE}/fapi/v1/premiumIndex",
-            params={"symbol": symbol}, timeout=5,
-        )
-        return float(resp.json()["markPrice"])
+        return float(_fapi.get_premium_index(symbol)["markPrice"])
     except Exception:
         return 0
 
 
 def _get_tick_size(symbol: str) -> float:
     try:
-        resp = requests.get(
-            f"{FAPI_BASE}/fapi/v1/exchangeInfo", timeout=10,
-        )
-        for s in resp.json()["symbols"]:
+        data = _fapi.get_exchange_info()
+        for s in data["symbols"]:
             if s["symbol"] == symbol:
                 for f in s["filters"]:
                     if f["filterType"] == "PRICE_FILTER":

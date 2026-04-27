@@ -2,12 +2,16 @@
 逻辑：获取48根1H K线 → 识别swing high → 判断收盘是否突破 +1.5% → 评分+形态过滤
 只在1H收盘后评一次（缓存上次评分时间，每小时最多评一次）
 """
+import sys
 import time
 import logging
-import urllib.request
-import json
 
 logger = logging.getLogger("bull_sniper.breakout_score")
+
+# 2026-04-27 Step 6-B: 走 api_hub 统一封装层
+if "/root/maomao" not in sys.path:
+    sys.path.insert(0, "/root/maomao")
+from trader.api_hub.binance import fapi as _fapi
 
 # 每个币的上次评分缓存 {symbol: {"ts": float, "result": dict}}
 _cache: dict = {}
@@ -16,12 +20,7 @@ _CACHE_TTL = 3500  # 约1小时，3500秒避免整点抖动
 
 def fetch_1h_klines(symbol: str, limit: int = 52) -> list:
     """拉取 Binance fapi 1H K线，返回 list of dict"""
-    url = (
-        f"https://fapi.binance.com/fapi/v1/klines"
-        f"?symbol={symbol}&interval=1h&limit={limit}"
-    )
-    with urllib.request.urlopen(url, timeout=8) as r:
-        raw = json.loads(r.read())
+    raw = _fapi.get_klines(symbol, "1h", limit=limit)
     # raw: [[open_time, open, high, low, close, ...], ...]
     result = []
     for k in raw:

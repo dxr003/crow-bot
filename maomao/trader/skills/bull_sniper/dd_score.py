@@ -5,13 +5,16 @@ taker_ratio = 主动买 USDT / 主动卖 USDT
 档位：≥2.5→15 / ≥2.0→12 / ≥1.5→8 / ≥1.2→4 / <1.2→0
 """
 import logging
+import sys
 import time
-
-import requests
 
 logger = logging.getLogger("dd_score")
 
-FAPI_BASE = "https://fapi.binance.com"
+# 2026-04-27 Step 6-B: 走 api_hub 统一封装层
+if "/root/maomao" not in sys.path:
+    sys.path.insert(0, "/root/maomao")
+from trader.api_hub.binance import fapi as _fapi
+
 _WINDOW_SEC = 300  # 5 分钟
 
 
@@ -61,10 +64,4 @@ def score_dd(symbol: str, cfg: dict) -> tuple[int, str]:
 
 
 def _fetch_agg_trades(symbol: str, start_ms: int, end_ms: int) -> list:
-    resp = requests.get(
-        f"{FAPI_BASE}/fapi/v1/aggTrades",
-        params={"symbol": symbol, "startTime": start_ms, "endTime": end_ms, "limit": 1000},
-        timeout=10,
-    )
-    resp.raise_for_status()
-    return resp.json()
+    return _fapi.get_agg_trades(symbol, limit=1000, start_time=start_ms, end_time=end_ms)

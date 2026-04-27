@@ -8,15 +8,20 @@ bull_sniper analyzer.py — 信号分析器 v3.5-minimalist
   硬触发：AF Alpha+2 / GG 公告+3或-5
 """
 import logging
+import sys
 import time
 from typing import Optional
 
-import requests
 import yaml
 from pathlib import Path
 
 BASE_DIR = Path(__file__).parent
 logger = logging.getLogger("bull_analyzer")
+
+# 2026-04-27 Step 6-B: 走 api_hub 统一封装层
+if "/root/maomao" not in sys.path:
+    sys.path.insert(0, "/root/maomao")
+from trader.api_hub.binance import fapi as _fapi
 
 # ── 币安公告缓存 ──
 _delist_cache: dict = {"symbols": set(), "last_fetch": 0}
@@ -47,9 +52,7 @@ def fetch_delist_symbols(cfg: dict) -> set:
         return _delist_cache["symbols"]
 
     try:
-        resp = requests.get(f"{_FAPI_BASE}/fapi/v1/exchangeInfo", timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
+        data = _fapi.get_exchange_info()
 
         symbols = set()
         for s in data.get("symbols", []):

@@ -26,6 +26,14 @@ if "/root" not in sys.path:
     sys.path.insert(0, "/root")
 from ledger import get_ledger, new_trace_id, set_trace_id
 
+# 2026-04-27 Step 6-B: 必须在 /root insert 之后再插入 /root/maomao，
+# 否则 /root 会被压到 sys.path[0]，导致下游 buyer.py 的 shared.control_loader 误命中 /root/shared/
+if sys.path[0] != "/root/maomao":
+    if "/root/maomao" in sys.path:
+        sys.path.remove("/root/maomao")
+    sys.path.insert(0, "/root/maomao")
+from trader.api_hub.binance import fapi as _fapi
+
 from analyzer import analyze
 from notifier import send_signal, send_health_report, send_status_card, send_trade_report, send_pool_entry
 from buyer import execute as buyer_execute
@@ -147,11 +155,10 @@ def _refresh_mcap_exclude() -> set:
 
 def get_all_tickers() -> list:
     """获取全市场合约24h行情，过 config.yaml 的 pre_filters 链。"""
-    resp = requests.get(f"{FAPI_BASE}/fapi/v1/ticker/24hr", timeout=10)
-    resp.raise_for_status()
+    raw = _fapi.get_ticker_24hr()
     pre_filters = CFG.get("pre_filters") or []
     tickers = []
-    for t in resp.json():
+    for t in raw:
         sym = t["symbol"]
         if not sym.endswith("USDT"):
             continue
@@ -182,24 +189,12 @@ def get_all_tickers() -> list:
 
 def get_klines_1m(symbol: str, limit: int = 60) -> list:
     """获取1分钟K线"""
-    resp = requests.get(
-        f"{FAPI_BASE}/fapi/v1/klines",
-        params={"symbol": symbol, "interval": "1m", "limit": limit},
-        timeout=10,
-    )
-    resp.raise_for_status()
-    return resp.json()
+    return _fapi.get_klines(symbol, "1m", limit=limit)
 
 
 def get_klines_1d(symbol: str) -> list:
     """获取日线K线，最大1500根覆盖全部上线历史"""
-    resp = requests.get(
-        f"{FAPI_BASE}/fapi/v1/klines",
-        params={"symbol": symbol, "interval": "1d", "limit": 1500},
-        timeout=10,
-    )
-    resp.raise_for_status()
-    return resp.json()
+    return _fapi.get_klines(symbol, "1d", limit=1500)
 
 
 # ══════════════════════════════════════════
@@ -215,13 +210,7 @@ def _get_klines_cached(symbol: str, interval: str, limit: int, ttl_sec: int) -> 
     hit = _kline_cache.get(key)
     if hit and now < hit[1]:
         return hit[0]
-    resp = requests.get(
-        f"{FAPI_BASE}/fapi/v1/klines",
-        params={"symbol": symbol, "interval": interval, "limit": limit},
-        timeout=10,
-    )
-    resp.raise_for_status()
-    klines = resp.json()
+    klines = _fapi.get_klines(symbol, interval, limit=limit)
     _kline_cache[key] = (klines, now + ttl_sec)
     return klines
 
@@ -387,21 +376,8 @@ def calc_15m_change(symbol: str) -> float:
 def get_oi_usdt(symbol: str) -> float:
     """获取当前OI金额（张数×当前价=U）"""
     try:
-        resp = requests.get(
-            f"{FAPI_BASE}/fapi/v1/openInterest",
-            params={"symbol": symbol},
-            timeout=8,
-        )
-        resp.raise_for_status()
-        oi_qty = float(resp.json()["openInterest"])
-        # 拿当前价格换算成U
-        price_resp = requests.get(
-            f"{FAPI_BASE}/fapi/v1/ticker/price",
-            params={"symbol": symbol},
-            timeout=5,
-        )
-        price_resp.raise_for_status()
-        price = float(price_resp.json()["price"])
+        oi_qty = float(_fapi.get_open_interest(symbol)["openInterest"])
+        price = float(_fapi.get_ticker_price(symbol)["price"])
         return oi_qty * price
     except Exception as e:
         logger.debug(f"OI获取失败 {symbol}: {e}")
@@ -412,13 +388,7 @@ def get_oi_change(symbol: str) -> float:
     """获取OI变化百分比（当前 vs N分钟前，v3.3改用历史API滑动窗口）"""
     period = CFG.get("oi_compare_period", "15m")
     try:
-        resp = requests.get(
-            f"{FAPI_BASE}/futures/data/openInterestHist",
-            params={"symbol": symbol, "period": period, "limit": 2},
-            timeout=8,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+        data = _fapi.get_open_interest_hist(symbol, period=period, limit=2)
         if len(data) < 2:
             return 0.0
         old_oi = float(data[0]["sumOpenInterestValue"])
@@ -457,13 +427,7 @@ def get_funding_swing(symbol: str) -> float:
 def get_lsr(symbol: str) -> float:
     """获取多空比"""
     try:
-        resp = requests.get(
-            f"{FAPI_BASE}/futures/data/topLongShortAccountRatio",
-            params={"symbol": symbol, "period": "5m", "limit": 1},
-            timeout=8,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+        data = _fapi.get_top_lsr_account(symbol, period="5m", limit=1)
         return float(data[0]["longShortRatio"]) if data else 1.0
     except Exception as e:
         logger.debug(f"多空比获取失败 {symbol}: {e}")
@@ -473,13 +437,7 @@ def get_lsr(symbol: str) -> float:
 def get_funding_rate(symbol: str) -> float:
     """获取当前资金费率"""
     try:
-        resp = requests.get(
-            f"{FAPI_BASE}/fapi/v1/premiumIndex",
-            params={"symbol": symbol},
-            timeout=8,
-        )
-        resp.raise_for_status()
-        return float(resp.json()["lastFundingRate"])
+        return float(_fapi.get_premium_index(symbol)["lastFundingRate"])
     except Exception as e:
         logger.debug(f"费率获取失败 {symbol}: {e}")
         return 0.0
@@ -1244,9 +1202,8 @@ def _settle_signals(state: dict, now: float):
     symbols = [s["symbol"] for s in state["signals"]]
     live_prices = {}
     try:
-        resp = requests.get("https://fapi.binance.com/fapi/v1/ticker/price", timeout=8)
-        resp.raise_for_status()
-        live_prices = {t["symbol"]: float(t["price"]) for t in resp.json() if t["symbol"] in symbols}
+        all_px = _fapi.get_ticker_price()
+        live_prices = {t["symbol"]: float(t["price"]) for t in all_px if t["symbol"] in symbols}
     except Exception:
         return
 
