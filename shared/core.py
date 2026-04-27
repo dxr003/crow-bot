@@ -489,34 +489,85 @@ def create_and_run_bot(env_path, claude_add_dir=None):
 
     @admin_only
     async def handle_document(update, ctx):
+        # 2026-04-27 老大要求：手机也能传文件
+        # 1) 一律存到 /root/shared/inbox/<时间戳>_<文件名> 留底
+        # 2) 按类型解析（PDF / docx / xlsx / 文本）→ 走 ask_claude 订阅，不消耗 API key
+        # 3) 解析失败/不支持的类型也通知 Claude 已存档路径，让大猫主动 Read
+        # 4) 50 MB 是 Bot API 硬限制，超过会被 TG 直接拒绝
+        from datetime import datetime as _dt
         doc = update.message.document
         fname = doc.file_name or "file"
         mime = doc.mime_type or ""
+        size = doc.file_size or 0
         file = await ctx.bot.get_file(doc.file_id)
         buf = io.BytesIO()
         await file.download_to_memory(buf)
         buf.seek(0)
+        raw = buf.getvalue()
         caption = update.message.caption or ""
 
-        if mime == "application/pdf" or fname.lower().endswith(".pdf"):
-            try:
+        # 一律存盘留底
+        inbox = Path("/root/shared/inbox")
+        inbox.mkdir(parents=True, exist_ok=True)
+        ts = _dt.now().strftime("%Y%m%d-%H%M%S")
+        save_path = inbox / f"{ts}_{fname}"
+        save_path.write_bytes(raw)
+        archive_note = f"\n\n（已存档：{save_path}，大小 {size}B）"
+
+        MAX_TEXT = 50000  # Claude context window 充足，从 12000 放大到 50000
+
+        try:
+            if mime == "application/pdf" or fname.lower().endswith(".pdf"):
                 import pypdf
-                reader = pypdf.PdfReader(buf)
+                reader = pypdf.PdfReader(io.BytesIO(raw))
                 text = "\n".join(p.extract_text() or "" for p in reader.pages)
-                prompt = f"文件名：{fname}\n{caption}\n\n以下是PDF内容：\n\n{text[:12000]}"
+                prompt = f"📄 PDF 文件：{fname}\n{caption}\n\n内容：\n\n{text[:MAX_TEXT]}{archive_note}"
                 await ask_claude(update, prompt)
-            except Exception as e:
-                await update.message.reply_text(f"PDF解析失败: {e}")
-        elif mime.startswith("text/") or fname.lower().endswith((".txt", ".md", ".yaml", ".json", ".py")):
-            text = buf.read().decode("utf-8", errors="replace")
-            prompt = f"文件名：{fname}\n{caption}\n\n以下是文件内容：\n\n{text[:12000]}"
+
+            elif fname.lower().endswith(".docx"):
+                from docx import Document as _DocxDoc
+                d = _DocxDoc(io.BytesIO(raw))
+                text = "\n".join(p.text for p in d.paragraphs if p.text)
+                # 表格内容
+                for tbl in d.tables:
+                    for row in tbl.rows:
+                        text += "\n| " + " | ".join(c.text.strip() for c in row.cells) + " |"
+                prompt = f"📝 Word 文档：{fname}\n{caption}\n\n内容：\n\n{text[:MAX_TEXT]}{archive_note}"
+                await ask_claude(update, prompt)
+
+            elif fname.lower().endswith((".xlsx", ".xls")):
+                import openpyxl
+                wb = openpyxl.load_workbook(io.BytesIO(raw), data_only=True)
+                text_lines = []
+                for ws in wb.worksheets:
+                    text_lines.append(f"━━ Sheet: {ws.title} ━━")
+                    for row in ws.iter_rows(values_only=True, max_rows=200):
+                        text_lines.append("\t".join(str(c) if c is not None else "" for c in row))
+                text = "\n".join(text_lines)
+                prompt = f"📊 Excel：{fname}\n{caption}\n\n内容：\n\n{text[:MAX_TEXT]}{archive_note}"
+                await ask_claude(update, prompt)
+
+            elif (mime.startswith("text/")
+                  or fname.lower().endswith((".txt", ".md", ".yaml", ".yml", ".json",
+                                             ".py", ".js", ".ts", ".sh", ".csv",
+                                             ".log", ".html", ".xml", ".sql", ".toml", ".ini"))):
+                text = raw.decode("utf-8", errors="replace")
+                prompt = f"📃 文本文件：{fname}\n{caption}\n\n内容：\n\n{text[:MAX_TEXT]}{archive_note}"
+                await ask_claude(update, prompt)
+
+            else:
+                # 不支持解析的类型（zip/exe/bin 等）：通知 Claude 已存档让大猫主动 Read
+                prompt = (f"📦 收到文件 {fname}（{mime or '未知类型'}, {size}B），"
+                          f"系统不支持自动解析，已存档于 {save_path}。\n"
+                          f"用户备注：{caption or '无'}\n"
+                          f"如需查看请用 Read 工具读取该路径，或建议用户用其他方式发送内容。")
+                await ask_claude(update, prompt)
+
+        except Exception as e:
+            # 解析失败 fallback：通知 Claude 文件存了，但解析挂了
+            prompt = (f"⚠️ 文件 {fname} 解析失败（{type(e).__name__}: {e}），"
+                      f"已存档于 {save_path}。请考虑直接 Read 该文件或建议用户换格式。")
             await ask_claude(update, prompt)
-        else:
-            upload_dir = Path(f"/root/{bot_dir}/uploads")
-            upload_dir.mkdir(exist_ok=True)
-            save_path = upload_dir / fname
-            save_path.write_bytes(buf.read())
-            await update.message.reply_text(f"已保存到 {save_path}（不支持直接解析 {mime}）")
 
     @admin_only
     async def cmd_restart(update, ctx):
