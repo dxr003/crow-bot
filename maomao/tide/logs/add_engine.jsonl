@@ -1,0 +1,4 @@
+{"rule_id": "btc_small_ceiling_short", "price": 77539.2, "margin_usd": 100.0, "side": "short", "account": "币安2", "shadow": true, "extra": {}, "kind": "fire", "ts": 1777052477}
+{"rule_id": "test_mkt", "price": 78000, "margin_usd": 100.0, "side": "short", "account": "币安2", "shadow": true, "extra": {"entry_type": "market", "limit_price": 0.0}, "kind": "fire", "ts": 1777054104}
+{"rule_id": "test_lim", "price": 78000, "margin_usd": 100.0, "side": "short", "account": "币安2", "shadow": true, "extra": {"entry_type": "limit", "limit_price": 78233.99999999999}, "kind": "fire", "ts": 1777054104}
+{"rule_id": "test_badlim", "stage": "bridge", "reason": "limit 模式缺 limit_price / limit_offset_pct", "extra": {}, "kind": "reject", "ts": 1777054104}

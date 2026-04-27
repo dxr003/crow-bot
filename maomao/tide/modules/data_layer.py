@@ -1,34 +1,33 @@
-"""数据层 — sj1(K线+价格) / sj3(OI) / sj4(资金费率)"""
+"""数据层 — sj1(K线+价格) / sj3(OI) / sj4(资金费率)
+2026-04-27 Step 6-B: 全部走 api_hub.binance.fapi 统一封装层"""
 import json
-import urllib.request
+import sys
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
 BJ = timezone(timedelta(hours=8))
 STATE_PATH = Path(__file__).parent.parent / "state" / "state.json"
-FAPI = "https://fapi.binance.com"
+
+# api_hub 引用（防御性 sys.path）
+if "/root/maomao" not in sys.path:
+    sys.path.insert(0, "/root/maomao")
+from trader.api_hub.binance import fapi
 
 
 def fetch_price() -> tuple[float, float]:
     """sj1: (last_price, price_change_pct_24h)"""
-    url = f"{FAPI}/fapi/v1/ticker/24hr?symbol=BTCUSDT"
-    with urllib.request.urlopen(url, timeout=10) as r:
-        d = json.loads(r.read())
+    d = fapi.get_ticker_24hr("BTCUSDT")
     return float(d["lastPrice"]), float(d["priceChangePercent"])
 
 
 def fetch_klines_4h(limit: int = 20) -> list:
     """sj1: 最近N根4H K线，原始列表格式 [open_ts, open, high, low, close, vol, ...]"""
-    url = f"{FAPI}/fapi/v1/klines?symbol=BTCUSDT&interval=4h&limit={limit}"
-    with urllib.request.urlopen(url, timeout=10) as r:
-        return json.loads(r.read())
+    return fapi.get_klines("BTCUSDT", "4h", limit=limit)
 
 
 def fetch_klines_1m(limit: int = 21) -> list[dict]:
     """sj1: 最近N根1m K线，用于计算量比"""
-    url = f"{FAPI}/fapi/v1/klines?symbol=BTCUSDT&interval=1m&limit={limit}"
-    with urllib.request.urlopen(url, timeout=10) as r:
-        raw = json.loads(r.read())
+    raw = fapi.get_klines("BTCUSDT", "1m", limit=limit)
     return [{"open": float(k[1]), "high": float(k[2]), "low": float(k[3]),
              "close": float(k[4]), "volume": float(k[5])} for k in raw]
 
@@ -36,14 +35,8 @@ def fetch_klines_1m(limit: int = 21) -> list[dict]:
 def fetch_oi() -> tuple[float, float]:
     """sj3: (current_oi, oi_change_pct_vs_prev)
     对比当前OI和5分钟前快照，返回变化百分比"""
-    url = f"{FAPI}/fapi/v1/openInterest?symbol=BTCUSDT"
-    with urllib.request.urlopen(url, timeout=10) as r:
-        cur = float(json.loads(r.read())["openInterest"])
-
-    # 历史OI（5分钟周期，取最近2条）
-    url2 = f"{FAPI}/futures/data/openInterestHist?symbol=BTCUSDT&period=5m&limit=2"
-    with urllib.request.urlopen(url2, timeout=10) as r:
-        hist = json.loads(r.read())
+    cur = float(fapi.get_open_interest("BTCUSDT")["openInterest"])
+    hist = fapi.get_open_interest_hist("BTCUSDT", period="5m", limit=2)
     if len(hist) >= 2:
         prev = float(hist[-2]["sumOpenInterest"])
         change_pct = (cur - prev) / prev * 100 if prev else 0.0
@@ -54,10 +47,7 @@ def fetch_oi() -> tuple[float, float]:
 
 def fetch_funding_rate() -> float:
     """sj4: 当前资金费率（小数，如 0.0003 = 0.03%）"""
-    url = f"{FAPI}/fapi/v1/premiumIndex?symbol=BTCUSDT"
-    with urllib.request.urlopen(url, timeout=10) as r:
-        d = json.loads(r.read())
-    return float(d["lastFundingRate"])
+    return float(fapi.get_premium_index("BTCUSDT")["lastFundingRate"])
 
 
 def read_state() -> dict:

@@ -10,8 +10,6 @@ import sys
 import time
 from pathlib import Path
 
-import requests
-
 from .context import TickContext
 from .rules_loader import RulesCache
 from . import reject_log
@@ -24,10 +22,11 @@ _CACHE = RulesCache()
 
 
 def _fetch_mark_price(symbol: str) -> float:
-    url = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol}"
-    r = requests.get(url, timeout=5)
-    r.raise_for_status()
-    return float(r.json()["markPrice"])
+    # 2026-04-27 Step 6-B: 走 api_hub 统一封装层
+    if "/root/maomao" not in sys.path:
+        sys.path.insert(0, "/root/maomao")
+    from trader.api_hub.binance import fapi
+    return float(fapi.get_premium_index(symbol)["markPrice"])
 
 
 def _load_positions(account: str, symbol: str) -> list[dict]:

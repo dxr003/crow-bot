@@ -1,8 +1,40 @@
 {
   "current_mode": "ms1_normal",
-  "current_segment": "near_side",
-  "current_price": 77954.4,
-  "price_change_pct": 2.061,
+  "current_segment": "near_shore",
+  "current_price": 77628.0,
+  "price_change_pct": -0.477,
   "positions": [],
-  "last_update": "2026-04-22T18:05:22.649408+08:00"
+  "position_structure": {
+    "base_ratio": 0.3,
+    "trade_ratio": 0.7,
+    "base_usd": 30,
+    "trade_usd": 70,
+    "total_usd": 100,
+    "remaining_usd": 400.0
+  },
+  "small_box": {
+    "upper": 79455.0,
+    "lower": 77100.0,
+    "mid": 78277.5,
+    "updated_at": "2026-04-27T14:20:34.034145+08:00"
+  },
+  "price_peak": 79402.0,
+  "breach_factors": {
+    "price_breach": false,
+    "volume_spike": false,
+    "oi_change": false,
+    "funding_extreme": false
+  },
+  "last_sell": {
+    "price": 0,
+    "sold_usd": 0
+  },
+  "last_update": "2026-04-27T16:20:53.406715+08:00",
+  "last_decision_action": "NO_ACTION",
+  "mock_short": {
+    "last_push_action": "REDUCE_50",
+    "last_exec_ts": "2026-04-25T05:06:33+08:00"
+  },
+  "mock_push_trigger": "NO_ACTION",
+  "mock_last_push_minute": 5
 }

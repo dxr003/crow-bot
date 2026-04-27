@@ -48,13 +48,13 @@ def load_env(env_file: str) -> dict:
 
 def fetch_btc_price() -> tuple[float, float]:
     """返回 (当前价, 24h涨幅%)"""
-    url = "https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=BTCUSDT"
+    # 2026-04-27 Step 6-B: 走 api_hub 统一封装层（不再直 urllib）
+    if "/root/maomao" not in sys.path:
+        sys.path.insert(0, "/root/maomao")
+    from trader.api_hub.binance import fapi
     try:
-        with urllib.request.urlopen(url, timeout=10) as r:
-            data = json.loads(r.read())
-        price = float(data["lastPrice"])
-        pct = float(data["priceChangePercent"])
-        return price, pct
+        data = fapi.get_ticker_24hr("BTCUSDT")
+        return float(data["lastPrice"]), float(data["priceChangePercent"])
     except Exception as e:
         log.error(f"获取 BTC 价格失败: {e}")
         raise

@@ -1,0 +1,23 @@
+{
+  "_edge_inside::ceiling::BTCUSDT::top78000.0": {
+    "inside": true
+  },
+  "btc_small_ceiling_short": {
+    "fire_count": 1,
+    "total_margin_usd": 100.0,
+    "last_fire_at": 1777052477,
+    "last_fire_price": 77539.2
+  },
+  "test_mkt": {
+    "fire_count": 1,
+    "total_margin_usd": 100.0,
+    "last_fire_at": 1777054104,
+    "last_fire_price": 78000.0
+  },
+  "test_lim": {
+    "fire_count": 1,
+    "total_margin_usd": 100.0,
+    "last_fire_at": 1777054104,
+    "last_fire_price": 78000.0
+  }
+}
