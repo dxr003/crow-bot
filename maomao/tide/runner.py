@@ -26,6 +26,12 @@ BJ = timezone(timedelta(hours=8))
 
 import sys
 sys.path.insert(0, str(BASE_DIR))
+
+# 2026-04-27 Step 4-C: mode 走统一控制层（防 YAML 陷阱 + emergency_stop 接入）
+if "/root/maomao" not in sys.path:
+    sys.path.insert(0, "/root/maomao")
+from shared.control_loader import get_tide_mode
+
 from modules.data_layer import fetch_price, fetch_klines_1m, fetch_klines_4h, fetch_oi, fetch_funding_rate, read_state, write_state
 from modules.zone_layer import get_zone, distance_to_center, calc_small_box
 from modules.decision_engine import make_decision
@@ -45,7 +51,8 @@ def sync_remaining(state: dict) -> dict:
 def main():
     with open(CONFIG_PATH) as f:
         cfg = yaml.safe_load(f)
-    mode = cfg["system"]["mode"]
+    # 2026-04-27 Step 4-C: mode 改读 control.yaml（防 YAML 陷阱 + emergency_stop 接入）
+    mode = get_tide_mode()
     log.info(f"潮汐 v{cfg['system']['version']} mode={mode} 启动")
 
     # 启动时确保底仓存在（ensure_bottom 幂等：已有就跳过；shadow 只日志）
@@ -63,10 +70,11 @@ def main():
 
     while True:
         try:
-            # 热调：每次循环重读 config，改 yaml 即时生效无需重启
+            # 热调：每次循环重读 config（cfg 仍提供 box / breakout 等参数）
             with open(CONFIG_PATH) as f:
                 cfg = yaml.safe_load(f)
-            mode = cfg["system"]["mode"]
+            # 2026-04-27 Step 4-C: mode 改读 control.yaml
+            mode = get_tide_mode()
 
             # 每4小时更新小箱参数
             now_ts = time.time()

@@ -28,7 +28,8 @@ import requests
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv(Path("/root/.qixing_env"))
+# 2026-04-27 Step 5-D: KEY 源从 /root/.qixing_env 迁到 /root/safe/.env.master（统一）
+load_dotenv("/root/safe/.env.master")
 
 logger = logging.getLogger("bull_trailing")
 
@@ -58,14 +59,27 @@ def _save(state: dict):
     atomic_write_json(STATE_FILE, state)
 
 
+# 2026-04-27 Step 4-B: enabled 走 control.yaml
+import sys as _sys
+if "/root/maomao" not in _sys.path:
+    _sys.path.insert(0, "/root/maomao")
+from shared.control_loader import get_phantom_accounts as _get_phantom_accounts
+
+_ACC_SHORT = {"币安1": "bn1", "币安2": "bn2", "币安3": "bn3", "币安4": "bn4"}
+
+
 def _iter_accounts(cfg: dict):
-    """yield (acct_name, key_env, secret_env) for each enabled account."""
+    """yield (acct_name, key_env, secret_env) for each enabled account.
+    2026-04-27 Step 4-B: enabled 改读 control.yaml（cfg 仅供 api_key_env 等元数据）"""
     accounts = (cfg or {}).get("accounts") or {}
     if not accounts:
         logger.warning("[trailing] cfg 缺 accounts 字段，无账户可遍历")
         return
+    control_accs = _get_phantom_accounts()
     for name, c in accounts.items():
-        if not c.get("enabled"):
+        short = _ACC_SHORT.get(name)
+        enabled = control_accs.get(short, False) if short else c.get("enabled", False)
+        if not enabled:
             continue
         key_env = c.get("api_key_env", "")
         secret_env = c.get("secret_env", "")

@@ -24,6 +24,15 @@ logger = logging.getLogger("bull_buyer")
 from notifier import route as _route
 from _atomic import atomic_write_json
 
+# 2026-04-27 Step 4-A: mode 走统一控制层（防 YAML 陷阱 + emergency_stop 接入）
+import sys as _sys
+if "/root/maomao" not in _sys.path:
+    _sys.path.insert(0, "/root/maomao")
+from shared.control_loader import get_phantom_mode, get_phantom_accounts
+
+# 账户名 → control.yaml 短名映射（acccounts.bn1/2/3/4）
+_ACC_SHORT = {"币安1": "bn1", "币安2": "bn2", "币安3": "bn3", "币安4": "bn4"}
+
 FAPI_BASE = "https://fapi.binance.com"
 
 _clients = {}       # key: (key_env, secret_env) → UMFutures
@@ -176,7 +185,9 @@ def _register_trailing(symbol: str, entry_price: float, qty: float,
 
 def execute(symbol: str, price: float, analyze_result: dict, cfg: dict) -> dict:
     """多账户入口：遍历 cfg["accounts"]，各账户独立执行，返回 {账户名: result}"""
-    mode = cfg.get("mode", "off")
+    # 2026-04-27 Step 4-A: 改读 control.yaml 而不是 cfg["mode"]
+    # 好处：(1) 防 YAML 陷阱（loader 内部 assert 类型）(2) emergency_stop 总开关接入
+    mode = get_phantom_mode()
 
     if mode == "off":
         logger.info(f"[buyer] {symbol} mode=off, 纯记录不下单")
@@ -191,10 +202,16 @@ def execute(symbol: str, price: float, analyze_result: dict, cfg: dict) -> dict:
         # 兼容无accounts配置：回退到默认币安2
         accounts = {"币安2": {"enabled": True, "api_key_env": "BINANCE2_API_KEY", "secret_env": "BINANCE2_API_SECRET"}}
 
+    # 2026-04-27 Step 4-B: enabled 走 control.yaml（cfg 仅留 api_key_env 等元数据）
+    control_accs = get_phantom_accounts()
+
     results = {}
     for acct_name, acct_cfg in accounts.items():
-        if not acct_cfg.get("enabled", False):
-            logger.info(f"[buyer] {symbol} [{acct_name}] 未启用，跳过")
+        short = _ACC_SHORT.get(acct_name)
+        # control.yaml 是唯一权威源；找不到映射 → fallback 到 cfg.enabled
+        enabled = control_accs.get(short, False) if short else acct_cfg.get("enabled", False)
+        if not enabled:
+            logger.info(f"[buyer] {symbol} [{acct_name}] 未启用(control)，跳过")
             results[acct_name] = {"status": "skipped", "reason": f"{acct_name}未启用", "order_id": None}
             continue
 

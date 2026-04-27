@@ -21,6 +21,11 @@ load_dotenv("/root/maomao/.env")
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
+# 2026-04-27 Step 4-E: shared.control_loader 必须在其他业务 import 之前，避免被 /root/shared 抢占
+if "/root/maomao" not in sys.path:
+    sys.path.insert(0, "/root/maomao")
+from shared.control_loader import get_007_enabled  # noqa: E402
+
 from fetcher import fetch_trending  # noqa: E402
 from filter_layer import calc_stars, pass_filter  # noqa: E402
 from notifier import next_seq, push_to_group, record_push, render_card  # noqa: E402
@@ -44,8 +49,9 @@ def main():
     args = ap.parse_args()
 
     cfg = yaml.safe_load((BASE / "config.yaml").read_text())["onchain_007"]
-    if not cfg.get("enabled", False) and not args.dry:
-        log.info("disabled, skip")
+    # 2026-04-27 Step 4-E: enabled 走 control.yaml（防 YAML 陷阱 + emergency_stop 接入）
+    if not get_007_enabled() and not args.dry:
+        log.info("disabled (control.yaml), skip")
         return
 
     import time as _t

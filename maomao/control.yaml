@@ -1,0 +1,26 @@
+# ============================================================
+# 幻影系统控制中枢 — 唯一权威开关文件
+# 铁律：mode 字段必须加引号（防 YAML 陷阱 False ≠ "off"）
+# 修改后执行 systemctl restart 对应服务 才生效
+#
+# 创建：2026-04-27 顾问 Step 3
+# ============================================================
+
+emergency_stop: "false"   # "true" = 所有策略立刻停止下单
+
+strategies:
+
+  phantom:                 # 幻影（做多阻击）
+    mode: "off"            # "off" / "alert" / "auto"
+    accounts:
+      bn1: false
+      bn2: false
+      bn3: false
+      bn4: true
+
+  tide:                    # 潮汐（BTC 仓位）
+    mode: "shadow"         # "shadow" / "live"
+    mock_short_enabled: false
+
+  onchain_007:             # 链上 007（meme）
+    enabled: true

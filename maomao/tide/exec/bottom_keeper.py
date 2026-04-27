@@ -40,6 +40,9 @@ import yaml
 if "/root/maomao" not in sys.path:
     sys.path.insert(0, "/root/maomao")
 
+# 2026-04-27 Step 4-D: shared.control_loader 必须在 trader.multi 之前导入
+# 否则 /root/shared/__init__.py 会先被作为 shared 包加载，导致 ModuleNotFoundError
+from shared.control_loader import get_tide_mock_short  # noqa: E402
 from trader.multi import executor  # noqa: E402
 
 logger = logging.getLogger("tide.bottom_keeper")
@@ -66,9 +69,9 @@ def _pick_short_position(positions: list[dict], symbol: str) -> dict | None:
 def ensure_bottom(force: bool = False) -> dict:
     """检查底仓；缺了就开。返回 {ok, action, detail}。"""
     cfg = _load_cfg()
-    # 2026-04-26: 账户级总开关（mock_short_enabled=false 时彻底跳过，老大手动操盘）
-    if not cfg.get("mock_short_enabled", True):
-        msg = "[bottom] mock_short_enabled=false → 跳过自动底仓管理（手动操盘）"
+    # 2026-04-26: 账户级总开关 → 2026-04-27 Step 4-D: 改读 control.yaml
+    if not get_tide_mock_short():
+        msg = "[bottom] mock_short_enabled=false (control.yaml) → 跳过自动底仓管理（手动操盘）"
         logger.info(msg)
         return {"ok": True, "action": "disabled_globally",
                 "detail": "mock_short_enabled=false"}
