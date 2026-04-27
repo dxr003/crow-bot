@@ -225,7 +225,7 @@ async def api_gen_image(prompt, api_key, model, system_prompt, image_b64):
 
 
 # ── 计时器 UI ──
-async def ask_with_timer(update, gen_coro, model):
+async def ask_with_timer(update, gen_coro, model, voice_reply_fn=None):
     thinking_msg = await update.message.reply_text(f"🐦 乌鸦团队 · 启动中... 0s")
     start_time = time.time()
     step_info = {"text": "启动中"}
@@ -270,6 +270,13 @@ async def ask_with_timer(update, gen_coro, model):
         pass
     if not full_text.strip():
         full_text = "（无输出）"
+    # 2026-04-27 新增：voice_reply_fn 用于语音输入场景，让回复也走 TTS
+    if voice_reply_fn:
+        try:
+            await voice_reply_fn(update, full_text)
+            return
+        except Exception as e:
+            logging.getLogger("core").warning(f"voice_reply 失败 fallback 文字: {e}")
     html_text = _md_to_html(full_text)
     chunks = [html_text[i:i+4000] for i in range(0, len(html_text), 4000)]
     for chunk in chunks:
@@ -569,6 +576,246 @@ def create_and_run_bot(env_path, claude_add_dir=None):
                       f"已存档于 {save_path}。请考虑直接 Read 该文件或建议用户换格式。")
             await ask_claude(update, prompt)
 
+    # 2026-04-27 视频处理：ffmpeg 截帧 + Haiku Vision 看图描述 + 总结
+    @admin_only
+    async def handle_video(update, ctx):
+        from datetime import datetime as _dt
+        import subprocess, tempfile, os as _os
+        msg = update.message
+        v = msg.video or msg.video_note
+        if not v:
+            return
+        fname = getattr(v, "file_name", None) or f"video_{v.file_id[:10]}.mp4"
+        size = v.file_size or 0
+        duration = getattr(v, "duration", 0) or 0
+        caption = msg.caption or ""
+
+        await msg.reply_text(f"🎬 收到视频 {fname}（{size//1024}KB / {duration}s），开始截帧分析...")
+
+        file = await ctx.bot.get_file(v.file_id)
+        buf = io.BytesIO()
+        await file.download_to_memory(buf)
+        raw = buf.getvalue()
+
+        # 存盘留底
+        inbox = Path("/root/shared/inbox")
+        inbox.mkdir(parents=True, exist_ok=True)
+        ts = _dt.now().strftime("%Y%m%d-%H%M%S")
+        save_path = inbox / f"{ts}_{fname}"
+        save_path.write_bytes(raw)
+
+        # ffmpeg 截帧：每 30s 一帧，最多 5 帧（防长视频炸钱）
+        max_frames = 5
+        interval = max(30, duration // max_frames) if duration else 30
+        timestamps = [i * interval for i in range(max_frames) if not duration or i * interval < duration]
+        if not timestamps:
+            timestamps = [0]
+
+        frame_descriptions = []
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                for idx, ts_sec in enumerate(timestamps):
+                    out = _os.path.join(tmpdir, f"frame_{idx}.jpg")
+                    cmd = ["ffmpeg", "-y", "-ss", str(ts_sec), "-i", str(save_path),
+                           "-frames:v", "1", "-q:v", "3", out]
+                    r = subprocess.run(cmd, capture_output=True, timeout=20)
+                    if r.returncode != 0 or not _os.path.exists(out):
+                        continue
+                    with open(out, "rb") as f:
+                        b64 = base64.b64encode(f.read()).decode()
+                    # 调 Haiku 描述这一帧
+                    desc_chunks = []
+                    gen = await api_gen_image(
+                        f"用 1-2 句话描述这帧画面（视频 {fname} 第 {ts_sec}s）",
+                        anthropic_key, "claude-haiku-4-5-20251001", system_prompt, b64
+                    )
+                    async for chunk in gen({"text": "", "actions": []}):
+                        desc_chunks.append(chunk)
+                    frame_descriptions.append(f"[{ts_sec}s] {''.join(desc_chunks)}")
+        except Exception as e:
+            frame_descriptions.append(f"⚠️ 截帧失败: {e}")
+
+        # 拼成 prompt 给 Claude（订阅）总结
+        frames_text = "\n".join(frame_descriptions) if frame_descriptions else "（无帧）"
+        prompt = (f"🎬 视频文件：{fname}（{duration}s, {size//1024}KB）\n"
+                  f"用户备注：{caption or '无'}\n\n"
+                  f"截了 {len(frame_descriptions)} 帧，每帧 Haiku 描述：\n{frames_text}\n\n"
+                  f"（视频已存档：{save_path}）\n"
+                  f"请基于这些帧描述，给个整体总结。")
+        await ask_claude(update, prompt)
+
+    # 读 voice profile（control.yaml -> voices.{bot_dir}）
+    def _voice_profile():
+        try:
+            import yaml as _y
+            ctl = _y.safe_load(open("/root/maomao/control.yaml").read()) or {}
+            return (ctl.get("voices") or {}).get(bot_dir, {}) or {}
+        except Exception:
+            return {}
+
+    # TTS 三引擎：volc（豆包大模型，最佳中文 + 真童音）/ edge / openai
+    async def _tts_bytes(text: str, engine: str, voice: str, instructions: str = "") -> bytes:
+        text = (text or "")[:4000]
+        if engine == "volc":
+            # 火山豆包大模型 TTS V3 unidirectional（NDJSON 流式响应）
+            import requests as _req, base64 as _b64, json as _json
+            headers = {
+                "X-Api-Key": os.getenv("VOLC_TTS_API_KEY", ""),
+                "X-Api-App-Id": os.getenv("VOLC_APP_ID", ""),
+                "X-Api-Resource-Id": "volc.service_type.10029",
+                "Content-Type": "application/json",
+            }
+            body = {
+                "user": {"uid": "bot"},
+                "req_params": {
+                    "text": text,
+                    "speaker": voice,
+                    "audio_params": {"format": "mp3", "sample_rate": 24000},
+                }
+            }
+            loop = asyncio.get_event_loop()
+            resp = await loop.run_in_executor(
+                None, lambda: _req.post(
+                    "https://openspeech.bytedance.com/api/v3/tts/unidirectional",
+                    json=body, headers=headers, timeout=30))
+            chunks = []
+            for line in resp.text.split("\n"):
+                if not line.strip():
+                    continue
+                try:
+                    obj = _json.loads(line)
+                    if obj.get("code") == 0 and obj.get("data"):
+                        chunks.append(_b64.b64decode(obj["data"]))
+                except Exception:
+                    pass
+            return b"".join(chunks)
+        if engine == "edge":
+            import edge_tts
+            comm = edge_tts.Communicate(text, voice=voice)
+            chunks = []
+            async for chunk in comm.stream():
+                if chunk.get("type") == "audio":
+                    chunks.append(chunk["data"])
+            return b"".join(chunks)
+        # 默认 openai
+        import openai as _oai
+        _client = _oai.OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
+        kwargs = {"model": "gpt-4o-mini-tts", "voice": voice, "input": text}
+        if instructions:
+            kwargs["instructions"] = instructions
+        loop = asyncio.get_event_loop()
+        resp = await loop.run_in_executor(None, lambda: _client.audio.speech.create(**kwargs))
+        return resp.content
+
+    async def _send_voice_reply(update, text: str):
+        """按 bot_dir 选引擎 + voice，转成 mp3 发 voice 给用户"""
+        prof = _voice_profile()
+        if not prof.get("tts_enabled"):
+            await update.message.reply_text(text)
+            return
+        engine = prof.get("engine", "edge")
+        voice = prof.get("voice", "zh-CN-XiaoxiaoNeural")
+        instructions = prof.get("instructions", "")
+        try:
+            mp3 = await _tts_bytes(text, engine=engine, voice=voice, instructions=instructions)
+            await update.message.reply_voice(io.BytesIO(mp3), caption=text[:1024] if len(text) > 200 else None)
+        except Exception as e:
+            logger.warning(f"[TTS] 失败 fallback 文字: {e}")
+            await update.message.reply_text(text)
+
+    # 2026-04-27 音频处理：OpenAI Whisper STT → 走 dispatch 或 ask_claude → TTS 回复
+    # 用途：玄玄/天天端语音下单/查询/聊天，省手打字时间
+    # 闭环：你发 voice → Whisper 转字 → 处理 → TTS 转字 → 你听 voice
+    # 缺 OPENAI_API_KEY 时优雅 fallback：只存盘 + 通知大猫
+    @admin_only
+    async def handle_audio(update, ctx):
+        from datetime import datetime as _dt
+        msg = update.message
+        a = msg.voice or msg.audio
+        if not a:
+            return
+        fname = getattr(a, "file_name", None) or f"audio_{a.file_id[:10]}.ogg"
+        size = a.file_size or 0
+        duration = getattr(a, "duration", 0) or 0
+        mime = getattr(a, "mime_type", "audio/ogg") or "audio/ogg"
+        caption = msg.caption or ""
+
+        file = await ctx.bot.get_file(a.file_id)
+        buf = io.BytesIO()
+        await file.download_to_memory(buf)
+        raw = buf.getvalue()
+
+        # 一律存盘
+        inbox = Path("/root/shared/inbox")
+        inbox.mkdir(parents=True, exist_ok=True)
+        ts = _dt.now().strftime("%Y%m%d-%H%M%S")
+        save_path = inbox / f"{ts}_{fname}"
+        save_path.write_bytes(raw)
+
+        # 尝试 Whisper 转文字
+        openai_key = os.getenv("OPENAI_API_KEY", "")
+        if not openai_key:
+            # Fallback：缺 key 走存档 + 通知
+            prompt = (f"🎤 收到音频 {fname}（{mime}, {duration}s, {size//1024}KB）\n"
+                      f"用户备注：{caption or '无'}\n"
+                      f"已存档：{save_path}\n\n"
+                      f"⚠️ OPENAI_API_KEY 未配置，无法转文字。请老大 SSH 写入 master 后重启。")
+            await ask_claude(update, prompt)
+            return
+
+        # 2026-04-27 删冗余提示：直接转文字，不发"收到音频"中间消息
+        try:
+            import openai
+            client = openai.OpenAI(api_key=openai_key)
+            with open(save_path, "rb") as f:
+                resp = client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=f,
+                    language="zh",
+                    response_format="text",
+                )
+            transcript = (resp if isinstance(resp, str) else getattr(resp, "text", str(resp))).strip()
+        except Exception as e:
+            await msg.reply_text(f"⚠️ Whisper 转文字失败: {e}")
+            await ask_claude(update, f"🎤 音频已存档于 {save_path}，但 Whisper 转文字失败：{e}")
+            return
+
+        if not transcript:
+            await msg.reply_text("⚠️ 转文字结果为空，可能音频太短或无人声")
+            return
+        # 2026-04-27 老大要求：删除"📝 听到：xxx"中间提示，对话框只保留最终回复
+
+        # 先尝试 dispatch（交易指令命中即直接执行，不进 Claude）
+        # 仅 maomao / tiantian 走 dispatch，damao / baobao 直接 ask_claude
+        dispatched = False
+        if bot_dir in ("maomao", "tiantian"):
+            try:
+                import sys as _sys
+                if "/root/maomao" not in _sys.path:
+                    _sys.path.insert(0, "/root/maomao")
+                from trader.multi.dispatch import try_dispatch
+                role = {"maomao": "玄玄", "tiantian": "天天"}[bot_dir]
+                full_text = f"{caption} {transcript}".strip() if caption else transcript
+                disp_result = try_dispatch(role, full_text)
+                # try_dispatch 返回 tuple (reply: str|None, source: str)
+                reply, _src = disp_result if isinstance(disp_result, tuple) else (disp_result, "")
+                if reply:
+                    # dispatch 命中 → 用 TTS 语音回
+                    await _send_voice_reply(update, reply)
+                    dispatched = True
+            except Exception as e:
+                logger.warning(f"[handle_audio] dispatch 失败: {e}")
+
+        # dispatch 没命中 → 走 Claude 自然对话 + 语音回（闭环）
+        if not dispatched:
+            full_prompt = f"{caption}\n\n（语音输入转文字）{transcript}" if caption else f"（语音输入转文字）{transcript}"
+            # 手动跑 claudecode_gen + ask_with_timer 传 voice_reply_fn，让回复走 TTS
+            state = load_state(bot_dir)
+            model = state.get("model", MODELS[0])
+            gen = await claudecode_gen(full_prompt, add_dir=_add_dir, bot_dir=bot_dir, model=model)
+            # voice_reply_fn 决定是否 TTS：profile.tts_enabled=False 时退化为文字回
+            await ask_with_timer(update, gen, model, voice_reply_fn=_send_voice_reply)
+
     @admin_only
     async def cmd_restart(update, ctx):
         await update.message.reply_text(f"🔄 {bot_name} 重启中...")
@@ -828,6 +1075,9 @@ def create_and_run_bot(env_path, claude_add_dir=None):
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, buffered_handle_text))
     app.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, handle_photo))
     app.add_handler(MessageHandler(filters.Document.ALL & filters.ChatType.PRIVATE, handle_document))
+    # 2026-04-27 视频/音频
+    app.add_handler(MessageHandler((filters.VIDEO | filters.VIDEO_NOTE) & filters.ChatType.PRIVATE, handle_video))
+    app.add_handler(MessageHandler((filters.VOICE | filters.AUDIO) & filters.ChatType.PRIVATE, handle_audio))
     from telegram.ext import CallbackQueryHandler
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_error_handler(error_handler)

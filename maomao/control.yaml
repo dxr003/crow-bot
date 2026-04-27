@@ -24,3 +24,29 @@ strategies:
 
   onchain_007:             # 链上 007（meme）
     enabled: true
+
+# ============================================================
+# 语音对话角色 voice mapping（OpenAI TTS）
+# 收到 TG 语音消息 → Whisper 转文字 → Claude 处理 → TTS 转语音回复
+# voice 选项：alloy(中性) / echo(年轻男) / fable(英式男) / onyx(深沉男) / nova(年轻女) / shimmer(柔和女)
+# tts_enabled: true  收到 voice 时用语音回复；false 收到 voice 也只回文字
+# 2026-04-27 老大设定
+# ============================================================
+voices:
+  damao:                   # 大猫 — 年轻男（云希年轻男声）
+    tts_enabled: true
+    engine: "edge"
+    voice: "zh-CN-YunxiNeural"
+  maomao:                  # 玄玄 — 火山豆包大模型 真童音「双快爽吖」（2026-04-28 接通 V3 endpoint）
+    tts_enabled: true
+    engine: "volc"
+    voice: "zh_female_shuangkuaisisi_moon_bigtts"
+    # 备选童音：zh_female_shaoer_moon_bigtts (少儿) / zh_female_qingxinnvsheng_moon_bigtts (清新女)
+  tiantian:                # 天天 — 年轻女（晓晓清甜）
+    tts_enabled: true
+    engine: "edge"
+    voice: "zh-CN-XiaoxiaoNeural"
+  baobao:                  # 贝贝 — 播报（默认关）
+    tts_enabled: false
+    engine: "edge"
+    voice: "zh-CN-YunyangNeural"
