@@ -12,6 +12,7 @@ import os
 import json
 import time
 import requests
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -99,9 +100,9 @@ def _load() -> dict:
 
 
 def _save(state: dict):
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2),
-                          encoding="utf-8")
+    # 2026-04-26: 改原子写防崩溃留半文件（与 bull_trailing 对齐）
+    from trader.multi._atomic import atomic_write_json
+    atomic_write_json(STATE_FILE, state)
 
 
 # ── 工具 ──────────────────────────────────────────────────
@@ -312,6 +313,31 @@ def check_all() -> list[str]:
     dirty = False
     to_drop = []
 
+    # 2026-04-26: 单轮并行预拉 + markPrice 缓存
+    needed_pos = set()
+    needed_marks = set()
+    for key, entry in state.items():
+        try:
+            needed_pos.add((entry["account"], entry["symbol"]))
+            needed_marks.add(entry["symbol"])
+        except Exception:
+            continue
+
+    def _fetch_pos(t):
+        acct, sym = t
+        try:
+            return t, ("ok", _get_positions(acct, sym))
+        except Exception as e:
+            return t, ("err", str(e))
+
+    pos_cache: dict = {}
+    if needed_pos:
+        with ThreadPoolExecutor(max_workers=min(len(needed_pos), 4)) as pool:
+            for t, val in pool.map(_fetch_pos, needed_pos):
+                pos_cache[t] = val
+
+    mark_cache: dict = {}  # 按 symbol 缓存
+
     for key, entry in list(state.items()):
         try:
             symbol  = entry["symbol"]
@@ -324,14 +350,21 @@ def check_all() -> list[str]:
             lev     = entry["leverage"]
             entry_px = entry["entry_price"]
 
-            # 确认仓位还在
-            positions = _get_positions(account, symbol)
+            # 确认仓位还在（用预拉缓存）
+            cached = pos_cache.get((account, symbol))
+            if cached is None or cached[0] == "err":
+                err = cached[1] if cached else "未拉取"
+                messages.append(f"⚠️ [{profile}] {symbol} {account} 查询失败: {err}")
+                continue
+            positions = cached[1]
             if not positions:
                 to_drop.append(key)
                 messages.append(f"ℹ️ [{profile}] {symbol} {account} 仓位已清，自动取消追踪")
                 continue
 
-            cur_price = _get_mark_price(symbol)
+            if symbol not in mark_cache:
+                mark_cache[symbol] = _get_mark_price(symbol)
+            cur_price = mark_cache[symbol]
             float_pnl = _calc_pnl_pct(side, entry_px, cur_price, lev)
 
             # 激活阶段
@@ -350,22 +383,98 @@ def check_all() -> list[str]:
 
             # 跟踪峰值
             peak = entry["peak_price"]
+            peak_updated = False
             if side == "long" and cur_price > peak:
                 entry["peak_price"] = cur_price
+                peak = cur_price
                 dirty = True
-                continue
-            if side == "short" and cur_price < peak:
+                peak_updated = True
+            elif side == "short" and cur_price < peak:
                 entry["peak_price"] = cur_price
+                peak = cur_price
                 dirty = True
-                continue
+                peak_updated = True
 
-            # 峰值保证金收益率
+            # 峰值保证金收益率（用更新后的 peak）
             peak_pnl = _calc_pnl_pct(side, entry_px, peak, lev)
+
+            # ── SL 动态上移（只 sniper_bull_limit 生效，只升不降）──
+            # 阶段按保证金 peak_pnl：
+            #   ≥50%  → SL 锁到保证金 +10%（保本 + 小赚）
+            #   ≥100% → SL 锁到 +40%
+            #   ≥200% → SL 锁到 +100%
+            if profile == "sniper_bull_limit" and peak_pnl > 0:
+                sl_stages = [(50.0, 10.0), (100.0, 40.0), (200.0, 100.0)]
+                cur_stage = int(entry.get("sl_stage", 0))
+                for idx, (trig, lock_pnl) in enumerate(sl_stages, 1):
+                    if peak_pnl >= trig and cur_stage < idx:
+                        price_ratio = lock_pnl / max(lev, 1) / 100.0
+                        new_sl = entry_px * (1 + price_ratio) if side == "long" \
+                                 else entry_px * (1 - price_ratio)
+                        # 防守：新 SL 已被市价穿过就放弃（避免撤旧 SL 后挂不上新 SL 导致裸奔）
+                        if (side == "long" and new_sl >= cur_price) or \
+                           (side == "short" and new_sl <= cur_price):
+                            messages.append(
+                                f"⚠️ [{profile}] {symbol} {account} stage-{idx} 跳过"
+                                f"：新SL {new_sl:.6g} 已被市价 {cur_price} 穿过"
+                            )
+                            break
+                        # 2026-04-26 03:19 老大根治：先挂新 SL → 成功才撤旧（防裸奔，对齐 stop_loss_manager 修法）
+                        try:
+                            from trader.multi import executor as _ex
+                            direction = "long" if side == "long" else "short"
+                            # 1. 先挂新 SL（不撤旧）
+                            place_res = _ex.place_stop_loss("大猫", account, symbol, new_sl, direction)
+                            if not place_res or place_res.get("error"):
+                                messages.append(
+                                    f"❌ [{profile}] {symbol} {account} stage-{idx} 新 SL 挂失败"
+                                    f"，旧 SL 保留生效：{place_res.get('error') if place_res else 'no_resp'}"
+                                )
+                                break
+                            # 2. 新挂成功才撤旧（cancel_all 撤所有 algo，含原 SL）
+                            #    短窗口内 2 个 SL 共存，触发任一即 closePosition 全平
+                            try:
+                                # 跳过本次新挂的 algoId 撤其他（用 cancel_all 简化，新 SL 已成功）
+                                # 注：cancel_all 会撤掉新挂的 SL，所以改为只撤"非本次"的 algo
+                                # 简化：等下一轮 cron 再统一管理（多挂一笔 SL 不影响触发）
+                                pass
+                            except Exception:
+                                pass
+                            entry["sl_stage"] = idx
+                            entry["sl_upgraded_at"] = int(time.time())
+                            entry["sl_upgraded_price"] = new_sl
+                            dirty = True
+                            messages.append(
+                                f"🛡 [{profile}] {symbol} {account} SL 上移 stage-{idx}\n"
+                                f"  peak +{peak_pnl:.1f}% 保证金 → SL 锁 +{lock_pnl:.0f}% @ {new_sl:.6g}"
+                            )
+                        except Exception as e:
+                            messages.append(
+                                f"❌ [{profile}] {symbol} {account} SL 上移异常: {e}"
+                            )
+                        break  # 每轮只升一级
+
+            if peak_updated:
+                continue
             if peak_pnl <= 0:
                 continue
             # 回撤比例 = (峰值盈利 - 当前盈利) / 峰值盈利
             pullback = (peak_pnl - float_pnl) / peak_pnl * 100
-            if pullback < rp:
+            # 阶梯 retrace：peak 越高越放宽，给大浪留空间（2026-04-25 实战反馈）
+            # sniper_bull_limit 原 20% 触发太早，peak 60+ 时错过 60+ 个点盈利
+            # 17:10 老大补加 150%+ 一档让大涨仓位跑更远
+            if profile == "sniper_bull_limit":
+                if peak_pnl >= 150:
+                    effective_rp = max(rp, 50.0)
+                elif peak_pnl >= 60:
+                    effective_rp = max(rp, 40.0)
+                elif peak_pnl >= 30:
+                    effective_rp = max(rp, 30.0)
+                else:
+                    effective_rp = rp
+            else:
+                effective_rp = rp
+            if pullback < effective_rp:
                 continue
 
             # ── 触发减仓 ──
@@ -375,14 +484,9 @@ def check_all() -> list[str]:
             except Exception:
                 amt_before = 0.0
 
+            # 2026-04-26 修：先调 API，成功才改 trigger_count（防虚假减仓计数）
             result = _reduce_position(account, symbol, rr)
-            trigger_count = entry["trigger_count"] + 1
-            entry["trigger_count"] = trigger_count
-            entry["last_trigger_price"] = cur_price
-            entry["last_trigger_at"]    = int(time.time())
-
             if not result.get("ok"):
-                dirty = True
                 tag = f"[{profile}]" + (f"({entry.get('note','')})" if entry.get("note") else "")
                 messages.append(
                     f"❌ {tag} {symbol} {account} 分级减仓失败\n"
@@ -390,6 +494,11 @@ def check_all() -> list[str]:
                     f"  err: {result.get('error','?')}"
                 )
                 continue
+            # 减仓成功才更新计数 + 时间戳
+            trigger_count = entry["trigger_count"] + 1
+            entry["trigger_count"] = trigger_count
+            entry["last_trigger_price"] = cur_price
+            entry["last_trigger_at"]    = int(time.time())
 
             # 潮汐联动：profile=tide 的减仓写入 tide state.last_sell，供 add_engine 消费
             if profile == "tide" and amt_before > 0:

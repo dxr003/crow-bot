@@ -94,10 +94,18 @@ def score_signal(symbol: str, gain_pct: float, market_data: dict, cfg: dict) -> 
     change_3m  = market_data.get("change_3m",  0)
     change_5m  = market_data.get("change_5m",  0)
     change_15m = market_data.get("change_15m", 0)
+    change_1h  = market_data.get("change_1h",  0)
 
     dn_pts = 0
     dn_reverse = scoring.get("dn_reverse_guard", -1)
-    if change_1m < dn_reverse:
+
+    # ── 趋势硬否决（2026-04-26 老大授权加，AGT/BSB 两单连损根因）──
+    # 1h 趋势 < 0 = 跌势中反弹，DN 因子全部归零（信号自然不过线）
+    trend_reject_th = scoring.get("trend_reject_1h_pct", 0)
+    if change_1h < trend_reject_th:
+        breakdown[f"DN.1h趋势否决({change_1h:+.1f}%)"] = 0
+        # dn_pts 保持 0，跳过 DN 计算
+    elif change_1m < dn_reverse:
         # 反转守门：1m 已在回撤，DN 归零
         breakdown["DN.反转守门"] = 0
     else:
@@ -118,6 +126,30 @@ def score_signal(symbol: str, gain_pct: float, market_data: dict, cfg: dict) -> 
         elif change_15m > dn_15m_th:
             dn_pts = scoring.get("dn_score_15m", 22)
             breakdown[f"DN.15m爆发+{change_15m:.1f}%"] = dn_pts
+
+        # ── 弱趋势降权（1h+0~5%，可能横盘抢反弹）──
+        weak_trend_th = scoring.get("trend_weak_1h_pct", 5)
+        if dn_pts > 0 and change_1h < weak_trend_th:
+            old = dn_pts
+            dn_pts = int(dn_pts * 0.5)
+            # 替换最近一条 DN.* breakdown 标签
+            for k in list(breakdown.keys()):
+                if k.startswith("DN.") and breakdown[k] == old:
+                    breakdown[f"{k} 1h弱趋势×0.5"] = dn_pts
+                    del breakdown[k]
+                    break
+
+        # ── 山顶守门（1m ≥ 10% 视为顶部接盘点，DN 砍半）──
+        peak_1m_th = scoring.get("peak_1m_pct", 10)
+        if dn_pts > 0 and change_1m >= peak_1m_th:
+            old = dn_pts
+            dn_pts = int(dn_pts * 0.5)
+            for k in list(breakdown.keys()):
+                if k.startswith("DN.") and breakdown[k] == old:
+                    breakdown[f"{k} 1m山顶×0.5"] = dn_pts
+                    del breakdown[k]
+                    break
+
     score += dn_pts
 
     # ── WL. 位置（v3.5 互斥取最高，基准=entry_price_in_pool，4档: 15/12/8/3） ──
@@ -170,6 +202,25 @@ def score_signal(symbol: str, gain_pct: float, market_data: dict, cfg: dict) -> 
             score += pts
     except Exception as e:
         logger.warning(f"[G因子] {symbol} 跳过: {e}")
+
+    # ── AF. 量大涨大加权（2026-04-25 17:00 老大补加，覆盖漏网 KAT/SOON 等）──
+    # 量 ≥ 1亿U → +10；24h 涨幅 ≥ 25% → +10；双满最多 +20
+    try:
+        af_chg24 = float(market_data.get("change_24h", 0))
+        af_vol24 = float(market_data.get("volume_24h_usdt", 0))
+        af_pts = 0
+        af_reasons = []
+        if af_vol24 >= scoring.get("af_volume_threshold", 100_000_000):
+            af_pts += scoring.get("af_volume_score", 10)
+            af_reasons.append(f"量{af_vol24/1e8:.1f}亿")
+        if af_chg24 >= scoring.get("af_change_threshold", 25):
+            af_pts += scoring.get("af_change_score", 10)
+            af_reasons.append(f"24h+{af_chg24:.0f}%")
+        if af_pts > 0:
+            breakdown[f"AF.加权({'/'.join(af_reasons)})"] = af_pts
+            score += af_pts
+    except Exception as e:
+        logger.warning(f"[AF加权] {symbol} 跳过: {e}")
 
     return {"score": score, "breakdown": breakdown}
 

@@ -69,13 +69,22 @@ def _check_one_account(name: str) -> dict:
         return {"account": name, "ok": False, "error": str(e)[:120]}
 
 
-def check_accounts() -> list[dict]:
-    """并行查启用账户 API 是否可达（K7：fan-out 必须 ThreadPoolExecutor）"""
+def check_accounts(per_account_timeout: float = 5.0) -> list[dict]:
+    """并行查启用账户 API 是否可达（K7：fan-out 必须 ThreadPoolExecutor）
+    2026-04-26: 加 per_account_timeout=5s，单账户卡死不影响其他账户报告。"""
     names = [a["name"] for a in list_accounts(enabled_only=True)]
     if not names:
         return []
+    out: list[dict] = []
     with ThreadPoolExecutor(max_workers=min(len(names), 4)) as ex:
-        return list(ex.map(_check_one_account, names))
+        futures = {ex.submit(_check_one_account, n): n for n in names}
+        for fut, n in futures.items():
+            try:
+                out.append(fut.result(timeout=per_account_timeout))
+            except Exception as e:
+                out.append({"name": n, "ok": False,
+                            "error": f"timeout/异常: {type(e).__name__}: {e}"})
+    return out
 
 
 def check_services() -> list[dict]:

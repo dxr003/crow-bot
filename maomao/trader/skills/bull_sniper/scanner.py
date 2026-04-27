@@ -1007,6 +1007,9 @@ def scan_once(state: dict, tickers: list) -> dict:
         market_data["change_5m"] = change_5m
         market_data["change_15m"] = change_15m
         market_data["change_1h"] = change_1h
+        # 24h 字段供 AF 加权用（2026-04-25 量大涨大加权）
+        market_data["change_24h"] = float(t.get("change_pct", 0))
+        market_data["volume_24h_usdt"] = float(t.get("volume_usdt", 0))
 
         # 用进池时锁定的量比基准替代滚动基准（v3.6 2026-04-18：k[5]→k[10] 主动买入额）
         base_avg_vol = pool.get("base_avg_vol", 0)
@@ -1323,66 +1326,20 @@ def run():
     last_card_hour     = -1
     last_health_hour   = -1
 
-    # ── Stage 5.3 两层移动止盈线程 ──
+    # ── 旧 trail_manager 子线程已根治下线 ──
+    # 2026-04-26 03:19 老大：双账户根治 —— trailing_layered（多账户原生）独占止盈控制
+    # 旧 trail_manager 是 bn2 单账户绑死的 layer1/layer2 系统，多账户时代已淘汰
+    # 此处保留 _trail_queue / _trail_key / _trail_secret 占位避免下面历史代码引用报错
     _trail_queue: queue.Queue = queue.Queue()
-    _trail_key    = os.environ.get("BINANCE2_API_KEY", "")
-    _trail_secret = os.environ.get("BINANCE2_API_SECRET", "")
-    if _trail_key and _trail_secret:
-        try:
-            from trail_manager import trail_loop
-            _t = threading.Thread(
-                target=trail_loop,
-                args=(state, lambda: CFG, _trail_queue, _trail_key, _trail_secret),
-                kwargs={"interval": CFG.get("trail_poll_interval_sec", 10)},
-                daemon=True,
-                name="trail_manager",
-            )
-            _t.start()
-            logger.info("[trail] 移动止盈线程已启动（10s轮询）")
-        except Exception as e:
-            logger.warning(f"[trail] 线程启动失败: {e}")
-    else:
-        logger.warning("[trail] BINANCE2 密钥缺失，移动止盈线程未启动")
+    _trail_key    = ""
+    _trail_secret = ""
 
     while True:
         now = time.time()
         current_hour = _dt.datetime.now().hour
 
-        # ── Stage 5.3 trail 队列消费（主线程独占写 state）──
-        try:
-            _trail_changed = False
-            while not _trail_queue.empty():
-                _item = _trail_queue.get_nowait()
-                _sym = _item.get("symbol", "")
-                _pos = state.get("positions", {}).get(_sym)
-                if not _pos:
-                    continue
-                if _item["type"] == "update_peak":
-                    _pos["peak_pnl_pct"] = _item["peak_pnl_pct"]
-                    _trail_changed = True
-                elif _item["type"] == "close" and _pos.get("status") == "holding":
-                    from trail_manager import _close_position
-                    _qty = _item.get("qty", 0)
-                    _layer = _item.get("layer", "?")
-                    _ok = _close_position(_sym, _qty, _trail_key, _trail_secret) if _qty > 0 else False
-                    if _ok:
-                        _pos["status"] = "trail_tp"
-                        _pos["exit_price"] = _item.get("mark_price", 0)
-                        logger.info(
-                            f"[trail] {_sym} {_layer} 平仓成功 "
-                            f"峰值+{_item['peak_pnl_pct']:.1f}% 现+{_item['cur_pnl_pct']:.1f}%"
-                        )
-                        _alert("trail_tp",
-                            f"🏁 {_sym.replace('USDT','')} {_layer} 移动止盈触发\n"
-                            f"峰值 +{_item['peak_pnl_pct']:.1f}% → 回撤至 +{_item['cur_pnl_pct']:.1f}%"
-                        )
-                    else:
-                        logger.warning(f"[trail] {_sym} {_layer} 平仓失败，等下轮重试")
-                    _trail_changed = True
-            if _trail_changed:
-                save_state(state)
-        except Exception as e:
-            logger.warning(f"[trail消费] 异常: {e}")
+        # ── 旧 trail_queue 消费已根治下线（trail_manager 子线程已不启动）──
+        # 2026-04-26 03:19 老大：trailing_layered 独占止盈，本段保留为空 placeholder
 
         # ── 配置热重载 ──
         _hot_reload_config()
@@ -1424,17 +1381,9 @@ def run():
         except Exception as e:
             logger.warning(f"[仓位管理] 检查异常: {e}")
 
-        # ── Stage 5.2 止损升级（30分钟后宽松档位） ──
-        try:
-            from stop_loss_manager import upgrade_all_positions
-            _sl_key    = os.environ.get("BINANCE2_API_KEY", "")
-            _sl_secret = os.environ.get("BINANCE2_API_SECRET", "")
-            if _sl_key and _sl_secret:
-                upgraded = upgrade_all_positions(state, CFG, _sl_key, _sl_secret)
-                if upgraded:
-                    save_state(state)
-        except Exception as e:
-            logger.warning(f"[止损升级] 检查异常: {e}")
+        # ── 旧 stop_loss_manager 高位 SL 升级已根治下线 ──
+        # 2026-04-26 03:19 老大：bn2 单账户绑死 + ORCA 裸奔事故根因，下线
+        # SL 上移功能由 trailing_layered.check_all 多账户接管（peak ≥50/100/200% 三档）
 
         # 每30秒全市场扫描
         if now - last_full_scan >= CFG.get("scan_interval_sec", 30):
@@ -1455,6 +1404,17 @@ def run():
                 if events["new_signals"]:
                     logger.info(f"新信号: {[s['symbol'] for s in events['new_signals']]}")
 
+                try:
+                    from virtual_settle import check_and_settle
+                    price_map = {t["symbol"]: float(t.get("price", 0) or 0) for t in tickers}
+                    settled = check_and_settle(state, price_map)
+                    if settled:
+                        logger.info(f"[virtual_settle] 结算 {len(settled)} 条: "
+                                    f"{[(r['symbol'], r['status']) for r in settled]}")
+                        save_state(state)
+                except Exception as _vs_e:
+                    logger.warning(f"[virtual_settle] 异常: {_vs_e}")
+
                 last_full_scan = now
             except Exception as e:
                 logger.error(f"扫描异常: {e}")
@@ -1470,9 +1430,9 @@ def run():
             except Exception as e:
                 logger.warning(f"状态卡片推送失败: {e}")
 
-        # 每 4 小时 :02 健康报告（私信乌鸦，与状态卡错开；触发时刻 00/04/08/12/16/20）
+        # 每 4 小时 :50 健康报告（2026-04-27 老大改为准点 50 分，触发时刻 00:50/04:50/08:50/12:50/16:50/20:50）
         current_min = _dt.datetime.now().minute
-        if current_hour % 4 == 0 and current_min == 2 and current_hour != last_health_hour:
+        if current_hour % 4 == 0 and current_min == 50 and current_hour != last_health_hour:
             try:
                 send_health_report(state, state.get("filter_log", []))
                 state["stats"] = {"scans": 0, "pool_entries": 0, "signals": 0}
@@ -1492,6 +1452,14 @@ def run():
                     _update_reject_peaks(_reject_prices)
                 except Exception:
                     pass
+                try:
+                    from virtual_settle import check_and_settle
+                    price_map = {t["symbol"]: float(t.get("price", 0) or 0) for t in tickers}
+                    _settled_rf = check_and_settle(state, price_map)
+                    if _settled_rf:
+                        save_state(state)
+                except Exception as _vs_e:
+                    logger.warning(f"[virtual_settle] 刷新异常: {_vs_e}")
             except Exception as e:
                 logger.error(f"观察池刷新异常: {e}")
                 _alert("pool_refresh_exception", f"观察池刷新异常: {e}")

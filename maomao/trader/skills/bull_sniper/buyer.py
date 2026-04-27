@@ -359,7 +359,10 @@ def _execute_auto(symbol: str, price: float, analyze_result: dict, cfg: dict,
     except Exception as _e:
         logger.warning(f"[buyer] [{acct_name}] {symbol} 读入场价失败,用mark:{mark}: {_e}")
 
-    # ── 10. 挂止损（保证金亏损50%，基于实际入场价） ──
+    # ── 10. 挂止损（保证金亏损50%，基于实际入场价）──
+    # 2026-04-25 10:22 老大：震荡市场收紧 50→30，单笔最大亏损 25U→15U
+    # 2026-04-26 10:11 老大：32h 实战 SL 30% 反弹率 67-83%（小币太敏感）→ 回退 50%
+    #                  下次新单生效，已开仓位的 30% SL 不动（在币安服务器上挂着）
     sl_margin_pct = 50
     sl_price_drop = sl_margin_pct / leverage / 100
     sl_price = _fix_price(symbol, actual_entry * (1 - sl_price_drop))
@@ -389,71 +392,40 @@ def _execute_auto(symbol: str, price: float, analyze_result: dict, cfg: dict,
         sl_fail_msg = f"❌ <b>[{acct_name}] {coin} 止损挂单异常</b>\n{e}\n需人工检查"
         _route("order_fail", sl_fail_msg)
 
-    # ── 11. 移动止盈 ──
+    # ── 11. 分级移动止盈（trailing_layered，profile=sniper_bull_limit）──
+    # 2026-04-25：下掉币安原生 callback + trailing_limit 分支，统一走 trader.trailing_layered
     trailing_order_id = None
-    use_custom = cfg.get("custom_trailing_enabled", False)
+    tp_profile = cfg.get("layered_trailing_profile", "sniper_bull_limit")
+    try:
+        import sys as _sys
+        if "/root/maomao" not in _sys.path:
+            _sys.path.insert(0, "/root/maomao")
+        from trader.trailing_layered import activate as tl_activate, PROFILES as _PROFILES
+        r = tl_activate(
+            symbol.replace("USDT", ""),
+            profile=tp_profile,
+            account=acct_name,
+            leverage=leverage,
+            note=f"bull_sniper@{acct_name}",
+        )
+        if isinstance(r, str) and r.startswith("❌"):
+            raise RuntimeError(r)
+        trailing_order_id = f"layered:{tp_profile}"
+        logger.info(f"[buyer] [{acct_name}] {symbol} 分级移动止盈已激活 profile={tp_profile}")
+    except Exception as e:
+        logger.warning(f"[buyer] [{acct_name}] {symbol} 分级移动止盈激活失败: {e}")
+        coin = symbol.replace("USDT", "")
+        tp_fail_msg = f"❌ <b>[{acct_name}] {coin} 分级移动止盈激活失败</b>\n{e}\n需人工检查"
+        _route("order_fail", tp_fail_msg)
 
-    if use_custom:
-        # 限价单移动止盈（trailing_limit.py）
-        try:
-            from trailing_limit import register as tl_register
-            tl_register(symbol, actual_entry, qty, side="LONG", leverage=leverage,
-                        cfg=cfg, acct_name=acct_name, key_env=key_env, secret_env=secret_env)
-            trailing_order_id = "trailing_limit"
-            logger.info(f"[buyer] [{acct_name}] {symbol} 限价移动止盈已注册")
-        except Exception as e:
-            logger.warning(f"[buyer] [{acct_name}] {symbol} 限价移动止盈注册失败: {e}")
-            coin = symbol.replace("USDT", "")
-            tp_fail_msg = f"❌ <b>[{acct_name}] {coin} 移动止盈注册失败</b>\n{e}\n需人工检查"
-            _route("order_fail", tp_fail_msg)
-    else:
-        # 币安原生移动止盈（10%回撤上限）
-        trailing_cfg = cfg.get("trailing", {})
-        activation_pct = trailing_cfg.get("activation_pct", 50)
-        activate_price = _fix_price(symbol, actual_entry * (1 + activation_pct / 100))
-        callback_rate = 10
-        try:
-            tp_resp = _fapi_order({
-                "symbol": symbol,
-                "side": "SELL",
-                "positionSide": "LONG",
-                "type": "TRAILING_STOP_MARKET",
-                "activationPrice": str(activate_price),
-                "callbackRate": str(callback_rate),
-                "quantity": str(qty),
-            }, key_env, secret_env)
-            if tp_resp["status_code"] == 200:
-                trailing_order_id = str(tp_resp["data"].get("orderId", "?"))
-                logger.info(
-                    f"[buyer] [{acct_name}] {symbol} 币安原生移动止盈 "
-                    f"激活:{activate_price} 回撤:{callback_rate}% orderId:{trailing_order_id}"
-                )
-            else:
-                logger.warning(f"[buyer] [{acct_name}] {symbol} 移动止盈挂单失败: {tp_resp['data']}")
-                coin = symbol.replace("USDT", "")
-                tp_fail_msg = f"❌ <b>[{acct_name}] {coin} 币安原生移动止盈挂单失败</b>\n{tp_resp['data']}\n需人工检查"
-                _route("order_fail", tp_fail_msg)
-        except Exception as e:
-            logger.warning(f"[buyer] [{acct_name}] {symbol} 移动止盈挂单异常: {e}")
-            coin = symbol.replace("USDT", "")
-            tp_fail_msg = f"❌ <b>[{acct_name}] {coin} 移动止盈挂单异常</b>\n{e}\n需人工检查"
-            _route("order_fail", tp_fail_msg)
-
-        if cfg.get("custom_trailing_enabled", False):
-            pullback_pct = trailing_cfg.get("pullback_trigger", 25)
-            try:
-                _register_trailing(symbol, actual_entry, qty, activation_pct, pullback_pct)
-                logger.info(f"[buyer] [{acct_name}] {symbol} 自建监控已注册（观察模式）")
-            except Exception as e:
-                logger.warning(f"[buyer] [{acct_name}] {symbol} 自建监控注册失败: {e}")
-
-    if use_custom:
-        tl_cfg = cfg.get("trailing_limit", {})
-        tl_act = tl_cfg.get("activation_profit_pct", 60)
-        tl_pull = tl_cfg.get("pullback_pct", 40)
-        tp_desc = f"STOP_MARKET移动止盈({tl_act}%激活/{tl_pull}%回撤)"
-    else:
-        tp_desc = f"币安原生+{activation_pct}%激活/{callback_rate}%回撤"
+    try:
+        _p = _PROFILES.get(tp_profile, {})
+        tp_desc = (f"layered[{tp_profile}] "
+                   f"{_p.get('activate_pct','?')}%激活/"
+                   f"{_p.get('retrace_pct','?')}%回撤/"
+                   f"减{_p.get('reduce_ratio','?')}%")
+    except NameError:
+        tp_desc = f"layered[{tp_profile}] (profile 读取失败)"
 
     return {
         "status": "executed",

@@ -1,5 +1,5 @@
 """
-notifier.py — 交易阻击推送模块 v2.0
+notifier.py — 做多阻击推送模块 v2.0
 统一路由：玄玄(乌鸦私信) / 贝贝(群组) / 天天(震天响)
 """
 import html as html_mod
@@ -240,7 +240,7 @@ def send_signal(signal: dict):
     breakdown = signal.get("breakdown", {})
 
     lines = [
-        f"⚡️ <b>小刃 · 交易阻击信号预警 · {time.strftime('%m-%d %H:%M')}</b>",
+        f"⚡️ <b>小刃 · 幻影信号预警 · {time.strftime('%m-%d %H:%M')}</b>",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
         f"🔥 <b>做多信号 — {_coin(symbol)}</b>",
@@ -253,6 +253,7 @@ def send_signal(signal: dict):
         f"📌 距历史高点：<code>-{drop_ath:.1f}%</code>",
         f"⏱ 观察时长：<code>{elapsed:.0f}分钟</code>",
         "",
+        f"🔮 <i>小刃 AI · 幻影策略分析</i>",
         f"📊 综合评分：<b>{score}分</b>",
     ]
     for factor, pts in breakdown.items():
@@ -278,7 +279,7 @@ def send_pool_entry(pool_item: dict):
     drop_ath = pool_item.get("drop_from_ath", 0)
 
     text = (
-        f"👁 <b>小刃 · 交易阻击 · 新目标进入观察</b>\n\n"
+        f"👁 <b>小刃 · 幻影 · 新目标进入观察</b>\n\n"
         f"<blockquote>"
         f"🪙 代币：<b>{_coin(symbol)}</b>\n"
         f"📈 5分钟涨幅：<code>+{change_5m:.1f}%</code>\n"
@@ -287,7 +288,7 @@ def send_pool_entry(pool_item: dict):
         f"📌 距高点：<code>-{drop_ath:.1f}%</code>\n"
         f"⏱ 开始观察：{time.strftime('%H:%M:%S')}"
         f"</blockquote>\n\n"
-        f"<i>观察中，达到评分阈值时推信号</i>"
+        f"<i>观察中，等待 AI 决策推信号</i>"
     )
     _send_bb(text)
 
@@ -328,7 +329,7 @@ def send_status_card(state: dict):
                 logger.warning(f"[notifier] 并行拉取价格失败: {e}")
 
     lines = [
-        f"⚡️ <b>小刃 · 交易阻击信号预警 · {time.strftime('%m-%d %H:%M')}</b>",
+        f"⚡️ <b>小刃 · 幻影信号预警 · {time.strftime('%m-%d %H:%M')}</b>",
         "━━━━━━━━━━━━━━━━━━━━",
     ]
 
@@ -412,7 +413,7 @@ def send_status_card(state: dict):
             if action == "signal_fast":
                 trigger_tag = f"⚡️ 快速通道 — {reason}"
             elif action == "signal_scored":
-                trigger_tag = f"🤖 AI决策通道"
+                trigger_tag = f"🔮 小刃 · 幻影捕获"
             else:
                 trigger_tag = f"📌 {reason}" if reason else "📌 记录"
 
@@ -516,7 +517,7 @@ def send_trade_report(signal: dict, buy_result: dict, analyze_result: dict):
     action = signal.get("action", "")
     score = signal.get("score")
 
-    channel = "📊 规则评分通道" if action == "signal_scored" else f"📌 {action}"
+    channel = "🔮 小刃 · 幻影捕获" if action == "signal_scored" else f"📌 {action}"
 
     # ── 评分明细 ──
     analyze = analyze_result or {}
@@ -539,19 +540,16 @@ def send_trade_report(signal: dict, buy_result: dict, analyze_result: dict):
         sl_ok = buy_result.get("sl_algo_id") not in (None, "", "?")
         sl_tag = "✅已挂" if sl_ok else "⚠️挂载失败"
         tp_id = buy_result.get("tp_order_id", "")
-        if tp_id == "trailing_limit":
-            trailing_status = "✅已注册（STOP_MARKET 50%激活/40%回撤）"
+        if isinstance(tp_id, str) and tp_id.startswith("layered:"):
+            trailing_status = "✅已激活（分级追踪）"
         elif tp_id not in (None, "", "?"):
-            trailing_status = "✅已挂载（币安原生 50%激活/10%回撤）"
+            trailing_status = f"✅已挂载（tp_id={tp_id}）"
         else:
             trailing_status = "⚠️挂载失败"
-        roll_status = buy_result.get("roll_status", "✅已注册（浮盈90%触发，加仓60%）")
-
         exec_block = (
             f"订单ID: {order_id}\n"
             f"止损价: {sl_price}（保证金-{buy_result.get('sl_margin_pct', 50)}%）{sl_tag}\n"
-            f"移动止盈: {trailing_status}\n"
-            f"滚仓: {roll_status}"
+            f"移动止盈: {trailing_status}"
         )
     elif status == "skipped":
         exec_icon = "⏭"
@@ -562,7 +560,7 @@ def send_trade_report(signal: dict, buy_result: dict, analyze_result: dict):
 
     # ── 贝贝完整版（→乌鸦私信，含1234步骤） ──
     text_full = (
-        f"{exec_icon} <b>交易阻击成交报告 · {sym}</b>\n"
+        f"{exec_icon} <b>小刃 · 幻影成交报告 · {sym}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"⏰ {now_str}\n\n"
         f"<b>1️⃣ 触发</b>\n"
@@ -580,23 +578,22 @@ def send_trade_report(signal: dict, buy_result: dict, analyze_result: dict):
         f"<blockquote>{exec_block}</blockquote>"
     )
 
-    # ── 精简版（→天天 + 群组） ──
+    # ── 精简版（→天天 + 群组贝贝，含评分明细供老大复盘）──
     text_simple = (
-        f"{exec_icon} <b>交易阻击成交报告 · {sym}</b>\n"
+        f"{exec_icon} <b>小刃 · 幻影成交报告 · {sym}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"⏰ {now_str}\n\n"
         f"触发  {channel}\n"
         f"24h涨幅: +{signal.get('gain_pct', 0)}%  "
         f"触发价: {_fmt_price(signal.get('cur_price', 0))}\n\n"
-        f"<blockquote>{exec_block}</blockquote>"
+        f"{analyze_block}\n\n"
+        f"{exec_block}"
     )
 
     # 直接分发，不走route()
-    group_on = _load_notify_cfg().get("group_notify", True)
-    _send_admin(text_full)
-    _send_tt(text_simple)
-    if group_on:
-        _send_bb(text_simple)
+    # 2026-04-25 11:13 老大：成交报告只发贝贝私聊老大 + 天天，不发群
+    _send_admin(text_full)        # 贝贝 bot → 老大私信（含评分明细）
+    _send_tt(text_simple)         # 天天 bot → 震天响
 
 
 def send_health_report(state: dict, filter_log: list):
@@ -674,13 +671,73 @@ def send_health_report(state: dict, filter_log: list):
 
     filter_count = len(filter_log) if filter_log else 0
 
+    # ── 6) 策略状态总览（2026-04-27 老大要求融合）──
+    strategy_lines = []
+    try:
+        import yaml as _yaml
+        # 幻影
+        _phantom_cfg = _yaml.safe_load(open('/root/maomao/trader/skills/bull_sniper/config.yaml'))
+        _pm = _phantom_cfg['bull_sniper'].get('mode', '?')
+        _pm_str = repr(_pm) if not isinstance(_pm, str) else _pm
+        _pm_label = '⛔off' if _pm == 'off' else '🟢auto' if _pm == 'auto' else '🟡alert' if _pm == 'alert' else f'⚠️{_pm_str}'
+        _accs = _phantom_cfg['bull_sniper'].get('accounts', {})
+        _on_accs = [a for a, c in _accs.items() if c.get('enabled')]
+        _on_str = '/'.join(_on_accs) if _on_accs else '全关'
+        strategy_lines.append(f"🔮 幻影：{_pm_label}  开:{_on_str}")
+        # 潮汐
+        _tide_cfg = _yaml.safe_load(open('/root/maomao/tide/config.yaml'))
+        _tm = _tide_cfg.get('system', {}).get('mode', '?')
+        _ms = _tide_cfg.get('mock_short_enabled')
+        _tm_label = '⛔shadow' if _tm == 'shadow' else '🟢live' if _tm == 'live' else f'⚠️{_tm}'
+        _ms_label = '关' if _ms is False else '开' if _ms is True else f'⚠️{_ms}'
+        strategy_lines.append(f"🌊 潮汐：{_tm_label}  mock_short:{_ms_label}")
+        # 链上 007
+        _onc_cfg = _yaml.safe_load(open('/root/maomao/trader/skills/onchain_007/config.yaml'))
+        _oc = _onc_cfg.get('onchain_007', {}).get('enabled')
+        _oc_label = '🟢开' if _oc is True else '⛔关' if _oc is False else f'⚠️{_oc}'
+        strategy_lines.append(f"🪐 链上007：{_oc_label}")
+    except Exception as _e:
+        strategy_lines.append(f"⚠️ 策略状态读取失败: {_e}")
+    strategy_block = "\n".join(strategy_lines)
+
+    # ── 7) 账户速览（2026-04-27 老大要求加，4 账户余额 + 持仓 + 浮盈）──
+    acct_lines = []
+    try:
+        from trader.multi import executor as _exec
+        for _ACC in ['币安1', '币安2', '币安3', '币安4']:
+            try:
+                _bal = _exec.get_balance('玄玄', _ACC)
+                _f = _bal.get('futures', {})
+                _total = _f.get('total', 0)
+                _upnl = _f.get('upnl', 0)
+                _pos = _exec.get_positions('玄玄', _ACC)
+                if not _pos:
+                    acct_lines.append(f"{_ACC}: 余{_total:.0f}U  浮盈{_upnl:+.1f}U  📭")
+                else:
+                    _items = []
+                    for _p in _pos:
+                        _amt = float(_p['positionAmt']); _sd = '多' if _amt > 0 else '空'
+                        _u = float(_p['unRealizedProfit'])
+                        _items.append(f"{_p['symbol'].replace('USDT','')}{_sd}{_u:+.0f}")
+                    acct_lines.append(f"{_ACC}: 余{_total:.0f}U  " + " ".join(_items))
+            except Exception as _e:
+                acct_lines.append(f"{_ACC}: ❌ {str(_e)[:40]}")
+    except Exception as _e:
+        acct_lines.append(f"⚠️ 账户速览读取失败: {_e}")
+    acct_block = "\n".join(acct_lines)
+
     text = (
-        f"🔍 交易阻击系统自检 · {now_str}\n"
+        f"🔍 小刃 · 幻影系统自检 · {now_str}\n"
         f"━━━━━━━━━━━━━━\n"
         f"观察池：{len(watchpool)}  "
         f"持仓：{len(state.get('positions', {}))}  "
         f"已触发信号：{len(state.get('signals', []))}  "
         f"结算：{len(state.get('signal_history', []))}\n"
+        f"━━ 🎛 策略状态 ━━\n"
+        f"{strategy_block}\n"
+        f"━━ 💰 账户速览 ━━\n"
+        f"{acct_block}\n"
+        f"━━ 🩺 健康检查 ━━\n"
         f"{diag_block}\n"
         f"⚠️ 近期过滤：{filter_count}个币未达标"
     )

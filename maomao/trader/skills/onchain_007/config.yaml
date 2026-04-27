@@ -1,0 +1,36 @@
+onchain_007:
+  enabled: true
+
+  # 推送目标（贝贝 bot → 群组）
+  push_bot_token_env: PUSH_BOT_TOKEN
+  push_targets:
+    group: -1001150897644            # 草币社区抱团小队
+
+  # 链分配（总 ≤10）
+  network_quota:
+    solana: 7
+    bsc:    2
+    eth:    1
+
+  # 过滤阈值（老大 2026-04-25 拍板，2026-04-26 加爆发力双门槛）
+  filters:
+    min_marketcap_usd:  200000        # 市值 ≥ 20 万
+    max_marketcap_usd:  3000000       # 市值 ≤ 300 万（甜蜜区上限）
+    min_liquidity_usd:  50000         # 流动性 ≥ 5 万
+    min_24h_volume_usd: 500000        # 24h 量 ≥ 50 万
+    min_age_hours:      6             # 上线 ≥ 6h（避开 mint 5 分钟）
+    # ── 2026-04-26 老大加爆发力双门槛（C 方案：AND 严选，宁缺毋滥）──
+    min_volume_to_mcap: 5             # 24h 量 / 市值 ≥ 5x（高换手）
+    min_24h_change_pct: 200           # 24h 涨幅 ≥ 200%（早期暴涨）
+
+  # 爆发力打星（h24 涨幅 + h24 量综合）
+  star_thresholds:
+    one_star:    {h24_change_min: 30,  h24_volume_min: 500000}
+    two_star:    {h24_change_min: 100, h24_volume_min: 2000000}
+    three_star:  {h24_change_min: 300, h24_volume_min: 5000000}
+
+  # 新币标记
+  new_token_hours: 24                 # < 24h 上线标 🆕
+
+  # 涨幅 🔥 阈值
+  hot_change_pct: 50                  # h1/h24 涨幅 ≥ 50% 显示 🔥（否则 🟢/🔴）

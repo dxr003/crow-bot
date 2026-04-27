@@ -114,7 +114,7 @@ def main():
                 "price_breach":    abs(pct) >= 1.5,
                 "volume_spike":    volume_ratio >= 2.0,
                 "oi_change":       abs(oi_change_pct) >= 5.0,
-                "funding_extreme": abs(funding_rate) >= 0.05,
+                "funding_extreme": abs(funding_rate) >= 0.0005,  # 0.05%（binance funding_rate 是小数）2026-04-26 修
             }
 
             # xt1: 区段判断

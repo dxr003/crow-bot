@@ -253,7 +253,7 @@ def check_all(cfg: dict = None) -> list:
                     close_status = "sl"
 
                 close_msg = (
-                    f"{emoji} <b>交易阻击成交报告 · {coin}{acct_tag}</b>\n"
+                    f"{emoji} <b>小刃 · 幻影成交报告 · {coin}{acct_tag}</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━\n"
                     f"结果: {label}\n"
                     f"入场: {entry_price:.4f}  {exit_desc}\n"

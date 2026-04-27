@@ -154,6 +154,62 @@ def _close_position(acct_name: str, key_env: str, secret_env: str,
         return f"[{acct_name}]平仓失败: {str(e)[:200]}"
 
 
+def _fetch_realized_for_account(acct_name: str, key_env: str, secret_env: str,
+                                 symbol: str, since_ts_ms: int) -> dict:
+    """拉指定账户 since_ts_ms 之后该 symbol 的多头平仓成交（SELL+LONG）。
+    返回 {avg_price, realized_pnl, qty}。失败/无成交返回 0。"""
+    key = os.getenv(key_env, "")
+    secret = os.getenv(secret_env, "")
+    empty = {"avg_price": 0.0, "realized_pnl": 0.0, "qty": 0.0}
+    if not key or not secret:
+        return empty
+    from binance.um_futures import UMFutures
+    try:
+        c = UMFutures(key=key, secret=secret)
+        trades = c.get_account_trades(symbol=symbol, startTime=since_ts_ms, limit=200)
+    except Exception as e:
+        logger.warning(f"[trades] {acct_name} {symbol} 拉成交失败: {e}")
+        return empty
+    sells = [t for t in trades or [] if t.get("side") == "SELL" and t.get("positionSide") == "LONG"]
+    if not sells:
+        return empty
+    qty = sum(float(t["qty"]) for t in sells)
+    notional = sum(float(t["price"]) * float(t["qty"]) for t in sells)
+    pnl = sum(float(t.get("realizedPnl", 0)) for t in sells)
+    return {
+        "avg_price": notional / qty if qty > 0 else 0.0,
+        "realized_pnl": pnl,
+        "qty": qty,
+    }
+
+
+def _aggregate_real_exit(accts: list, acct_creds: dict, symbol: str,
+                          since_ts_ms: int) -> dict:
+    """聚合多账户真实成交，返回 {exit_price, realized_pnl, qty, ok}。
+    ok=False 表示拉不到任何成交，调用方应回退到 mark/估算。"""
+    total_qty = 0.0
+    total_notional = 0.0
+    total_pnl = 0.0
+    for acct in accts:
+        cred = acct_creds.get(acct)
+        if not cred:
+            continue
+        key_env, secret_env = cred
+        d = _fetch_realized_for_account(acct, key_env, secret_env, symbol, since_ts_ms)
+        if d["qty"] > 0:
+            total_qty += d["qty"]
+            total_notional += d["avg_price"] * d["qty"]
+            total_pnl += d["realized_pnl"]
+    if total_qty <= 0:
+        return {"exit_price": 0.0, "realized_pnl": 0.0, "qty": 0.0, "ok": False}
+    return {
+        "exit_price": total_notional / total_qty,
+        "realized_pnl": total_pnl,
+        "qty": total_qty,
+        "ok": True,
+    }
+
+
 def _cancel_algo_by_id(acct_name: str, key_env: str, secret_env: str, algo_id) -> bool:
     """按 algoId 撤单，成功返回 True"""
     if not algo_id:
@@ -416,18 +472,29 @@ def check_positions(scanner_state: dict, cfg: dict = None) -> bool:
                     "last_entry_price": entry_price,
                 }
 
+                # 拉真实成交价 + 真实账单 PNL（开仓时间 -60s 兜底）
+                since_ms = int(entry_time * 1000) - 60_000
+                real = _aggregate_real_exit(active_accts, acct_creds, symbol, since_ms)
+                if real["ok"]:
+                    exit_line = f"入场: {entry_price:.4f}  出场: {real['exit_price']:.4f}"
+                    pnl_line = f"估算盈亏: {margin_pnl:+.1f}%  实际: {real['realized_pnl']:+.2f}U"
+                else:
+                    exit_line = f"入场: {entry_price:.4f}  出场: {mark:.4f}（mark）"
+                    pnl_line = f"估算盈亏: {margin_pnl:+.1f}%  实际: 拉取失败"
+
                 close_msg = (
-                    f"{emoji} <b>交易阻击成交报告 · {coin}</b>\n"
+                    f"{emoji} <b>小刃 · 幻影成交报告 · {coin}</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━\n"
                     f"结果: {label}\n"
                     f"账户: {','.join(active_accts)}\n"
-                    f"入场: {entry_price:.4f}  估算盈亏: {margin_pnl:+.1f}%\n"
+                    f"{exit_line}\n"
+                    f"{pnl_line}\n"
                     f"冷却: {cooldown_hours}小时"
                 )
                 _route(event, close_msg)
-                logger.info(f"[仓位] {coin} {label} 账户{active_accts} 保证金盈亏{margin_pnl:+.1f}% 冷却{cooldown_hours}h")
+                logger.info(f"[仓位] {coin} {label} 账户{active_accts} 保证金盈亏{margin_pnl:+.1f}% 实际{real.get('realized_pnl',0):+.2f}U 冷却{cooldown_hours}h")
 
-                _settle_signal(scanner_state, symbol, cooldown_type, mark)
+                _settle_signal(scanner_state, symbol, cooldown_type, real["exit_price"] if real["ok"] else mark)
                 del positions[symbol]
                 changed = True
                 continue
@@ -462,20 +529,32 @@ def check_positions(scanner_state: dict, cfg: dict = None) -> bool:
                     "last_entry_price": entry_price,
                 }
 
+                # 等 binance trade index 落库再拉真实成交
+                time.sleep(1.5)
+                live_acct_names = list(live_by_acct.keys())
+                since_ms = int((now - 5) * 1000)  # 平仓动作前 5s
+                real = _aggregate_real_exit(live_acct_names, acct_creds, symbol, since_ms)
+                if real["ok"]:
+                    exit_line = f"入场: {entry_price:.4f}  出场: {real['exit_price']:.4f}"
+                    pnl_line = f"保证金盈亏: {margin_pnl:+.1f}%  实际: {real['realized_pnl']:+.2f}U"
+                else:
+                    exit_line = f"入场: {entry_price:.4f}  现价: {cur_price:.4f}（mark）"
+                    pnl_line = f"保证金盈亏: {margin_pnl:+.1f}%  实际: 拉取失败"
+
                 timeout_msg = (
-                    f"⏰ <b>交易阻击成交报告 · {coin}</b>\n"
+                    f"⏰ <b>小刃 · 幻影成交报告 · {coin}</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━\n"
                     f"结果: ⏰ 因故平仓\n"
                     f"持仓 {hours_held:.1f} 小时未爆发\n"
-                    f"入场: {entry_price:.4f}  现价: {cur_price:.4f}\n"
-                    f"保证金盈亏: {margin_pnl:+.1f}%\n"
+                    f"{exit_line}\n"
+                    f"{pnl_line}\n"
                     f"{chr(10).join(close_results)}\n"
                     f"冷却: {timeout_cooldown}小时"
                 )
                 _route("forced_close", timeout_msg)
-                logger.info(f"[仓位] {coin} 超时平仓 保证金盈亏{margin_pnl:+.1f}% {close_results}")
+                logger.info(f"[仓位] {coin} 超时平仓 保证金盈亏{margin_pnl:+.1f}% 实际{real.get('realized_pnl',0):+.2f}U {close_results}")
 
-                _settle_signal(scanner_state, symbol, "expired", cur_price)
+                _settle_signal(scanner_state, symbol, "expired", real["exit_price"] if real["ok"] else cur_price)
                 del positions[symbol]
                 changed = True
                 continue

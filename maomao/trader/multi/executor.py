@@ -26,7 +26,7 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 from urllib.parse import urlencode
 
 import requests
@@ -91,6 +91,11 @@ def _get_filters(client, symbol: str) -> dict:
 
 def _fix(v: float, step: str) -> float:
     return float(Decimal(str(v)).quantize(Decimal(step), rounding=ROUND_DOWN))
+
+
+def _fix_nearest(v: float, step: str) -> float:
+    """就近取整到 stepSize（用于开仓/加仓，贴合用户意图的名义值）"""
+    return float(Decimal(str(v)).quantize(Decimal(step), rounding=ROUND_HALF_UP))
 
 
 # ══════════════════════════════════════════
@@ -439,9 +444,9 @@ def open_market(role: str, account: str, symbol: str, side: str,
         return {"error": f"获取标记价失败: {e}"}
     hedge = f_hg.result()
 
-    # 计算数量
+    # 计算数量（就近取整，贴合用户意图的名义值，避免 ROUND_DOWN 大幅缺口）
     notional = margin * leverage
-    qty = _fix(notional / price, flt["stepSize"])
+    qty = _fix_nearest(notional / price, flt["stepSize"])
 
     if qty <= 0:
         return {"error": f"数量计算为 0（保证金 {margin}U × {leverage}x / 价 {price} / step {flt['stepSize']}）"}
@@ -465,6 +470,59 @@ def open_market(role: str, account: str, symbol: str, side: str,
     except Exception as e:
         _maybe_clear_hedge_on_4061(account, e)
         return {"error": str(e)}
+
+
+@trace_call
+@log_call("preview_open_market")
+def preview_open_market(role: str, account: str, symbol: str, side: str,
+                        margin: float, leverage: int,
+                        margin_type: str = "CROSSED") -> dict:
+    """开仓预览：用和 open_market 完全一样的逻辑算出真实 qty/price/notional，但不下单。
+    目的：让玄玄/天天对话时拿真实数字报给老板，杜绝 LLM 口算取整偏差。
+    """
+    account, side, c, err = _prepare_open(role, account, side)
+    if err:
+        return err
+
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        f_ft = ex.submit(_get_filters, c, symbol)
+        f_mp = ex.submit(_mark_price, c, symbol)
+        f_hg = ex.submit(_is_hedge, c, account)
+    try:
+        flt = f_ft.result()
+    except Exception as e:
+        return {"error": f"获取交易对精度失败: {e}"}
+    try:
+        price = f_mp.result()
+    except Exception as e:
+        return {"error": f"获取标记价失败: {e}"}
+    hedge = f_hg.result()
+
+    notional_req = margin * leverage
+    qty = _fix_nearest(notional_req / price, flt["stepSize"])
+    if qty <= 0:
+        return {"error": f"数量计算为 0（保证金 {margin}U × {leverage}x / 价 {price} / step {flt['stepSize']}）"}
+
+    notional_real = qty * price
+    margin_used = notional_real / leverage
+    min_notional = flt.get("minNotional", 5)
+
+    return {
+        "ok": True,
+        "account": account, "symbol": symbol, "side": side,
+        "price": price,
+        "qty": qty,
+        "stepSize": flt["stepSize"],
+        "leverage": leverage,
+        "margin_type": margin_type,
+        "margin_requested": margin,
+        "margin_used": margin_used,
+        "notional_requested": notional_req,
+        "notional": notional_real,
+        "min_notional": min_notional,
+        "min_notional_ok": notional_real >= min_notional,
+        "hedge": hedge,
+    }
 
 
 @trace_call
@@ -745,7 +803,7 @@ def open_limit(role: str, account: str, symbol: str, side: str,
     if limit_price <= 0:
         return {"error": f"挂单价异常: {price} → {limit_price}"}
     notional = margin * leverage
-    qty = _fix(notional / limit_price, flt["stepSize"])
+    qty = _fix_nearest(notional / limit_price, flt["stepSize"])
     if qty <= 0:
         return {"error": f"数量计算为 0（保证金 {margin}U × {leverage}x / 价 {limit_price} / step {flt['stepSize']}）"}
 
@@ -885,8 +943,10 @@ def open_liq(role: str, account: str, symbol: str, side: str,
 # 全账户聚合
 # ══════════════════════════════════════════
 
-def _fanout(role: str, fn) -> dict:
-    """并行对所有有权限账户执行 fn(role, account)。失败写入 {"error": ...}。"""
+def _fanout(role: str, fn, per_account_timeout: float = 8.0) -> dict:
+    """并行对所有有权限账户执行 fn(role, account)。
+    2026-04-26: 加 per_account_timeout（默认 8s），单账户卡死不堵全调度。
+    失败写入 {"error": ...}。"""
     names = [a["name"] for a in list_accounts(enabled_only=True)
              if check(role, "query", a["name"])]
     if not names:
@@ -898,10 +958,16 @@ def _fanout(role: str, fn) -> dict:
         except Exception as e:
             return name, {"error": str(e)}
 
-    out = {}
+    out: dict = {}
     with ThreadPoolExecutor(max_workers=min(len(names), 4)) as ex:
-        for name, result in ex.map(_one, names):
-            out[name] = result
+        futures = {ex.submit(_one, n): n for n in names}
+        # 用 future.result(timeout) 单账户超时不影响其他账户
+        for fut, n in futures.items():
+            try:
+                name, result = fut.result(timeout=per_account_timeout)
+                out[name] = result
+            except Exception as e:
+                out[n] = {"error": f"timeout/异常: {type(e).__name__}: {e}"}
     return out
 
 

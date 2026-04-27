@@ -66,6 +66,12 @@ def _pick_short_position(positions: list[dict], symbol: str) -> dict | None:
 def ensure_bottom(force: bool = False) -> dict:
     """检查底仓；缺了就开。返回 {ok, action, detail}。"""
     cfg = _load_cfg()
+    # 2026-04-26: 账户级总开关（mock_short_enabled=false 时彻底跳过，老大手动操盘）
+    if not cfg.get("mock_short_enabled", True):
+        msg = "[bottom] mock_short_enabled=false → 跳过自动底仓管理（手动操盘）"
+        logger.info(msg)
+        return {"ok": True, "action": "disabled_globally",
+                "detail": "mock_short_enabled=false"}
     mode = (cfg.get("system") or {}).get("mode", "shadow")
     ms = cfg.get("mock_short") or {}
     role = ms.get("role", "玄玄")

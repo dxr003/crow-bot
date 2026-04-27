@@ -8,7 +8,7 @@ box:
   mother:
     lower: 58000
     upper: 88000
-  center_axis: 73000
+  # 大箱中心 = (mother.lower + mother.upper) / 2，动态计算不再写字段
   small:                     # 由 calc_small_box 每4小时自动更新写入 state.json
     lower: 73000
     upper: 78000
@@ -32,3 +32,17 @@ position:
 # TODO: jc1 加仓触发参数（加仓间距/频率限制，防止区段快速切换导致频繁加仓）
 # TODO: js1 减仓触发参数（减仓到线是否需要确认延迟）
 # TODO: mr1 保证金补给规则（补给时机、补给金额、场外池低水位报警）
+
+# 潮汐镜像卡片（实盘存在则镜像真仓，否则用下面的模拟参数）
+# 2026-04-26 20:50 老大关闭币安2 潮汐自动执行 → mock_short_enabled: true→false
+# 现状：bn2 上 BTC 空 0.015 是老大手动开的，归手动管，潮汐不再接管
+mock_short_enabled: false
+mock_short:
+  active: false
+  role:    玄玄          # executor 角色
+  account: 币安2         # 读哪个账户的实盘仓位
+  symbol:  BTCUSDT       # 镜像币种
+  # 模拟回退参数（无实盘仓位时使用）
+  size_u:    100
+  leverage:  3
+  liq_price: 88000

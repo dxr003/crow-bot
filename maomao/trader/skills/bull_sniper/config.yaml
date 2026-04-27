@@ -1,6 +1,6 @@
 bull_sniper:
   enabled: true
-  mode: alert                 # auto / alert / off（2026-04-18 15:31 爸爸：币安2 开启自动执行）
+  mode: "off"                 # auto / alert / off（必须加引号！YAML 1.1 把 off 解析成 False，导致 buyer.py:181 永远跳不进 mode=off 分支 → 4-27 凌晨 bn4 自动开 4 单根因）
   group_notify: true         # 群组交易通知开关（开仓成功/失败推群组）
 
   # ── 多账户执行（信号触发时并发执行，各账户独立） ──
@@ -12,7 +12,8 @@ bull_sniper:
       api_key_env: BINANCE_API_KEY
       secret_env: BINANCE_SECRET_KEY
     币安2:
-      enabled: true
+      # 2026-04-25 12:18 开 bn2 实盘 → 2026-04-26 20:44 老大关闭（保留 bn4 单跑）
+      enabled: false
       api_key_env: BINANCE2_API_KEY
       secret_env: BINANCE2_API_SECRET
     币安3:
@@ -24,7 +25,8 @@ bull_sniper:
     币安4:
       # 专攻组六账户，保守策略，阈值待定
       # key 在 /root/safe/zhuangongliu_binance.env，启用前需让 bull-sniper.service 加载此文件
-      enabled: false
+      # 2026-04-25 04:12 老大开启双跑（bn2+bn4 独立 5 笔）
+      enabled: true
       api_key_env: ZGL_BINANCE_API_KEY
       secret_env: ZGL_BINANCE_API_SECRET
 
@@ -156,18 +158,15 @@ bull_sniper:
   max_slippage_pct: 2          # 滑点>2%放弃（v3.1简化）
   min_available_balance: 150   # 可用余额<150U跳过
 
-  # ── 移动止盈 ──
-  custom_trailing_enabled: true   # true=限价单移动止盈，false=币安原生
-  # ── 以下 trailing 段为死配置，custom_trailing_enabled=true 时不启用，实际跑 trailing_limit ──
-  trailing:
-    activation_pct: 60         # 浮盈≥60%激活
-    pullback_trigger: 25
-    tolerance: 3
-  trailing_limit:
-    activation_profit_pct: 25  # 浮盈≥25%激活（2026-04-23 60→25）
-    pullback_pct: 20           # 回撤20%止盈（2026-04-23 40→20）
-    poll_interval_sec: 30
-    safety_above_entry: true   # 止盈价不低于开仓价
+  # ── 移动止盈（2026-04-25 统一走 trader.trailing_layered）──
+  # 下掉币安原生 TRAILING_STOP_MARKET + trailing_limit 自建两条旧路径。
+  # 所有买入成功后，buyer.py 调 trailing_layered.activate(profile=...)。
+  # 参数定义在 /root/maomao/trader/trailing_layered.py PROFILES 字典：
+  #   sniper_bull_limit  激活 25% / 回撤 20% / 减 100%（和原 trailing_limit 等价）
+  #   sniper_bull_layer1 激活 15% / 回撤 10% / 减 100%
+  #   sniper_bull_layer2 激活 35% / 回撤 15% / 减 100%
+  # 要改参数 → 改 trailing_layered.py 的 PROFILES，不要在此处加开关。
+  layered_trailing_profile: sniper_bull_limit
 
   # ── 滚仓 ──
   rolling:
@@ -180,9 +179,9 @@ bull_sniper:
   btc_circuit_breaker_pct: 2
 
   # ── 冷却 ──
-  cooldown_after_tp_hours: 0           # v3.4测试模式全清零
-  cooldown_after_sl_hours: 0           # v3.4测试模式全清零
-  cooldown_after_timeout_hours: 0      # v3.4测试模式全清零
+  cooldown_after_tp_hours: 1           # 2026-04-26 0→1（DUSDT 止盈32s追高+12.7%根因）
+  cooldown_after_sl_hours: 1.5         # 2026-04-26 16:42 改 3→1.5（复盘发现 ORCA 09:53/BSB 14:30 反弹大单会被 3h 误伤）
+  cooldown_after_timeout_hours: 2      # 2026-04-26 0→2（24h没爆发的币需冷静期）
   cooldown_after_veto_min: 0           # v3.4测试模式全清零
   cooldown_price_release_pct: 0         # 2026-04-18 v3.4 100→0（关掉价格解除，避免止损后循环买入）
   cooldown_price_release_on_sl: false   # 2026-04-18 v3.4 true→false（止损冷却不受价格解除）

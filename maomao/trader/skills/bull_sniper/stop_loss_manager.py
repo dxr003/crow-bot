@@ -101,20 +101,24 @@ def _cancel_algo_order(symbol: str, algo_id, key: str, secret: str) -> bool:
 
 def _place_algo_stop_market(symbol: str, stop_price: float, qty: float,
                             key: str, secret: str) -> str | None:
-    """挂 STOP_MARKET algoOrder，返回 algoId 或 None"""
+    """挂 STOP_MARKET algoOrder，返回 algoId 或 None
+    2026-04-26 01:40 老大：修 -1102 'algotype' 缺失 bug
+    对齐 buyer.py 的成功挂法（algoType=CONDITIONAL + STOP_MARKET + triggerPrice + closePosition）
+    """
     try:
         import hmac, hashlib
         from urllib.parse import urlencode
 
         ts = int(time.time() * 1000)
         params = {
-            "symbol": symbol,
-            "side": "SELL",
+            "algoType":     "CONDITIONAL",
+            "symbol":       symbol,
+            "side":         "SELL",
             "positionSide": "LONG",
-            "type": "STOP",
-            "quantity": str(qty),
-            "stopPrice": str(stop_price),
-            "timestamp": ts,
+            "type":         "STOP_MARKET",
+            "triggerPrice": str(stop_price),
+            "closePosition": "true",
+            "timestamp":    ts,
         }
         sig = hmac.new(secret.encode(), urlencode(params).encode(), hashlib.sha256).hexdigest()
         params["signature"] = sig
@@ -188,25 +192,31 @@ def upgrade_stop_loss(symbol: str, position: dict, cfg: dict,
         f"新止损@{new_stop}（-{new_pct}%）"
     )
 
-    # 1. 撤旧单（失败不阻断，继续挂新单）
-    if old_algo_id:
-        _cancel_algo_order(symbol, old_algo_id, key, secret)
-
-    # 2. 拿当前持仓数量
+    # 2026-04-26 01:40 老大：改"先撤后挂"→"先挂新→成功后撤旧"避免裸奔（ORCA 事故）
+    # 拿当前持仓数量
     qty = _get_position_qty(symbol, key, secret)
     if qty <= 0:
         logger.warning(f"[SL升级] {symbol} 持仓数量=0，跳过挂单")
-        position["sl_upgraded"] = True  # 标记避免重试
+        position["sl_upgraded"] = True
         return False
 
-    # 3. 挂新止损
+    # 1. 先挂新 SL（closePosition=true 不依赖 qty，但保留 qty 校验防止仓位已空）
     new_algo_id = _place_algo_stop_market(symbol, new_stop, qty, key, secret)
+    if not new_algo_id:
+        # 挂失败：旧 SL 还在生效，标记防重试，position 字段不动
+        logger.warning(f"[SL升级] {symbol} 新 SL 挂失败，旧 SL 保留生效 algoId={old_algo_id}")
+        position["sl_upgraded"] = True
+        return False
 
-    # 4. 更新 position 状态（无论挂单成功与否都标记 upgraded，避免循环重试）
+    # 2. 新挂成功才撤旧（短窗口内可能两个 SL 并存，触发其一即平仓 closePosition 自动取消另一）
+    if old_algo_id:
+        _cancel_algo_order(symbol, old_algo_id, key, secret)
+
+    # 3. 更新 position
     position["sl_upgraded"] = True
-    position["sl_algo_id"] = new_algo_id or old_algo_id
+    position["sl_algo_id"] = new_algo_id
     position["sl_pct"] = new_pct
-    return new_algo_id is not None
+    return True
 
 
 def upgrade_all_positions(state: dict, cfg: dict,

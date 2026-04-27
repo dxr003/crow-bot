@@ -390,9 +390,10 @@ def get_chain_score(symbol: str, cfg: dict = None) -> dict:
     if e4b > 0:
         reasons.append(f"5m加速+{e4b}")
 
+    score = min(score, 6)
     reason = " | ".join(reasons) if reasons else "E因子无加分"
     detail["E_total"] = score
-    log_lines.append(f"总分={score:+d}")
+    log_lines.append(f"总分={score:+d}(上限6)")
     logger.info(" | ".join(log_lines))
 
     return {
