@@ -78,10 +78,24 @@ def _md_to_html(text: str) -> str:
     for i, code in enumerate(_inlines):
         text = text.replace(f"\x00CODEINLINE{i}\x00", f"<code>{code}</code>")
 
-    # ── 13. HTML特殊字符转义（只转义未被标签包裹的 < > &） ──
-    # 不做全局转义，因为上面已经生成了HTML标签
-    # 只转义残留的裸 & （不属于 &amp; &lt; 等）
+    # ── 13. HTML 特殊字符转义（v2 2026-04-26：全裸字符转义+合法标签保护）──
+    # 旧版只转 &，导致 LLM 输出 "score<60" / "if x<5" / "a&b" 时 TG 解析失败
+    # 触发降级路径剥光所有标签 → 复制按钮+加粗+代码块全消失（"美化反复消失"根因）
+    # 13.1 先把上面已生成的合法 HTML 标签抽出来占位
+    _legal = []
+    def _save_tag(m):
+        _legal.append(m.group(0))
+        return f"\x00TAG{len(_legal)-1}\x00"
+    text = re.sub(
+        r'</?(?:b|i|s|u|code|pre|a|tg-spoiler)\b[^>]*>',
+        _save_tag, text
+    )
+    # 13.2 此时 text 里所有 < > & 都是裸字符，全部转义
     text = re.sub(r"&(?!amp;|lt;|gt;|quot;|#\d+;)", "&amp;", text)
+    text = text.replace('<', '&lt;').replace('>', '&gt;')
+    # 13.3 恢复合法标签
+    for i, t in enumerate(_legal):
+        text = text.replace(f"\x00TAG{i}\x00", t)
 
     return text
 
@@ -311,7 +325,9 @@ def create_and_run_bot(env_path, claude_add_dir=None):
             if not anthropic_key:
                 await update.message.reply_text("⚠️ ANTHROPIC_API_KEY 未设置，无法读图")
                 return
-            gen = await api_gen_image(prompt, anthropic_key, model, system_prompt, image_b64)
+            # 2026-04-27 老大指令: 读图强制 Haiku 4.5（省 96% 费用），不跟 mode.json 走
+            # 原因: api_gen_image 走 ANTHROPIC_API_KEY 按量计费，读图不需要 Opus 智力
+            gen = await api_gen_image(prompt, anthropic_key, "claude-haiku-4-5-20251001", system_prompt, image_b64)
         else:
             gen = await claudecode_gen(prompt, add_dir=_add_dir, bot_dir=bot_dir, model=model)
         await ask_with_timer(update, gen, model)
@@ -429,57 +445,31 @@ def create_and_run_bot(env_path, claude_add_dir=None):
             return
         user_text = text_override if text_override is not None else update.message.text
         if bot_dir in ("maomao", "tiantian"):
-            import sys; sys.path.insert(0, f'/root/{bot_dir}')
-            stripped = user_text.strip()
-            if stripped in _CONFIRM_WORDS:
-                from trader.preview import pop_latest_pending
-                order = pop_latest_pending()
-                if order is not None:
-                    from trader.order import execute
-                    try:
-                        result = execute(order)
-                        try:
-                            from trader.trade_log import log_trade
-                            log_trade(order=order, result=result)
-                        except ImportError:
-                            pass
-                    except Exception as e:
-                        result = f"❌ 执行失败: {e}"
-                        try:
-                            from trader.trade_log import log_trade
-                            log_trade(order=order, error=str(e))
-                        except ImportError:
-                            pass
-                    await update.message.reply_text(result, parse_mode=ParseMode.HTML)
-                    return
-            elif stripped in _CANCEL_WORDS:
-                from trader.preview import pop_latest_pending
-                order = pop_latest_pending()
-                if order is not None:
-                    await update.message.reply_text("❌ 已取消")
-                    return
-            from trader.router import try_trade_command
-            trade_result = try_trade_command(user_text)
-            if trade_result is not None:
-                result_text, uid = trade_result
-                await update.message.reply_text(result_text, parse_mode=ParseMode.HTML)
-                if uid is None:
-                    try:
-                        from trader.trade_log import log_trade
-                        log_trade(raw_text=user_text, result=result_text)
-                    except ImportError:
-                        pass
-                if uid is not None:
-                    async def _auto_cancel():
-                        import asyncio as _asyncio
-                        await _asyncio.sleep(60)
-                        from trader.preview import pop_pending
-                        if pop_pending(uid) is not None:
-                            try:
-                                await update.message.reply_text("⏱ 已超时取消")
-                            except Exception:
-                                pass
-                    asyncio.create_task(_auto_cancel())
+            import sys
+            if '/root/maomao' not in sys.path:
+                sys.path.insert(0, '/root/maomao')
+            # 2026-04-21 入口路由统一切到 trader.multi.dispatch
+            # （替代老 trader.router/order/exchange 单账户路径，
+            #  根因：老路径默认币安1+全仓，导致跨账户指令静默落点错误）
+            role = {"maomao": "玄玄", "tiantian": "天天"}.get(bot_dir, bot_dir)
+            try:
+                from trader.multi.dispatch import try_dispatch
+                reply, status = try_dispatch(role, user_text)
+            except Exception as e:
+                logger.error(f"[dispatch] {role} 异常: {e}", exc_info=True)
+                reply, status = (f"❌ 派发异常: {e}", "err")
+            if status != "none":
+                try:
+                    await update.message.reply_text(reply, parse_mode=ParseMode.HTML)
+                except Exception:
+                    await update.message.reply_text(reply)
+                try:
+                    from trader.trade_log import log_trade
+                    log_trade(raw_text=user_text,
+                              result=reply if status == "ok" else None,
+                              error=reply if status == "err" else None)
+                except ImportError:
+                    pass
                 return
         await ask_claude(update, user_text)
 
@@ -496,6 +486,37 @@ def create_and_run_bot(env_path, claude_add_dir=None):
         image_b64 = base64.b64encode(buf.read()).decode()
         caption = update.message.caption or "请描述这张图片"
         await ask_claude(update, caption, image_b64)
+
+    @admin_only
+    async def handle_document(update, ctx):
+        doc = update.message.document
+        fname = doc.file_name or "file"
+        mime = doc.mime_type or ""
+        file = await ctx.bot.get_file(doc.file_id)
+        buf = io.BytesIO()
+        await file.download_to_memory(buf)
+        buf.seek(0)
+        caption = update.message.caption or ""
+
+        if mime == "application/pdf" or fname.lower().endswith(".pdf"):
+            try:
+                import pypdf
+                reader = pypdf.PdfReader(buf)
+                text = "\n".join(p.extract_text() or "" for p in reader.pages)
+                prompt = f"文件名：{fname}\n{caption}\n\n以下是PDF内容：\n\n{text[:12000]}"
+                await ask_claude(update, prompt)
+            except Exception as e:
+                await update.message.reply_text(f"PDF解析失败: {e}")
+        elif mime.startswith("text/") or fname.lower().endswith((".txt", ".md", ".yaml", ".json", ".py")):
+            text = buf.read().decode("utf-8", errors="replace")
+            prompt = f"文件名：{fname}\n{caption}\n\n以下是文件内容：\n\n{text[:12000]}"
+            await ask_claude(update, prompt)
+        else:
+            upload_dir = Path(f"/root/{bot_dir}/uploads")
+            upload_dir.mkdir(exist_ok=True)
+            save_path = upload_dir / fname
+            save_path.write_bytes(buf.read())
+            await update.message.reply_text(f"已保存到 {save_path}（不支持直接解析 {mime}）")
 
     @admin_only
     async def cmd_restart(update, ctx):
@@ -755,6 +776,7 @@ def create_and_run_bot(env_path, claude_add_dir=None):
     buffered_handle_text = make_buffered_handler(handle_text, admin_id=admin_id)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, buffered_handle_text))
     app.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, handle_photo))
+    app.add_handler(MessageHandler(filters.Document.ALL & filters.ChatType.PRIVATE, handle_document))
     from telegram.ext import CallbackQueryHandler
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_error_handler(error_handler)
